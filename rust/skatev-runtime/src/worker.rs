@@ -83,6 +83,8 @@ pub enum Job {
     RidingStyle(u32),
     /// Truck tightness, wheel hardness (0..1).
     Equipment(f32, f32),
+    /// Trainer multipliers and hold-fakie (overlay patch 0048).
+    Trainer([f32; 11], bool),
     /// Metres behind a car's rear the skitch grab line sits.
     SkitchStandoff(f32),
     /// Play a showcase line (`line.rs`) from its start while skating.
@@ -1028,6 +1030,13 @@ fn run(
                         s.set_equipment(truck, wheel);
                     }
                 }
+                Job::Trainer(tuning, hold_fakie) => {
+                    log(&format!("trainer: {tuning:?}, hold fakie {hold_fakie}"));
+                    prefs.trainer = (tuning, hold_fakie);
+                    if let Some(s) = session.as_mut() {
+                        s.set_trainer(tuning, hold_fakie);
+                    }
+                }
                 Job::PhysicsLevel(level) => pending_live = Some(level),
                 Job::SkitchStandoff(metres) => {
                     log(&format!("skitch standoff: {metres:.2} m behind the rear"));
@@ -1765,12 +1774,14 @@ struct SkaterPrefs {
     posture: u32,
     style: u32,
     equipment: (f32, f32),
+    /// Trainer multipliers (TrainerTuning order) and hold-fakie (patch 0048).
+    trainer: ([f32; 11], bool),
 }
 
 impl Default for SkaterPrefs {
     fn default() -> Self {
         // Retail's reset values: no gestures, posture or style, 0.7 trucks and wheels.
-        Self { gestures: None, posture: 0, style: 0, equipment: (0.7, 0.7) }
+        Self { gestures: None, posture: 0, style: 0, equipment: (0.7, 0.7), trainer: ([1.0; 11], false) }
     }
 }
 
@@ -1785,6 +1796,7 @@ fn apply_settings(s: &mut Session, hall_of_meat: bool, bail: Option<f32>, air: O
     s.set_posture(prefs.posture);
     s.set_riding_style(prefs.style);
     s.set_equipment(prefs.equipment.0, prefs.equipment.1);
+    s.set_trainer(prefs.trainer.0, prefs.trainer.1);
     s.set_bail_maximum_time(bail);
     s.set_air_time_limit(air);
     s.set_lip_rule(lip);

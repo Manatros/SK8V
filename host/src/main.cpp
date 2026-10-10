@@ -98,6 +98,10 @@ struct Config {
     int ridingStyle = 0;           // RidingStyle=Default|Loose|Gonzo|Aggressive: Skate 3's riding animations (kRidingStyles index)
     float truckTightness = 0.7f;   // TruckTightness: 0 loose .. 1 tight (Skate 3 default 0.7)
     float wheelHardness = 0.7f;    // WheelHardness: 0 soft .. 1 hard (Skate 3 default 0.7)
+    // Trainer multipliers (1 = Skate 3), overlay patch 0048: Pop, GrindPop, PushSpeed,
+    // PushPower, Braking, Steering, Wobble, OffboardJump, Grip, TurnPower, ManualDrag.
+    float trainer[11] = {1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1};
+    bool holdFakie = false;        // HoldFakie: rolling fakie stays fakie
     int skaterTriangles = 3000;
     bool dynamicWorld = true;
     float dynamicRadius = 35.0f;
@@ -273,6 +277,18 @@ const Key kKeys[] = {
      }},
     {"TruckTightness", Store<&Config::truckTightness>},
     {"WheelHardness", Store<&Config::wheelHardness>},
+    {"Pop", [](Config& c, const std::string& v) { Parse(v, c.trainer[0]); }},
+    {"GrindPop", [](Config& c, const std::string& v) { Parse(v, c.trainer[1]); }},
+    {"PushSpeed", [](Config& c, const std::string& v) { Parse(v, c.trainer[2]); }},
+    {"PushPower", [](Config& c, const std::string& v) { Parse(v, c.trainer[3]); }},
+    {"Braking", [](Config& c, const std::string& v) { Parse(v, c.trainer[4]); }},
+    {"Steering", [](Config& c, const std::string& v) { Parse(v, c.trainer[5]); }},
+    {"Wobble", [](Config& c, const std::string& v) { Parse(v, c.trainer[6]); }},
+    {"OffboardJump", [](Config& c, const std::string& v) { Parse(v, c.trainer[7]); }},
+    {"Grip", [](Config& c, const std::string& v) { Parse(v, c.trainer[8]); }},
+    {"TurnPower", [](Config& c, const std::string& v) { Parse(v, c.trainer[9]); }},
+    {"ManualDrag", [](Config& c, const std::string& v) { Parse(v, c.trainer[10]); }},
+    {"HoldFakie", Store<&Config::holdFakie>},
     {"SkitchStandoff", Store<&Config::skitchStandoff>},
     {"SkaterTriangles", Store<&Config::skaterTriangles>},
     {"DynamicWorld", Store<&Config::dynamicWorld>},
@@ -2513,6 +2529,9 @@ menu::Apply Bound(const char* key, std::function<void()> then = {}) {
     };
 }
 
+// The trainer multipliers and hold-fakie to the runtime (overlay patch 0048).
+void ApplyTrainer() { g_runtime.SetTrainer(g_config.trainer, g_config.holdFakie); }
+
 void ApplyQuirk() {
     const Config& c = g_config;
     SvQuirkConfig q{};
@@ -2572,6 +2591,18 @@ std::vector<menu::Page> MenuPages(Session& s) {
                Bound("TruckTightness", [] { g_runtime.SetEquipment(g_config.truckTightness, g_config.wheelHardness); })),
         Number("Wheel hardness", "WheelHardness", D.wheelHardness, 0, 1, 0.05f, Fixed("%.2f"),
                Bound("WheelHardness", [] { g_runtime.SetEquipment(g_config.truckTightness, g_config.wheelHardness); })),
+        Number("Pop height", "Pop", 1, 0.5f, 5, 0.05f, Fixed("%.2fx"), Bound("Pop", [] { ApplyTrainer(); })),
+        Number("Grind pop", "GrindPop", 1, 0.5f, 5, 0.05f, Fixed("%.2fx"), Bound("GrindPop", [] { ApplyTrainer(); })),
+        Number("Push speed", "PushSpeed", 1, 0.5f, 3, 0.05f, Fixed("%.2fx"), Bound("PushSpeed", [] { ApplyTrainer(); })),
+        Number("Push power", "PushPower", 1, 0.5f, 3, 0.05f, Fixed("%.2fx"), Bound("PushPower", [] { ApplyTrainer(); })),
+        Number("Braking", "Braking", 1, 0.5f, 3, 0.05f, Fixed("%.2fx"), Bound("Braking", [] { ApplyTrainer(); })),
+        Number("Steering", "Steering", 1, 0.5f, 3, 0.05f, Fixed("%.2fx"), Bound("Steering", [] { ApplyTrainer(); })),
+        Number("Wobble", "Wobble", 1, 0.1f, 3, 0.05f, Fixed("%.2fx"), Bound("Wobble", [] { ApplyTrainer(); })),
+        Number("Off-board jump", "OffboardJump", 1, 0.5f, 3, 0.05f, Fixed("%.2fx"), Bound("OffboardJump", [] { ApplyTrainer(); })),
+        Number("Grip", "Grip", 1, 0.5f, 3, 0.05f, Fixed("%.2fx"), Bound("Grip", [] { ApplyTrainer(); })),
+        Number("Turn power", "TurnPower", 1, 0.5f, 3, 0.05f, Fixed("%.2fx"), Bound("TurnPower", [] { ApplyTrainer(); })),
+        Number("Manual drag", "ManualDrag", 1, 0.1f, 3, 0.05f, Fixed("%.2fx"), Bound("ManualDrag", [] { ApplyTrainer(); })),
+        Flag("Hold fakie", "HoldFakie", false, Bound("HoldFakie", [] { ApplyTrainer(); })),
         Flag("Ramp lip rule", "LipRule", D.lipRule, Bound("LipRule", [] { g_runtime.SetLipRule(g_config.lipRule); })),
         Number("Air time limit", "AirTimeLimit", D.airTimeLimit, -1, 120, 5, LimitText,
                Bound("AirTimeLimit", [] { g_runtime.SetAirLimit(g_config.airTimeLimit); })),
@@ -2757,6 +2788,9 @@ void ScriptMain() {
              g_runtime.SetPosture(cfg.posture) && g_runtime.SetRidingStyle(cfg.ridingStyle) &&
                      g_runtime.SetEquipment(cfg.truckTightness, cfg.wheelHardness)
                  ? "runtime option present" : "runtime option absent");
+        Logf("SkateV Legacy: trainer pop %.2f, grind pop %.2f, push %.2f/%.2f, hold fakie %d (%s)", cfg.trainer[0], cfg.trainer[1],
+             cfg.trainer[2], cfg.trainer[3], cfg.holdFakie ? 1 : 0,
+             g_runtime.SetTrainer(cfg.trainer, cfg.holdFakie) ? "runtime option present" : "runtime option absent");
         g_runtime.SetVerboseLog(cfg.verboseLog);
     }
 

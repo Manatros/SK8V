@@ -50,6 +50,8 @@ bool RuntimeBridge::Load(const wchar_t* dllPath, const std::string& dataRoot, co
     sym(setPosture_, "sv_set_posture");
     sym(setRidingStyle_, "sv_set_riding_style");
     sym(setEquipment_, "sv_set_equipment");
+    // Optional: trainer tuning.
+    setTrainer_ = reinterpret_cast<SvSetTrainerFn>(GetProcAddress(module_, "sv_set_trainer"));
     sym(setVerboseLog_, "sv_set_verbose_log");
     sym(setSkitchStandoff_, "sv_set_skitch_standoff");
     sym(skitchVehicle_, "sv_skitch_vehicle");
@@ -227,6 +229,10 @@ bool RuntimeBridge::SetPosture(int profile) {
 
 bool RuntimeBridge::SetRidingStyle(int style) {
     return runtime_ && setRidingStyle_ && style >= 0 && setRidingStyle_(runtime_, static_cast<std::uint32_t>(style)) != 0;
+}
+
+bool RuntimeBridge::SetTrainer(const float (&tuning)[11], bool holdFakie) {
+    return runtime_ && setTrainer_ && setTrainer_(runtime_, tuning, holdFakie ? 1u : 0u) != 0;
 }
 
 bool RuntimeBridge::SetEquipment(float truck, float wheel) {
