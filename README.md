@@ -61,6 +61,7 @@ Without a controller, the keyboard and mouse play Skate. The keys are in `SkateV
 | `Space` | Pop: hold to crouch, let go to ollie |
 | Arrow keys / numpad | Trick stick: type the motion (kickflip: down, then up-left) |
 | `E` / hold `E` | Mount or dismount / put the board away (Y) |
+| `F` | Put the board away and back to GTA in one press (steps off first) |
 | `Q` | Hippie jump |
 | `T` / `Ctrl` | X / B |
 

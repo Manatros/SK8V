@@ -751,6 +751,7 @@ struct Session {
     DWORD watchSince = 0;         // ... since (wall time)
     int watchFrames = 0;          // ... script frames since (a pause stops these)
     DWORD yHeldSince = 0;         // Y pressed while skating (hold to put the board away)
+    DWORD keyLeaveUntil = 0;      // keyboard F: Y held for the put-away time
     bool yWasDown = true;
     bool trackingStarted = false; // preserves opt-out until the first board action
     // GTA ped state saved on entry and restored on leaving.
@@ -2445,7 +2446,13 @@ void LifecycleFrame(Session& s, const Config& cfg, bool f6) {
         break;
     }
     case LifeState::Skating: {
-        const SvPad pad = ReadPad(); // once per frame
+        SvPad pad = ReadPad(); // once per frame
+        // Keyboard: F (GTA's enter/exit) puts the board away in one press, as
+        // Y held does: Skate steps off first, then the board goes away.
+        if (g_keyboard && !menu::IsOpen() && Call<BOOL>(gta::IS_DISABLED_CONTROL_JUST_PRESSED, 0, 23))
+            s.keyLeaveUntil = now + cfg.putAwayHoldMs + 150;
+        if (s.keyLeaveUntil && now < s.keyLeaveUntil) pad.buttons |= 0x8000;
+        else s.keyLeaveUntil = 0;
         // Hold Y to put the board away. The press still reaches Skate, so
         // it steps off first, then puts the board away while Y stays down.
         // Only a press made while skating counts; a Y held at entry does not.
