@@ -8,6 +8,7 @@
 SK8V brings *Skate 3*'s Flick-It controls, board/skater physics, grinds, manuals, skitching, tricks, combos, bails, scoring, session markers, and Hall of Meat into **GTA V Legacy Story Mode**. Skate's gameplay runs alongside GTA's characters, traffic, weapons, radio, and world interactions. Skate 3’s own audio engine runs inside GTA’s mixer, so wheels sound different on every GTA surface. Things like concrete, asphalt, wood, metal, tile all sound different, and your wheels click over the cracks and seams in the pavement, with almost complete coverage.
 
 ## Requirements
+- **Controller is Required**
 - **SSD is recommended for installation**
 - **Windows x64**, **GTA V Legacy 1.0.3889.0**, and **ScriptHookV v3889.0 / 1158.13** with its ASI loader. (https://www.dev-c.com/gtav/scripthookv/)
 - **A controller:** Xbox, or PlayStation (DualShock 4 / DualSense, USB or Bluetooth). Keyboard skating is not supported. On a PlayStation pad, Share (or the touchpad) is Back and Options is Start.
