@@ -30,6 +30,7 @@
 #include "thread_census.h"
 #include "menu.h"
 #include "ps_pad.h"
+#include "skate_map.h"
 #include "map_states.h"
 #include "pack_loader.h"
 #include "pose_hook.h"
@@ -55,6 +56,8 @@ struct Config {
     std::string worldCache;
     float pedZOffset = 1.0f;  // ped origin above Skate's ground contact
     float fovScale = 1.0f;
+    bool gpsWhileSkating = true; // GpsWhileSkating: GTA's route to the waypoint stays on in Skate mode
+    bool skateSpots = true;      // SkateSpots: GTA's skate parks as blips on the map
     bool drawBoard = true;    // DrawBoard: the native board object (and its mesh fallback)
     bool showDebug = false;   // ShowDebug=1: old debug text HUD (the original Skate HUD is hud_overlay)
     bool verboseLog = false;  // VerboseLog=1: periodic runtime log lines (perf, skater trace, collision streaming)
@@ -222,6 +225,8 @@ const Key kKeys[] = {
     {"WorldCache", Store<&Config::worldCache>},
     {"PedZOffset", Store<&Config::pedZOffset>},
     {"CameraFovScale", Store<&Config::fovScale>},
+    {"GpsWhileSkating", Store<&Config::gpsWhileSkating>},
+    {"SkateSpots", Store<&Config::skateSpots>},
     {"DrawBoard", Store<&Config::drawBoard>},
     {"ShowDebug", Store<&Config::showDebug>},
     {"VerboseLog", Store<&Config::verboseLog>},
@@ -2860,6 +2865,7 @@ void ScriptMain() {
         Lap(kPartRecords);
         gtaaudio::Tick(s.state == LifeState::Skating);
         Lap(kPartAudio);
+        skatemap::Tick(SkateOwnsPlayer(s), g_config.gpsWhileSkating, g_config.skateSpots);
         physlevel::Tick();
         Lap(kPartLevel);
         monitor.Work(monitor.Now() - workStart);

@@ -13,6 +13,10 @@ Snow=0
 RadioControls=1
 ; TrickAnalyzer: 1 = Skate 3's Trick Analyzer shows each trick's stick gesture (bottom centre); 0 = off.
 TrickAnalyzer=1
+; GpsWhileSkating: GTA's GPS route to the waypoint stays on while skating (as in a vehicle). 0 turns it off.
+GpsWhileSkating=1
+; SkateSpots: GTA's skate parks (Vespucci Beach, Hawick, Little Seoul, Strawberry, La Mesa) as map blips. 0 turns it off.
+SkateSpots=1
 DrawBoard=1
 ; Native Skate board: owned skeletal drawable, original texture/normal/specular inputs, GTA lighting and shadows.
 BoardNative=1
