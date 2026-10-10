@@ -44,6 +44,11 @@ namespace {
 using gta::Call;
 
 RuntimeBridge g_runtime;
+
+// SkateMods: the Skate runtime's handle for the SkateMods extras ASI (store,
+// HD board parts, paints, cameras, radio, GPS): it reads sv_get_output and
+// sv_get_board_pose with it from SkateVRuntime.dll. Null until Skate loaded.
+extern "C" __declspec(dllexport) void* __cdecl SkateModsRuntime() { return g_runtime.Handle(); }
 std::atomic<bool> g_toggleRequested{false}; // menu: Skate on/off
 FILE* g_log = nullptr;
 std::wstring g_gameDir;
