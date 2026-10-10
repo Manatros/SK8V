@@ -48,4 +48,8 @@ set_target_properties(SkateVLegacy PROPERTIES PREFIX "" SUFFIX ".asi")
 if(MSVC)
   target_compile_options(SkateVLegacy PRIVATE /W4 /permissive- /EHsc)
   target_compile_options(SkateVLegacy PRIVATE $<$<CONFIG:Release>:/O2>)
+  # Symbols for players' crash dumps (kept by build-release.py, never shipped); the
+  # binary names only the .pdb file, no local path.
+  target_compile_options(SkateVLegacy PRIVATE /Zi)
+  target_link_options(SkateVLegacy PRIVATE /DEBUG /OPT:REF /OPT:ICF /PDBALTPATH:%_PDB%)
 endif()
