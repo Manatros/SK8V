@@ -55,6 +55,7 @@ struct Config {
     std::string worldCache;
     float pedZOffset = 1.0f;  // ped origin above Skate's ground contact
     float fovScale = 1.0f;
+    bool keyboard = true;     // Keyboard: keyboard and mouse as a controller when none is connected (SkateVKeys.txt)
     bool drawBoard = true;    // DrawBoard: the native board object (and its mesh fallback)
     bool showDebug = false;   // ShowDebug=1: old debug text HUD (the original Skate HUD is hud_overlay)
     bool verboseLog = false;  // VerboseLog=1: periodic runtime log lines (perf, skater trace, collision streaming)
@@ -222,6 +223,7 @@ const Key kKeys[] = {
     {"WorldCache", Store<&Config::worldCache>},
     {"PedZOffset", Store<&Config::pedZOffset>},
     {"CameraFovScale", Store<&Config::fovScale>},
+    {"Keyboard", Store<&Config::keyboard>},
     {"DrawBoard", Store<&Config::drawBoard>},
     {"ShowDebug", Store<&Config::showDebug>},
     {"VerboseLog", Store<&Config::verboseLog>},
@@ -447,6 +449,17 @@ XInputGetStateFn PadGetState() {
     return fn;
 }
 
+// Keyboard and mouse: on when the runtime has them and the INI allows it.
+bool g_keyboard = false;
+
+// Whether GTA's window has the keyboard (keys pressed elsewhere are not skating).
+bool GameFocused() {
+    DWORD process = 0;
+    const HWND window = GetForegroundWindow();
+    if (window) GetWindowThreadProcessId(window, &process);
+    return window && process == GetCurrentProcessId();
+}
+
 SvPad ReadPadRaw() {
     // Polled every frame in and out of skate mode (board action). XInput is
     // slow on empty slots, so connected slots are read each frame and the
@@ -489,6 +502,21 @@ SvPad ReadPadRaw() {
         else if (havePs) Logf("SkateV Legacy: controller %s", ps);
         else Logf("SkateV Legacy: no controller connected");
         s_active = active, s_ps = havePs ? ps : nullptr;
+    }
+    // No controller at all: the keyboard and mouse as one (SkateVKeys.txt).
+    // GTA's look input carries the mouse; the settings menu releases the keys.
+    if (active == XUSER_MAX_COUNT && !havePs && g_keyboard) {
+        static DWORD s_last = now;
+        const float dt = static_cast<float>(now - s_last) / 1000.0f;
+        s_last = now;
+        static DWORD s_packet = 0;
+        SvPad keys{};
+        const float mx = Call<float>(gta::GET_DISABLED_CONTROL_NORMAL, 0, 1);
+        const float my = Call<float>(gta::GET_DISABLED_CONTROL_NORMAL, 0, 2);
+        if (g_runtime.KeyboardPad(mx, my, dt, GameFocused() && !menu::IsOpen(), keys)) {
+            keys.packet = ++s_packet;
+            return keys;
+        }
     }
     if (active == XUSER_MAX_COUNT) return pad;
     const XINPUT_GAMEPAD& g = st[active].Gamepad;
@@ -2724,6 +2752,12 @@ void ScriptMain() {
     } else {
         Logf("SkateV Legacy: runtime ABI %u loaded (host ABI %u); data '%s' cache '%s'", g_runtime.ApiVersion(),
              SKATEV_ABI_VERSION, cfg.dataRoot.c_str(), cfg.worldCache.c_str());
+        if (cfg.keyboard) {
+            std::uint32_t problems = 0;
+            const std::string keys = util::Narrow(g_gameDir + L"SkateVKeys.txt");
+            g_keyboard = g_runtime.KeyboardConfigure(keys, problems);
+            if (g_keyboard) Logf("SkateV Legacy: keyboard and mouse on (%s, %u unreadable line(s))", keys.c_str(), problems);
+        }
         Logf("SkateV Legacy: %zu exact prop and vehicle collision templates", DynamicWorld::LoadPropTemplates(cfg.worldCache));
         Logf("SkateV Legacy: %zu script-toggled map states with collision", mapstates::Load(cfg.worldCache));
         ApplyQuirk();

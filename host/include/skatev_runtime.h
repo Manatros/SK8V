@@ -337,6 +337,14 @@ using SvSetAirLimitFn = std::uint32_t(__cdecl*)(void*, float);
 // admission. Returns 1 when queued. Export: sv_set_lip_rule.
 using SvSetLipRuleFn = std::uint32_t(__cdecl*)(void*, std::uint32_t);
 
+// Keyboard and mouse as a controller (optional exports; contributed by GTAxSkate).
+// sv_keyboard_configure(rt, keys_file_utf8): loads the key file (written with the
+// defaults when missing); returns how many of its lines could not be read.
+// sv_keyboard_pad(rt, mouse_x, mouse_y, dt, active, out): this frame's pad from
+// the keys and the mouse look input; 1 when something is pressed (out filled).
+using SvKeyboardConfigureFn = std::uint32_t(__cdecl*)(void*, const char*);
+using SvKeyboardPadFn = std::uint32_t(__cdecl*)(void*, float, float, float, std::uint32_t, SvPad*);
+
 // sv_set_camera_type(rt, type): Skate 3's camera, 0 Low, 1 High (default). Export: sv_set_camera_type.
 using SvSetCameraTypeFn = std::uint32_t(__cdecl*)(void*, std::uint32_t);
 // sv_set_gestures(rt, up, down, left, right): Skate 3's d-pad gestures, catalog indices 0..36;

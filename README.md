@@ -50,6 +50,20 @@ python tools/prepare.py --skate "<Skate 3.iso or folder>" --gta "<GTA V folder>"
 | D-pad left/right, gun equipped | Change weapon |
 | Double-tap `X` on foot near a grabbable wall | GTA mantle, then return to Skate |
 
+### Keyboard and mouse
+
+Without a controller, the keyboard and mouse play Skate. The keys are in `SkateVKeys.txt` beside the game (written with these defaults on first start; rebind any action there, `Keyboard=0` in `SkateVLegacy.ini` turns it off):
+
+| Key | Skate |
+|---|---|
+| `W` `A` `S` `D` | Left stick (steer, walk) |
+| `Shift` | Push (A) |
+| `Space` | Pop: hold to crouch, let go to ollie |
+| Arrow keys / numpad | Trick stick: type the motion (kickflip: down, then up-left) |
+| `E` / hold `E` | Mount or dismount / put the board away (Y) |
+| `Q` | Hippie jump |
+| `T` / `Ctrl` | X / B |
+
 Swimming switches to GTA automatically and returns to Skate afterward. **Hall of Meat is on by default** and can be disabled in the SK8V menu, alongside other gameplay settings.
 
 ### Unable to save settings in the menu?

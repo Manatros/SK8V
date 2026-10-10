@@ -50,6 +50,9 @@ public:
     bool SetBailLimit(float seconds);
     bool SetAirLimit(float seconds);
     bool SetLipRule(bool enabled);
+    // Keyboard and mouse (optional exports): false when the runtime has none.
+    bool KeyboardConfigure(const std::string& utf8KeysFile, std::uint32_t& problems);
+    bool KeyboardPad(float mouseX, float mouseY, float dt, bool active, SvPad& out);
     bool SetDifficulty(int index);
     bool SetCameraType(int type);  // 0 Low, 1 High
     bool SetGestures(const int (&up_down_left_right)[4]);  // catalog indices; all < 0: off
@@ -95,6 +98,8 @@ private:
     SvSetBailLimitFn setBailLimit_ = nullptr;
     SvSetAirLimitFn setAirLimit_ = nullptr;
     SvSetLipRuleFn setLipRule_ = nullptr;
+    SvKeyboardConfigureFn keyboardConfigure_ = nullptr;
+    SvKeyboardPadFn keyboardPad_ = nullptr;
     SvSetDifficultyFn setDifficulty_ = nullptr;
     SvSetCameraTypeFn setCameraType_ = nullptr;
     SvSetGesturesFn setGestures_ = nullptr;

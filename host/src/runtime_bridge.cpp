@@ -56,6 +56,9 @@ bool RuntimeBridge::Load(const wchar_t* dllPath, const std::string& dataRoot, co
     sym(groundAt_, "sv_ground_at");
     sym(setPhysicsLevel_, "sv_set_physics_level");
     sym(playLine_, "sv_play_line");
+    // Optional: keyboard and mouse.
+    keyboardConfigure_ = reinterpret_cast<SvKeyboardConfigureFn>(GetProcAddress(module_, "sv_keyboard_configure"));
+    keyboardPad_ = reinterpret_cast<SvKeyboardPadFn>(GetProcAddress(module_, "sv_keyboard_pad"));
     if (!missing.empty()) {
         error = "SkateVRuntime.dll is missing required ABI exports: " + missing;
         return false;
@@ -206,6 +209,16 @@ bool RuntimeBridge::SetBailLimit(float seconds) {
 
 bool RuntimeBridge::SetAirLimit(float seconds) {
     return runtime_ && setAirLimit_(runtime_, seconds) != 0;
+}
+
+bool RuntimeBridge::KeyboardConfigure(const std::string& utf8KeysFile, std::uint32_t& problems) {
+    if (!runtime_ || !keyboardConfigure_) return false;
+    problems = keyboardConfigure_(runtime_, utf8KeysFile.c_str());
+    return true;
+}
+
+bool RuntimeBridge::KeyboardPad(float mouseX, float mouseY, float dt, bool active, SvPad& out) {
+    return runtime_ && keyboardPad_ && keyboardPad_(runtime_, mouseX, mouseY, dt, active ? 1u : 0u, &out) != 0;
 }
 
 bool RuntimeBridge::SetLipRule(bool enabled) {
