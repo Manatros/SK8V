@@ -10,6 +10,7 @@ SK8V brings *Skate 3*'s Flick-It controls, board/skater physics, grinds, manuals
 ## Requirements
 - **SSD is recommended for installation**
 - **Windows x64**, **GTA V Legacy 1.0.3889.0**, and **ScriptHookV v3889.0 / 1158.13** with its ASI loader. (https://www.dev-c.com/gtav/scripthookv/)
+- **A controller:** Xbox, or PlayStation (DualShock 4 / DualSense, USB or Bluetooth). Keyboard skating is not supported. On a PlayStation pad, Share (or the touchpad) is Back and Options is Start.
 - Your own Skate 3 Xbox 360 disc ISO or extracted disc folder (tested: title ID 454108E6, media ID 5C087C2C, no title update)
 - About **7 GB free** on your GTA drive for setup; roughly **2 GB** remains afterward.
 

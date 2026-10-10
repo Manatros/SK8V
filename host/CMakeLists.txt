@@ -35,11 +35,12 @@ add_library(SkateVLegacy SHARED
   src/stall_sampler.cpp
   src/physics_level.cpp
   src/menu.cpp
+  src/ps_pad.cpp
 )
 target_compile_features(SkateVLegacy PRIVATE cxx_std_20)
 target_compile_definitions(SkateVLegacy PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
 target_include_directories(SkateVLegacy PRIVATE include "${SHVDIR}/inc")
-target_link_libraries(SkateVLegacy PRIVATE "${SHVDIR}/lib/ScriptHookV.lib" version xinput shell32)
+target_link_libraries(SkateVLegacy PRIVATE "${SHVDIR}/lib/ScriptHookV.lib" version xinput hid setupapi shell32)
 # Original Skate 3 HUD overlay (hud_overlay.cpp): D3D11 + runtime shader compile.
 target_link_libraries(SkateVLegacy PRIVATE d3d11 dxgi d3dcompiler)
 set_target_properties(SkateVLegacy PROPERTIES PREFIX "" SUFFIX ".asi")

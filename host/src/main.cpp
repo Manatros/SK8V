@@ -25,6 +25,7 @@
 #include "records_ui.h"
 #include "lifecycle.h"
 #include "menu.h"
+#include "ps_pad.h"
 #include "map_states.h"
 #include "pack_loader.h"
 #include "pose_hook.h"
@@ -388,33 +389,56 @@ void DrawHud(const SvOutput& o, const SvScoreState& s, bool debug) {
 
 SvPad ReadPadRaw() {
     // Polled every frame in and out of skate mode (board action). XInput is
-    // slow on empty slots, so the last connected slot is read each frame and
-    // the others are scanned at most once a second.
-    static DWORD s_slot = XUSER_MAX_COUNT;
-    static DWORD s_nextScan = 0;
-    SvPad pad{};
+    // slow on empty slots, so connected slots are read each frame and the
+    // others are scanned at most once a second. The pad used is the one that
+    // last pressed something, so an idle or virtual pad on a lower slot can't
+    // take over the player's controller; else the lowest connected slot.
+    static DWORD s_connected = 0, s_nextScan = 0, s_active = XUSER_MAX_COUNT;
     const DWORD now = GetTickCount();
-    const bool scan = s_slot >= XUSER_MAX_COUNT || static_cast<LONG>(now - s_nextScan) >= 0;
+    const bool scan = static_cast<LONG>(now - s_nextScan) >= 0;
+    if (scan) s_nextScan = now + 1000;
+    XINPUT_STATE st[XUSER_MAX_COUNT]{};
+    DWORD pressing = XUSER_MAX_COUNT;
     for (DWORD i = 0; i < XUSER_MAX_COUNT; ++i) {
-        if (!scan && i != s_slot) continue;
-        XINPUT_STATE st{};
-        if (XInputGetState(i, &st) != ERROR_SUCCESS) {
-            if (i == s_slot) s_slot = XUSER_MAX_COUNT;
+        if (!scan && !(s_connected & (1u << i))) continue;
+        if (XInputGetState(i, &st[i]) != ERROR_SUCCESS) {
+            s_connected &= ~(1u << i);
             continue;
         }
-        s_slot = i;
-        pad.connected = 1;
-        pad.packet = st.dwPacketNumber;
-        pad.buttons = st.Gamepad.wButtons;
-        pad.left_trigger = st.Gamepad.bLeftTrigger;
-        pad.right_trigger = st.Gamepad.bRightTrigger;
-        pad.left_x = st.Gamepad.sThumbLX;
-        pad.left_y = st.Gamepad.sThumbLY;
-        pad.right_x = st.Gamepad.sThumbRX;
-        pad.right_y = st.Gamepad.sThumbRY;
-        break;
+        s_connected |= 1u << i;
+        const XINPUT_GAMEPAD& g = st[i].Gamepad;
+        if ((g.wButtons || g.bLeftTrigger > 64 || g.bRightTrigger > 64) && (pressing == XUSER_MAX_COUNT || i == s_active))
+            pressing = i;
     }
-    if (scan) s_nextScan = now + 1000;
+    DWORD active = pressing;
+    if (active == XUSER_MAX_COUNT) {
+        active = (s_connected >> s_active) & 1u ? s_active : XUSER_MAX_COUNT;
+        for (DWORD i = 0; active == XUSER_MAX_COUNT && i < XUSER_MAX_COUNT; ++i)
+            if (s_connected & (1u << i)) active = i;
+    }
+    // No XInput pad: a PlayStation pad GTA reads natively (Steam Input and
+    // DS4Windows present theirs as XInput, which wins so input isn't doubled).
+    SvPad pad{};
+    const char* ps = nullptr;
+    const bool havePs = active == XUSER_MAX_COUNT && pspad::Read(pad, &ps);
+    static const char* s_ps = nullptr;
+    if (active != s_active || ps != s_ps) {
+        if (active < XUSER_MAX_COUNT) Logf("SkateV Legacy: controller slot %lu (connected mask %lx)", active, s_connected);
+        else if (havePs) Logf("SkateV Legacy: controller %s", ps);
+        else Logf("SkateV Legacy: no controller connected");
+        s_active = active, s_ps = havePs ? ps : nullptr;
+    }
+    if (active == XUSER_MAX_COUNT) return pad;
+    const XINPUT_GAMEPAD& g = st[active].Gamepad;
+    pad.connected = 1;
+    pad.packet = st[active].dwPacketNumber;
+    pad.buttons = g.wButtons;
+    pad.left_trigger = g.bLeftTrigger;
+    pad.right_trigger = g.bRightTrigger;
+    pad.left_x = g.sThumbLX;
+    pad.left_y = g.sThumbLY;
+    pad.right_x = g.sThumbRX;
+    pad.right_y = g.sThumbRY;
     return pad;
 }
 
@@ -577,6 +601,9 @@ struct Session {
     DWORD lastTrack = 0;       // last sv_lifecycle_track
     DWORD stateSince = 0;      // entered the current state
     DWORD suppressEnterUntil = 0; // GTA's INPUT_ENTER held off after leaving
+    std::uint64_t watchTick = 0;  // Skate output tick last seen while skating
+    DWORD watchSince = 0;         // ... since (wall time)
+    int watchFrames = 0;          // ... script frames since (a pause stops these)
     DWORD yHeldSince = 0;         // Y pressed while skating (hold to put the board away)
     bool yWasDown = true;
     bool trackingStarted = false; // preserves opt-out until the first board action
@@ -1035,6 +1062,13 @@ void TryEnter(Session& s, const Config& cfg, bool strict) {
             return;
         }
     }
+    // Skate reads only the controller (no keyboard): without one the player
+    // would be held with nothing to move them.
+    if (!ReadPadRaw().connected) {
+        Notify(s, "SK8V needs a controller (Xbox or PlayStation); none is connected", 5000);
+        SetState(s, LifeState::Ready, "no controller");
+        return;
+    }
     if (const char* why = lifecycle::Blocked(ped, strict, cfg.life)) {
         Notify(s, std::string("can't skate now: ") + why, 2500);
         SetState(s, LifeState::Ready, why);
@@ -1063,6 +1097,11 @@ void TryEnter(Session& s, const Config& cfg, bool strict) {
     spawn.aspect_ratio = Call<float>(gta::GET_ASPECT_RATIO, 0);
     // Off the board with the board in hand (the player's Y mounts).
     SendMapStates(spawn.position, true);
+    // The previous session's last output must not drive this one (its
+    // position in deep water handed the player straight back to GTA and put
+    // them back there).
+    s.last = SvOutput{};
+    s.last.skater_position = s.last.board_position = spawn.position;
     if (!g_runtime.LifecycleEnter(spawn)) {
         Notify(s, "activation rejected: " + g_runtime.StatusText());
         SetState(s, LifeState::Ready, "activation rejected");
@@ -1138,6 +1177,7 @@ void BeginActive(Session& s, const Config& cfg) {
     Call<void>(gta::RENDER_SCRIPT_CAMS, 1, 1, kHandOffMs, 1, 0, 0);
     s.poseFadedIn = false;
     s.poseFadingOut = false;
+    s.watchTick = 0, s.watchSince = GetTickCount(), s.watchFrames = 0;
     s.armed = s.aiming = false;
     s.nativeFire = 0, s.fireWas = false, s.wheelOpen = false;
     liveclip::Suspend(s.ped, false);
@@ -2092,11 +2132,18 @@ void LifecycleFrame(Session& s, const Config& cfg, bool f6) {
         SvOutput o{};
         g_runtime.Output(o);
         const bool dead = Call<BOOL>(gta::IS_ENTITY_DEAD, s.ped, 0);
+        if (o.tick != s.watchTick) s.watchTick = o.tick, s.watchSince = now, s.watchFrames = 0;
+        const bool stalled = ++s.watchFrames > 120 && now - s.watchSince > 5000;
         if (o.status == SV_STATUS_ERROR) {
             Leave(s, cfg, "runtime error", false);
             Notify(s, "Skate runtime error: " + g_runtime.StatusText(), 8000);
         } else if (dead || Call<BOOL>(gta::NETWORK_IS_SESSION_STARTED)) {
             Leave(s, cfg, dead ? "player died" : "network session", false);
+        } else if (stalled) {
+            // A runtime that stops stepping would hold the player forever.
+            Logf("SkateV Legacy: Skate output stuck at tick %llu for %lu ms (%s)", static_cast<unsigned long long>(o.tick),
+                 now - s.watchSince, g_runtime.StatusText().c_str());
+            Leave(s, cfg, "Skate stopped responding", false);
         } else if (f6 || heldAway) {
             s.yHeldSince = 0, s.yWasDown = true;
             Leave(s, cfg, heldAway ? "board put away (Y held)" : "menu", true);

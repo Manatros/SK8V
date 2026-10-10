@@ -39,8 +39,10 @@ foreach ($pin in $Pins) {
 # Lib\site-packages from site. Setup sets PYTHONNOUSERSITE so packages from the
 # player's own Python cannot shadow these.
 Remove-Item "$stage\py\python*._pth"
-$check = & "$stage\py\python.exe" -s -c "import numpy, PIL, sys; print(sys.version.split()[0], numpy.__version__, PIL.__version__)"
-if ($LASTEXITCODE) { throw 'the downloaded Python does not start' }
+# Setup runs it without these too: another Python's would load that install's modules.
+$env:PYTHONHOME = $null; $env:PYTHONPATH = $null
+$check = & "$stage\py\python.exe" -s -c "import ctypes, numpy, PIL, sys; print(sys.version.split()[0], numpy.__version__, PIL.__version__)"
+if ($LASTEXITCODE) { throw 'the downloaded Python does not start (or cannot load its ctypes, numpy or Pillow)' }
 if (Test-Path $Target) { Remove-Item -LiteralPath $Target -Recurse -Force }
 Move-Item -LiteralPath "$stage\py" $Target
 Remove-Item -LiteralPath $stage -Recurse -Force
