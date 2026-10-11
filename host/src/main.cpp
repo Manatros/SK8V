@@ -261,8 +261,8 @@ const Key kKeys[] = {
      }},
     {"Camera", [](Config& c, const std::string& v) { c.cameraType = menu::SameText(v, "Low") ? 0 : 1; }},
     {"CameraView", [](Config& c, const std::string& v) {
-        const char* names[] = {"Skate", "Near", "Middle", "Far", "FirstPerson"};
-        for (int i = 0; i < 5; ++i)
+        const char* names[] = {"Skate", "Near", "Middle", "Far", "FirstPerson", "Head"};
+        for (int i = 0; i < 6; ++i)
             if (menu::SameText(v, names[i])) c.cameraView = i;
     }},
     {"EmoteUp", [](Config& c, const std::string& v) { c.gestures[0] = GestureIndex(v); }},
@@ -2023,6 +2023,30 @@ void BoardWeather(Session& s, const Config& cfg, const SvBoardPose* pose) {
     }
 }
 
+// The skater's eyes (view 5, as GTAxSkate's own mod had it): the script
+// camera at the head, looking where the board goes; the mouse looks round
+// (up to 150 degrees each way) and the view drifts back ahead after 1.5 s.
+void HeadCamera(Session& s, const SvOutput& o) {
+    static float yaw = 0.0f, pitch = 0.0f;
+    static ULONGLONG lastLook = 0;
+    const float mx = Call<float>(gta::GET_DISABLED_CONTROL_NORMAL, 0, 1), my = Call<float>(gta::GET_DISABLED_CONTROL_NORMAL, 0, 2);
+    const ULONGLONG now = GetTickCount64();
+    if (std::fabs(mx) > 0.001f || std::fabs(my) > 0.001f) {
+        yaw = std::clamp(yaw - mx * 8.0f, -150.0f, 150.0f);
+        pitch = std::clamp(pitch - my * 6.0f, -70.0f, 60.0f);
+        lastLook = now;
+    } else if (now - lastLook > 1500) {
+        yaw *= 0.94f, pitch *= 0.94f;
+    }
+    const Vector3 head = Call<Vector3>(gta::GET_PED_BONE_COORDS, s.ped, 31086, 0.0f, 0.0f, 0.0f); // SKEL_Head
+    const float h = (o.skater_heading_degrees + yaw) * 0.017453292f;
+    const float fx = -std::sin(h), fy = std::cos(h);
+    Call<void>(gta::SET_CAM_COORD, s.cam, head.x + fx * 0.16f, head.y + fy * 0.16f, head.z + 0.06f);
+    Call<void>(gta::SET_CAM_ROT, s.cam, pitch - 8.0f, 0.0f, o.skater_heading_degrees + yaw, 2);
+    Call<void>(gta::SET_CAM_FOV, s.cam, 75.0f);
+    Call<void>(gta::SET_CAM_NEAR_CLIP, s.cam, 0.05f);
+}
+
 // The cinematic camera or the skate filmer (R) on the script camera: the
 // runtime picks the shot from the skater's place and speed, and the eye is
 // kept in front of walls and off the ground.
@@ -2063,9 +2087,9 @@ void ActionCamera(Session& s, const SvOutput& o) {
 // turns. V (INPUT_NEXT_CAMERA) cycles them. In a GTA view the on-foot stick
 // is turned from Skate's camera into GTA's, so walking follows what is seen.
 void UpdateCameraView(Session& s, const Config& cfg, SvPad& pad) {
-    if (s.view < 0) s.view = std::clamp(cfg.cameraView, 0, 4);
+    if (s.view < 0) s.view = std::clamp(cfg.cameraView, 0, 5);
     if (!menu::IsOpen() && Call<BOOL>(gta::IS_DISABLED_CONTROL_JUST_PRESSED, 0, 0)) {
-        s.view = (s.view + 1) % 5;
+        s.view = (s.view + 1) % 6;
         Logf("SkateV Legacy: camera view %d", s.view);
     }
     // R on the keyboard (the pad's reload is Skate's B): the cinematic camera,
@@ -2077,7 +2101,7 @@ void UpdateCameraView(Session& s, const Config& cfg, SvPad& pad) {
         g_runtime.ActionCam(0, {}, {}, 0.0f, none);
         Logf("SkateV Legacy: cinematic camera %s", s.action == 1 ? "on" : s.action == 2 ? "filmer" : "off");
     }
-    const bool gta = s.view > 0 && !s.action;
+    const bool gta = s.view > 0 && s.view < 5 && !s.action;
     if (gta) {
         constexpr int kMode[5] = {0, 0, 1, 2, 4}; // near, middle, far, first person
         Call<void>(gta::SET_FOLLOW_PED_CAM_VIEW_MODE, kMode[s.view]);
@@ -2316,6 +2340,7 @@ void UpdateActive(Session& s, const Config& cfg, const SvPad& pad) {
         Call<void>(gta::SET_CAM_ROT, s.cam, -12.0f, 0.0f, o.skater_heading_degrees, 2);
         Call<void>(gta::SET_CAM_FOV, s.cam, 60.0f);
     }
+    if (s.view == 5 && !s.action) HeadCamera(s, o);
     if (s.action) ActionCamera(s, o);
 
     // Dev A/B (GtaCamera): GTA's gameplay camera renders instead of the script
@@ -2733,8 +2758,8 @@ std::vector<menu::Page> MenuPages(Session& s) {
     // in (V cycles them while skating; R on the keyboard: cinematic camera,
     // skate filmer), Skate 3's camera height, the field of view.
     pages.push_back({"Camera", {
-        Choice("View at the start (V cycles)", "CameraView", {"Skate", "Near", "Middle", "Far", "FirstPerson"},
-               {"Skate 3", "GTA near", "GTA middle", "GTA far", "GTA first person"}, Bound("CameraView")),
+        Choice("View at the start (V cycles)", "CameraView", {"Skate", "Near", "Middle", "Far", "FirstPerson", "Head"},
+               {"Skate 3", "GTA near", "GTA middle", "GTA far", "GTA first person", "Skater's eyes (mouse looks)"}, Bound("CameraView")),
         Choice("Skate 3 camera", "Camera", {"High", "Low"}, {"High (Skate 3 default)", "Low"},
                Bound("Camera", [] { g_runtime.SetCameraType(g_config.cameraType); })),
         Number("Field of view scale", "CameraFovScale", D.fovScale, 0.5f, 1.5f, 0.05f, Fixed("x%.2f"), Bound("CameraFovScale")),
