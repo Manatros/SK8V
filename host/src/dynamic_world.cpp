@@ -54,6 +54,34 @@ std::size_t DynamicWorld::LoadPropTemplates(const std::string& worldCache) {
     return g_props.Models().size();
 }
 
+// Entity position for the pool scan. A native per pooled entity cost ~1 us:
+// with pools enlarged by pool-adjuster mods (1024 objects, peds and cars) that
+// was ~3 ms of GTA's main thread every frame. The entity's matrix translation
+// (+0x90) is checked once against GET_ENTITY_COORDS; on a mismatch the scan
+// stays on the native.
+namespace {
+Vector3 Position(int entity, int& check, std::string& log) {
+    const auto* base = getScriptHandleBaseAddress(entity);
+    if (check == 0 && base) {
+        const Vector3 n = Call<Vector3>(gta::GET_ENTITY_COORDS, entity, 0);
+        const auto* m = reinterpret_cast<const float*>(base + 0x90);
+        const bool same = std::fabs(m[0] - n.x) < 0.01f && std::fabs(m[1] - n.y) < 0.01f && std::fabs(m[2] - n.z) < 0.01f;
+        check = same ? 1 : -1;
+        char line[160];
+        std::snprintf(line, sizeof(line), "dynamic collision: entity position %s (+0x90 %.2f %.2f %.2f, native %.2f %.2f %.2f)",
+                      same ? "read from memory" : "via GET_ENTITY_COORDS (memory read disagrees)", m[0], m[1], m[2], n.x, n.y, n.z);
+        log = line;
+    }
+    if (check == 1 && base) {
+        const auto* m = reinterpret_cast<const float*>(base + 0x90);
+        Vector3 p{};
+        p.x = m[0], p.y = m[1], p.z = m[2];
+        return p;
+    }
+    return Call<Vector3>(gta::GET_ENTITY_COORDS, entity, 0);
+}
+}
+
 bool DynamicWorld::AddBody(int entity, EntityKind kind) {
     if (bodies_.size() >= kMaxBodies) return false;
     if (!Call<BOOL>(gta::DOES_ENTITY_EXIST, entity) || !Call<BOOL>(gta::IS_ENTITY_VISIBLE, entity)) return false;
@@ -157,10 +185,11 @@ void DynamicWorld::Gather(int self, SvVec3 center, float radius, int presentatio
     nearby.clear();
     auto collect = [&](int (*pool)(int*, int), EntityKind kind, float kindRadius2) {
         const int n = pool(scratch_.data(), kPoolScratch);
+        stats_.pooled += static_cast<std::uint32_t>(n);
         for (int i = 0; i < n; ++i) {
             const int e = scratch_[i];
             if (e == self || e == presentationEntity) continue;
-            const Vector3 p = Call<Vector3>(gta::GET_ENTITY_COORDS, e, 0);
+            const Vector3 p = Position(e, positionCheck_, positionLog_);
             const float d2 = Dist2(p, center);
             if (d2 <= kindRadius2) nearby.push_back({d2, e, kind});
         }

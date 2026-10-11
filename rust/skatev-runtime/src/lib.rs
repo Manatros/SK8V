@@ -21,6 +21,7 @@ pub mod live;
 pub mod materials;
 pub mod surfaces;
 pub mod ground;
+pub mod ground_at;
 pub mod grid;
 pub mod plies;
 #[cfg(windows)]
@@ -1128,6 +1129,33 @@ pub unsafe extern "C" fn sv_set_physics_level(rt: *mut c_void, table: u64, image
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sv_skitch_vehicle(rt: *const c_void) -> u32 {
     guard(0, || unsafe { runtime(rt) }.map_or(0, |rt| rt.shared.lock().unwrap().lifecycle.skitch_vehicle))
+}
+
+/// GTA ground under a GTA-space point (ABI 8 export): the highest walkable
+/// static collision from 0.1 m above `point` to `depth` below it, with its
+/// materials.dat index. Returns 1 and fills `out` when there is one.
+#[repr(C)]
+#[derive(Clone, Copy, Default, Debug)]
+pub struct SvGround {
+    pub size: u32,
+    pub material: u32,
+    pub height: f32,
+    pub normal: SvVec3,
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sv_ground_at(_rt: *const c_void, point: *const SvVec3, depth: f32, out: *mut SvGround) -> u32 {
+    guard(0, || {
+        let (Some(p), Some(out)) = (unsafe { point.as_ref() }, unsafe { out.as_mut() }) else { return 0 };
+        if out.size as usize != std::mem::size_of::<SvGround>() {
+            return 0;
+        }
+        let Some(g) = ground_at::at(bevy_math::Vec3::new(p.x, p.y, p.z), depth) else { return 0 };
+        out.material = u32::from(g.material);
+        out.height = g.height;
+        out.normal = SvVec3 { x: g.normal.x, y: g.normal.y, z: g.normal.z };
+        1
+    })
 }
 
 /// The automatic bail reset's time limit in seconds: 0 removes it (a bail

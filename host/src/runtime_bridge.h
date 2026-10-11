@@ -59,6 +59,7 @@ public:
     bool SetVerboseLog(bool enabled);
     bool SetSkitchStandoff(float metres);
     int SkitchVehicle() const;
+    bool GroundAt(const SvVec3& point, float depth, SvGround& out) const;
     bool SetPhysicsLevel(std::uintptr_t table, std::uintptr_t imageLo, std::uintptr_t imageHi);
     bool PlayLine(const std::string& utf8Path);
     std::uint32_t ApiVersion() const { return apiVersion_; }
@@ -103,6 +104,7 @@ private:
     SvSetVerboseLogFn setVerboseLog_ = nullptr;
     SvSetSkitchStandoffFn setSkitchStandoff_ = nullptr;
     SvSkitchVehicleFn skitchVehicle_ = nullptr;
+    SvGroundAtFn groundAt_ = nullptr;
     SvSetPhysicsLevelFn setPhysicsLevel_ = nullptr;
     SvPlayLineFn playLine_ = nullptr;
 };

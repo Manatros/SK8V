@@ -4,6 +4,15 @@ WorldCache={WorldCache}
 ; Presentation tuning.
 PedZOffset=1.0
 CameraFovScale=1.0
+; BoardTracks: 1 = the wheels leave GTA's tread marks in sand, mud, dirt, grass and snow; 0 = none.
+BoardTracks=1
+; Snow: 0 = auto (GTA's snow level and snowy weather), 1 = always (a trainer's ground snow), 2 = never.
+; With snow on, every ground takes snow tracks and the board stays clean.
+Snow=0
+; RadioControls: 1 = LB + d-pad left/right steps GTA's radio while skating; 0 = off.
+RadioControls=1
+; TrickAnalyzer: 1 = Skate 3's Trick Analyzer shows each trick's stick gesture (bottom centre); 0 = off.
+TrickAnalyzer=1
 DrawBoard=1
 ; Native Skate board: owned skeletal drawable, original texture/normal/specular inputs, GTA lighting and shadows.
 BoardNative=1

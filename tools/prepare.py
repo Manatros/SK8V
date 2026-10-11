@@ -33,7 +33,7 @@ RPF = 'sk8v-rpf.exe'
 STEPS = {'disc': (20, 'Reading the Skate 3 disc'), 'convert': (17, 'Converting Skate 3 data'),
          'audio': (17, 'Converting Skate 3 audio'), 'audio-tuning': (1, 'Reading audio tuning'),
          'hom-hud': (5, 'Preparing the Hall of Meat HUD'), 'hom-xray': (1, 'Preparing the x-ray view'),
-         'board': (1, 'Preparing the board'), 'gta-vehicles': (3, 'Reading GTA V vehicles'),
+         'board': (1, 'Preparing the board'), 'trick-analyser': (1, 'Preparing the Trick Analyzer'), 'gta-vehicles': (3, 'Reading GTA V vehicles'),
          'world': (30, 'Building world collision'), 'peds': (5, 'Reading GTA V characters'), 'live-clip': (4, 'Building the board animation pack'),
          'wheel-icon': (2, 'Adding the weapon wheel icon'), 'board-native': (3, 'Building the GTA board model'),
          'ped-colliders': (2, 'Building character collision'), 'verify': (1, 'Checking the prepared data'),
@@ -97,6 +97,8 @@ class Prepare:
             ('hom-hud', 'skate', ['prepare-hom-hud.py'], self.stage_hom_hud),
             ('hom-xray', 'skate', ['prepare-hom-xray.py'], lambda: py('prepare-hom-xray.py', '--game', self.disc, '--assets', self.assets)),
             ('board', 'skate', ['prepare-board.py'], lambda: py('prepare-board.py', '--assets', self.assets)),
+            ('trick-analyser', 'skate', ['prepare-hom-hud.py'], lambda: py(
+                'prepare-hom-hud.py', '--game', self.disc, '--assets', self.assets, '--movie', 'trickanalyser')),
             ('board-native', 'join', ['prepare-board-native.py'], self.stage_board_native),
             ('ped-colliders', 'join', ['prepare-ped-colliders.py', 'ped_collider_templates.py'], self.stage_ped_colliders),
             ('gta-vehicles', 'gta', ['gta_extract.py', 'build-vehicle-masses.py'], self.stage_vehicles),
@@ -248,6 +250,8 @@ class Prepare:
                 continue
             if setup_engine.gta_running():  # reads GTA's archives; never compete with the game for them
                 raise SystemExit(f'GTA V started: stopped before {name}; rerun to resume')
+            if stages[0][0] == 'disc' and name != 'disc' and not (self.disc / 'default.xex').is_file():
+                self.stage_disc()  # --clean removed the disc extraction; the stages before this one stay done
             label = STEPS.get(name, (1, name))[1]
             self.running[name] = label
             print(f'== {name}: {label}', flush=True)
@@ -312,8 +316,8 @@ def main():
         print(f'== install: {STEPS["install"][1]}', flush=True)
         setup_engine.install(a.gta, p.plan())
         p.step('install')
-    if a.clean:  # the extractions (about 5 GB); a later run starts over
-        for d in (p.work, p.receipts) + (() if a.skate.is_dir() else (p.disc,)):
+    if a.clean:  # the extractions (about 5 GB); the receipts stay, so a rerun does only new or changed stages
+        for d in (p.work,) + (() if a.skate.is_dir() else (p.disc,)):
             shutil.rmtree(d, ignore_errors=True)
 
 

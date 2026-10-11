@@ -53,6 +53,7 @@ bool RuntimeBridge::Load(const wchar_t* dllPath, const std::string& dataRoot, co
     sym(setVerboseLog_, "sv_set_verbose_log");
     sym(setSkitchStandoff_, "sv_set_skitch_standoff");
     sym(skitchVehicle_, "sv_skitch_vehicle");
+    sym(groundAt_, "sv_ground_at");
     sym(setPhysicsLevel_, "sv_set_physics_level");
     sym(playLine_, "sv_play_line");
     if (!missing.empty()) {
@@ -250,6 +251,12 @@ bool RuntimeBridge::SetSkitchStandoff(float metres) {
 
 int RuntimeBridge::SkitchVehicle() const {
     return runtime_ ? static_cast<int>(skitchVehicle_(runtime_)) : 0;
+}
+
+bool RuntimeBridge::GroundAt(const SvVec3& point, float depth, SvGround& out) const {
+    out = {};
+    out.size = sizeof(out);
+    return runtime_ && groundAt_(runtime_, &point, depth, &out) != 0;
 }
 
 bool RuntimeBridge::SetPhysicsLevel(std::uintptr_t table, std::uintptr_t imageLo, std::uintptr_t imageHi) {

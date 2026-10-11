@@ -43,7 +43,7 @@ MENU_KEYS = [
     'AudioMasterGain', 'AudioOutput', 'MenuButton', 'GunButton', 'AimButton', 'FireButton', 'BoardActionInMissions',
     'Hud', 'ShowDebug', 'VerboseLog', 'PedZOffset', 'BailHitSpeed', 'BailScreamSpeed', 'PedPain', 'VehicleDamageMin',
     'VehicleDamageRadius', 'BackgroundPrepare', 'Runtime', 'StallSampler', 'BoardNative', 'DrawBoard', 'PosePed',
-    'AudioGtaPlacement', 'AudioEditorTone', 'AudioGtaGainDb']
+    'AudioGtaPlacement', 'AudioEditorTone', 'AudioGtaGainDb', 'BoardTracks', 'Snow', 'RadioControls', 'TrickAnalyzer']
 
 
 class SetupError(Exception):

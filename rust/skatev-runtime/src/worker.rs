@@ -700,6 +700,8 @@ fn run(
     let mut perf = Perf::new();
     let mut assist = BackwardsManAssist::new(BackwardsManConfig::default());
     let mut assist_packet = 0u32;
+    // The right stick Skate was fed last (the Trick Analyzer replays it).
+    let mut right_stick = [0i16; 2];
     let mut line_player = crate::line::Player::default();
     let mut latest_dynamic = Vec::new();
     // Skitch grab lines as last sampled by the host, and when. Skate ticks at
@@ -1156,6 +1158,7 @@ fn run(
                     for line in monitor.log.drain(..) {
                         log(&line);
                     }
+                    right_stick = if pad.connected { pad.right } else { [0; 2] };
                     let frame = if pad.connected {
                         InputFrame::from_pad(
                             pad.buttons,
@@ -1386,6 +1389,7 @@ fn run(
                 match next {
                     crate::line::Next::Frame(f) => {
                         assist_packet = assist_packet.wrapping_add(1);
+                        right_stick = f.right;
                         s.collect(
                             InputFrame::from_pad(f.buttons, f.triggers, f.left, f.right, assist_packet),
                             period,
@@ -1413,6 +1417,7 @@ fn run(
                 }
                 if let Some(i) = injected {
                     assist_packet = assist_packet.wrapping_add(1);
+                    right_stick = i.right_stick;
                     s.collect(
                         InputFrame::from_pad(
                             i.buttons,
@@ -1459,7 +1464,7 @@ fn run(
                 let now = crate::records::now();
                 shared.lock().unwrap().records.add(crate::records::Category::HallOfMeat, total, now, log);
             }
-            hud.tick(s, &hom, shared, log);
+            hud.tick(s, &hom, right_stick, shared, log);
             crate::audio::on_tick(s, &pose, &mut audio_state);
             advanced = Some(pose);
         }
@@ -2022,7 +2027,10 @@ fn publish(
     tricks: &mut Vec<String>,
     log: &Log,
 ) -> Published {
-    let board_pose = crate::board_pose::world(&p.names, &p.bones, p.root);
+    let board_pose = crate::board_pose::world(&p.names, &p.bones, p.root).map(|mut w| {
+        crate::board_pose::present_wheels(&mut w, p.tick);
+        w
+    });
     let mut presenter = presenter;
     let (mut mesh, textures, character_pose, board_entity) = presenter
         .as_deref_mut()

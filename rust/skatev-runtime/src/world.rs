@@ -82,6 +82,7 @@ impl StaticWorld {
             })));
         }
         crate::ground::publish(self.ground.around([center.x, center.y], RADIUS)?);
+        crate::ground_at::publish(crate::ground_at::GroundIndex::build(tris.iter().map(|t| (t.v, t.material))));
         let mut area = build_area_tagged(
             center,
             tris.iter().map(|t| (t.v, crate::surfaces::tag(t.material, recovered.get(&svwc::surfaces::key(&t.v))))),

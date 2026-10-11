@@ -310,6 +310,19 @@ using SvSetSkitchStandoffFn = std::uint32_t(__cdecl*)(void*, float);
 // Export: sv_set_physics_level.
 using SvSetPhysicsLevelFn = std::uint32_t(__cdecl*)(void*, std::uint64_t, std::uint64_t, std::uint64_t);
 
+// sv_ground_at(rt, point, depth, out): the highest walkable GTA static
+// collision from 0.1 m above `point` to `depth` below it (the latest built
+// area), with its materials.dat index. Returns 1 and fills `out`.
+// Export: sv_ground_at.
+struct SvGround {
+    std::uint32_t size;     // sizeof(SvGround)
+    std::uint32_t material; // GTA materials.dat index
+    float height;
+    SvVec3 normal;          // up-facing
+};
+static_assert(sizeof(SvGround) == 24);
+using SvGroundAtFn = std::uint32_t(__cdecl*)(const void*, const SvVec3*, float, SvGround*);
+
 // sv_skitch_vehicle(rt): GTA handle of the vehicle being skitched, 0 when none.
 // Export: sv_skitch_vehicle.
 using SvSkitchVehicleFn = std::uint32_t(__cdecl*)(const void*);

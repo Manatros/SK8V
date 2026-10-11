@@ -45,6 +45,7 @@ struct Shared {
     std::uint32_t(__cdecl* showRadio)(void*, const char*, const char*, const char*, const char*) = nullptr;
     bool enabled = false;
     bool registered = false;
+    bool trickAnalyzer = true; // viewport flag bit 1 (script thread)
     float maxAspect = 0.0f;
     float safeOverride = -1.0f;
     // Script thread only.
@@ -68,7 +69,24 @@ void Logf(const char* fmt, A... a) {
     util::Logf(g.log, fmt, a...);
 }
 
+std::atomic<long long> g_presentTicks{0}, g_presentMaxTicks{0};
+std::atomic<unsigned> g_presents{0};
+
+void Present(void* swapChainPtr);
+
 void OnPresent(void* swapChainPtr) {
+    LARGE_INTEGER a, b;
+    QueryPerformanceCounter(&a);
+    Present(swapChainPtr);
+    QueryPerformanceCounter(&b);
+    const long long t = b.QuadPart - a.QuadPart;
+    g_presentTicks += t;
+    ++g_presents;
+    long long m = g_presentMaxTicks.load();
+    while (t > m && !g_presentMaxTicks.compare_exchange_weak(m, t)) {}
+}
+
+void Present(void* swapChainPtr) {
     stall::RegisterRender();
     if (g.stopping.load() || !swapChainPtr) return;
     auto* sc = static_cast<IDXGISwapChain*>(swapChainPtr);
@@ -137,6 +155,15 @@ void FetchTextures(std::uint32_t count, std::uint32_t generation) {
 }
 } // namespace
 
+PresentStats TakePresentStats() {
+    static const double perMs = [] { LARGE_INTEGER f; QueryPerformanceFrequency(&f); return static_cast<double>(f.QuadPart) / 1000.0; }();
+    PresentStats r;
+    r.totalMs = static_cast<double>(g_presentTicks.exchange(0)) / perMs;
+    r.maxMs = static_cast<double>(g_presentMaxTicks.exchange(0)) / perMs;
+    r.count = g_presents.exchange(0);
+    return r;
+}
+
 void Start(const std::wstring& iniPath, void* runtime, LogFn log) {
     g.log = log;
     g.enabled = false;
@@ -180,6 +207,8 @@ bool ShowRadio(const char* top, const char* middle, const char* bottom, const ch
     return g.enabled && g.runtime && g.showRadio && g.showRadio(g.runtime, top, middle, bottom, station) == 1;
 }
 
+void SetTrickAnalyzer(bool on) { g.trickAnalyzer = on; }
+
 void Tick(bool skating) {
     if (!g.enabled) return;
     const UINT w = g.backbufferWidth.load(), h = g.backbufferHeight.load();
@@ -192,7 +221,7 @@ void Tick(bool skating) {
         v.height = h;
         v.safe_zone = safe;
         v.max_aspect = g.maxAspect;
-        v.flags = 1;
+        v.flags = 1u | (g.trickAnalyzer ? 2u : 0u);
         if (g.safeOverride < 0.5f) {
             // GTA's own HUD inset (safe zone plus its ultrawide placement, where the minimap is): a
             // top-left aligned origin, mirrored (the area is centred). Never less than the safe zone.

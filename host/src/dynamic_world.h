@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <string>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 enum class EntityKind : std::uint32_t { Vehicle = 0, Ped = 1, Object = 2 };
@@ -14,6 +15,7 @@ struct DynamicWorldStats {
     std::uint32_t vehicles = 0, peds = 0, objects = 0, hits = 0, debris = 0, doors = 0;
     std::uint32_t exactBounds = 0, missingBounds = 0, exchanged = 0;
     std::uint32_t pedParts = 0, pedImpulses = 0; // peds sent as ragdoll parts; impulses applied to peds
+    std::uint32_t pooled = 0; // entities the pool scan looked at
 };
 
 // GTA's own crime system for what the held skater does (board hits and
@@ -62,6 +64,8 @@ public:
     }
     const std::vector<SvPedPart>& PedParts() const { return parts_; }
     const DynamicWorldStats& Stats() const { return stats_; }
+    // The one-time position read check's result, once (empty after).
+    std::string TakePositionLog() { return std::exchange(positionLog_, {}); }
     // Load exact template index and baked INSTANCE transforms beside cache.
     // Legacy model-only .props.txt is deliberately not used for suppression.
     static std::size_t LoadPropTemplates(const std::string& worldCache);
@@ -72,6 +76,8 @@ public:
 
 private:
     bool AddBody(int entity, EntityKind kind);
+    int positionCheck_ = 0; // 0 unchecked, 1 memory, -1 native
+    std::string positionLog_;
     struct Debris { int entity; SvVec3 center; };
     struct Candidate { float d2; int entity; EntityKind kind; };
     std::vector<Candidate> nearby_;
