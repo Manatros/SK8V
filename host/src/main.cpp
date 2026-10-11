@@ -456,6 +456,9 @@ bool g_keyboard = false;
 // The controller is what the player uses now (the keyboard and mouse were not
 // touched since it was): the keys on screen hide, M and F stay the pad's.
 bool g_controller = false;
+// F went down this frame on the keyboard (read once per frame in ReadPadRaw,
+// so the press that gets on is not also the one that gets off).
+bool g_fPressed = false;
 std::string g_keyHints[2]; // riding, walking ("key\twhat" lines)
 
 // Whether GTA's window has the keyboard (keys pressed elsewhere are not skating).
@@ -470,7 +473,7 @@ bool GameFocused() {
 // controls the player bound in SkateVKeys.txt, plus F back to GTA.
 void DrawKeyboardHints(bool onFoot) {
     std::string& text = g_keyHints[onFoot ? 1 : 0];
-    if (text.empty()) text = g_runtime.KeyboardHints(onFoot) + "F\tBack to GTA\n";
+    if (text.empty()) text = g_runtime.KeyboardHints(onFoot) + "F\tBack to GTA\n/\tSK8V menu (all settings)\n";
     float y = 0.25f;
     std::size_t at = 0;
     while (at < text.size()) {
@@ -544,6 +547,10 @@ SvPad ReadPadRaw() {
     // used last wins, so an idle or virtual controller (Steam Input,
     // DS4Windows, a wheel) never shuts the keyboard out. GTA's look input
     // carries the mouse; the settings menu releases the keys.
+    static bool s_fWas = false;
+    const bool fDown = (GetAsyncKeyState('F') & 0x8000) != 0;
+    g_fPressed = fDown && !s_fWas && GameFocused();
+    s_fWas = fDown;
     static bool s_keyboardInUse = true;
     const auto moved = [](int v) { return v > 7849 || v < -7849; };  // XInput's thumb dead zone
     const bool padUsed = pad.connected && (pad.buttons || pad.left_trigger > 30 || pad.right_trigger > 30 ||
@@ -2419,7 +2426,18 @@ void LifecycleFrame(Session& s, const Config& cfg, bool f6) {
         }
         const bool wheel = BoardWeaponTick(s, player);
         if (wheel) Log("SkateV Legacy: board picked in the weapon wheel");
-        if (f6 || wheel) TryEnter(s, cfg, !f6);
+        // Keyboard: F on foot with no vehicle within 6 m gets on, as the weapon
+        // wheel does (near a vehicle F stays GTA's enter).
+        bool keyF = false;
+        if (g_fPressed && g_keyboard && !g_controller && !menu::IsOpen() && Call<BOOL>(gta::IS_PED_ON_FOOT, player)) {
+            const Vector3 at = Call<Vector3>(gta::GET_ENTITY_COORDS, player, 1);
+            if (!Call<BOOL>(gta::IS_ANY_VEHICLE_NEAR_POINT, at.x, at.y, at.z, 6.0f)) {
+                Call<void>(gta::DISABLE_CONTROL_ACTION, 0, 23, 1); // INPUT_ENTER
+                keyF = true;
+                Log("SkateV Legacy: F on the keyboard: board out");
+            }
+        }
+        if (f6 || wheel || keyF) TryEnter(s, cfg, !f6);
         // Refused (vehicle, water, ...): no invisible weapon left in hand.
         if (wheel && s.state == LifeState::Ready) Call<void>(gta::SET_CURRENT_PED_WEAPON, player, 0xA2719263, 1);
         break;
@@ -2490,11 +2508,8 @@ void LifecycleFrame(Session& s, const Config& cfg, bool f6) {
         // Keyboard: F puts the board away in one press, as Y held does: Skate
         // steps off first, then the board goes away. Read from the key itself
         // (GTA's enter/exit is the pad's Y, whose tap mounts and dismounts).
-        static bool s_fWas = false;
-        const bool f = (GetAsyncKeyState('F') & 0x8000) != 0;
-        if (f && !s_fWas && g_keyboard && !g_controller && GameFocused() && !menu::IsOpen())
+        if (g_fPressed && g_keyboard && !g_controller && !menu::IsOpen())
             s.keyLeaveUntil = now + cfg.putAwayHoldMs + 150;
-        s_fWas = f;
         if (s.keyLeaveUntil && now < s.keyLeaveUntil) pad.buttons |= 0x8000;
         else s.keyLeaveUntil = 0;
         // Hold Y to put the board away. The press still reaches Skate, so
