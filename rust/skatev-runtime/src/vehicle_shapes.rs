@@ -7,7 +7,7 @@
 //! dynamic.rs then uses instead of the box.
 
 use bevy_math::{Vec2, Vec3};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::ffi::c_void;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, OnceLock};
@@ -33,6 +33,11 @@ pub struct Shape {
 }
 
 impl Shape {
+    /// True for [Shape::boxed]'s flat box (no probe met the body).
+    pub fn is_box(&self) -> bool {
+        self.nx == 2 && self.ny == 2 && self.heights.iter().all(|h| *h == Some(self.max.z))
+    }
+
     /// The bounding box as the body: a flat top at its height.
     pub fn boxed(min: Vec3, max: Vec3) -> Self {
         let size = (max - min).truncate().max(Vec2::splat(0.1));
@@ -250,22 +255,31 @@ impl Survey {
 pub static TEMPLATE_DIR: OnceLock<PathBuf> = OnceLock::new();
 /// Surveyed models' triangles (model space) and the models already asked about.
 static SURVEYED: Mutex<Option<HashMap<u32, Arc<Vec<svwc::Tri>>>>> = Mutex::new(None);
-static ASKED: Mutex<Option<HashSet<u32>>> = Mutex::new(None);
+static ASKED: Mutex<Option<HashMap<u32, u8>>> = Mutex::new(None);
+/// Surveys per model before it stays SK8V's box (one that met too little of
+/// the body, as when its collision was not loaded yet, is tried again).
+const TRIES: u8 = 3;
 
 /// The surveyed body of `model`, if there is one.
 pub fn surveyed(model: u32) -> Option<Arc<Vec<svwc::Tri>>> {
     SURVEYED.lock().ok()?.as_ref()?.get(&model).cloned()
 }
 
-/// True once per model that has no extracted bound and no survey yet.
+/// True for a model that has no extracted bound and no survey yet (up to
+/// [TRIES] times while surveys meet too little of it).
 pub fn needs_shape(model: u32) -> bool {
     let Some(dir) = TEMPLATE_DIR.get() else { return false };
     let mut asked = ASKED.lock().unwrap_or_else(|e| e.into_inner());
-    let asked = asked.get_or_insert_with(HashSet::new);
-    if !asked.insert(model) {
+    let tries = asked.get_or_insert_with(HashMap::new).entry(model).or_insert(0);
+    if *tries >= TRIES || surveyed(model).is_some() {
         return false;
     }
-    !dir.join(format!("{model:08x}.svwc")).is_file()
+    *tries += 1;
+    if dir.join(format!("{model:08x}.svwc")).is_file() {
+        *tries = TRIES;
+        return false;
+    }
+    true
 }
 
 /// Surveys `model` (its box `min`..`max`, model space) with `probe` (from,
@@ -275,8 +289,12 @@ pub fn survey(model: u32, min: Vec3, max: Vec3, mut probe: impl FnMut(Vec3, Vec3
     while let Some((top, bottom)) = survey.next_probe() {
         survey.record(probe(top, bottom).map(|p| p.z));
     }
-    let tris: Vec<svwc::Tri> = survey
-        .finish()
+    let shape = survey.finish();
+    if shape.is_box() {
+        // Too little met: SK8V's own box stands, and the model is tried again.
+        return shape.triangles().len();
+    }
+    let tris: Vec<svwc::Tri> = shape
         .triangles()
         .into_iter()
         .map(|t| svwc::Tri { v: t.map(|p| p.to_array()), material: 0 })
@@ -340,5 +358,19 @@ mod tests {
     fn a_survey_that_meets_nothing_is_the_box() {
         let n = survey(8, Vec3::new(-1.0, -1.0, 0.0), Vec3::new(1.0, 1.0, 1.0), |_, _| None);
         assert_eq!(n, 2 + 4 * 2, "the box's top and four walls");
+    }
+
+    #[test]
+    fn a_model_that_met_nothing_is_tried_again_and_then_left_as_the_box() {
+        let dir = std::env::temp_dir().join("skatev-no-bounds");
+        let _ = TEMPLATE_DIR.set(dir);
+        let model = 0x5eed_0001;
+        let mut asked = 0;
+        while needs_shape(model) {
+            asked += 1;
+            survey(model, Vec3::new(-1.0, -2.0, 0.0), Vec3::new(1.0, 2.0, 1.5), |_, _| None);
+        }
+        assert_eq!(asked, TRIES as usize);
+        assert!(surveyed(model).is_none(), "SK8V's box stands");
     }
 }

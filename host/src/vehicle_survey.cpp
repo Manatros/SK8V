@@ -9,19 +9,34 @@ namespace vehiclesurvey {
 namespace {
 using namespace gta;
 
-// One probe against `vehicle`, in its model space: from and to become world
-// points, and only a hit on that vehicle counts.
+// How the last survey's probes went: no result, nothing hit, another
+// vehicle hit, this one hit.
+struct Tally {
+    int vehicle = 0;
+    float min[3]{}, max[3]{};
+    int pending = 0, none = 0, other = 0, hits = 0;
+};
+
+// One probe against the surveyed vehicle, in its model space: from and to
+// become world points. A hit counts when it is that vehicle, or when its
+// point lies inside the vehicle's box (the line runs inside the box and meets
+// only vehicles, so it can only be this one's body).
 std::uint32_t __cdecl Probe(void* ctx, const float* from, const float* to, float* hit) {
-    const int vehicle = static_cast<int>(reinterpret_cast<std::intptr_t>(ctx));
-    const Vector3 a = Call<Vector3>(GET_OFFSET_FROM_ENTITY_IN_WORLD_COORDS, vehicle, from[0], from[1], from[2]);
-    const Vector3 b = Call<Vector3>(GET_OFFSET_FROM_ENTITY_IN_WORLD_COORDS, vehicle, to[0], to[1], to[2]);
-    const int test = Call<int>(START_EXPENSIVE_SYNCHRONOUS_SHAPE_TEST_LOS_PROBE, a.x, a.y, a.z, b.x, b.y, b.z, 2,
+    Tally& t = *static_cast<Tally*>(ctx);
+    const Vector3 a = Call<Vector3>(GET_OFFSET_FROM_ENTITY_IN_WORLD_COORDS, t.vehicle, from[0], from[1], from[2]);
+    const Vector3 b = Call<Vector3>(GET_OFFSET_FROM_ENTITY_IN_WORLD_COORDS, t.vehicle, to[0], to[1], to[2]);
+    const int test = Call<int>(START_EXPENSIVE_SYNCHRONOUS_SHAPE_TEST_LOS_PROBE, a.x, a.y, a.z, b.x, b.y, b.z, 2 | 16,
                                Call<int>(PLAYER_PED_ID), 7);
     BOOL any = 0;
     Vector3 end{}, normal{};
     Entity entity = 0;
-    if (Call<int>(GET_SHAPE_TEST_RESULT, test, &any, &end, &normal, &entity) != 2 || !any || entity != vehicle) return 0;
-    const Vector3 local = Call<Vector3>(GET_OFFSET_FROM_ENTITY_GIVEN_WORLD_COORDS, vehicle, end.x, end.y, end.z);
+    if (Call<int>(GET_SHAPE_TEST_RESULT, test, &any, &end, &normal, &entity) != 2) return ++t.pending, 0;
+    if (!any) return ++t.none, 0;
+    const Vector3 local = Call<Vector3>(GET_OFFSET_FROM_ENTITY_GIVEN_WORLD_COORDS, t.vehicle, end.x, end.y, end.z);
+    const bool inside = local.x > t.min[0] - 0.1f && local.x < t.max[0] + 0.1f && local.y > t.min[1] - 0.1f &&
+                        local.y < t.max[1] + 0.1f && local.z > t.min[2] - 0.1f && local.z < t.max[2] + 0.1f;
+    if (entity != t.vehicle && !inside) return ++t.other, 0;
+    ++t.hits;
     hit[0] = local.x, hit[1] = local.y, hit[2] = local.z;
     return 1;
 }
@@ -48,12 +63,15 @@ void Tick(RuntimeBridge& runtime, float radius, void (*log)(const char*)) {
         if (!runtime.VehicleNeedsShape(model)) continue;
         Vector3 lo{}, hi{};
         Call<void>(GET_MODEL_DIMENSIONS, model, &lo, &hi);
-        const float min[3] = {lo.x, lo.y, lo.z}, max[3] = {hi.x, hi.y, hi.z};
-        const int tris = runtime.VehicleSurvey(model, min, max, Probe, reinterpret_cast<void*>(static_cast<std::intptr_t>(v)));
+        Tally t{v, {lo.x, lo.y, lo.z}, {hi.x, hi.y, hi.z}};
+        const int tris = runtime.VehicleSurvey(model, t.min, t.max, Probe, &t);
         if (log) {
-            char line[160];
-            std::snprintf(line, sizeof(line), "vehicle shape: model %08x surveyed: %d triangles (%.1f x %.1f x %.1f m)", model,
-                          tris, hi.x - lo.x, hi.y - lo.y, hi.z - lo.z);
+            char line[240];
+            std::snprintf(line, sizeof(line),
+                          "vehicle shape: model %08x surveyed: %d triangles%s (%.1f x %.1f x %.1f m; probes: %d hit, %d other, %d "
+                          "nothing, %d no result)",
+                          model, tris, tris <= 10 ? " = its box" : "", hi.x - lo.x, hi.y - lo.y, hi.z - lo.z, t.hits, t.other,
+                          t.none, t.pending);
             log(line);
         }
         return;  // one model per frame: a survey is up to 500 probes
