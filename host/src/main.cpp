@@ -2085,7 +2085,9 @@ void OrbitCamera(Session& s, const SvOutput& o, const Config& cfg) {
     // The skater (their body, smoothed) or the board (CameraFocus): either way
     // the smoothing below keeps flips and grabs from swinging the camera.
     const SvVec3 f = cfg.cameraOnBoard ? o.board_position : o.skater_position;
-    const float lift = cfg.cameraOnBoard ? 1.15f : 0.45f; // to chest height above the board / the skater's middle
+    // Skate's root is at ground contact (the feet), the board a hand above
+    // it: chest height above either.
+    const float lift = cfg.cameraOnBoard ? 1.15f : 1.25f;
     const float board[3] = {f.x, f.y, f.z + lift};
     auto ease = [&](float rate) { return 1.0f - std::exp(-rate * dt); };
     auto wrap = [](float a) { return std::fmod(a + 540.0f, 360.0f) - 180.0f; };
