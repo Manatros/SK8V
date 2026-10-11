@@ -258,7 +258,7 @@ static SURVEYED: Mutex<Option<HashMap<u32, Arc<Vec<svwc::Tri>>>>> = Mutex::new(N
 static ASKED: Mutex<Option<HashMap<u32, u8>>> = Mutex::new(None);
 /// Surveys per model before it stays SK8V's box (one that met too little of
 /// the body, as when its collision was not loaded yet, is tried again).
-const TRIES: u8 = 3;
+const TRIES: u8 = 8;
 
 /// The surveyed body of `model`, if there is one.
 pub fn surveyed(model: u32) -> Option<Arc<Vec<svwc::Tri>>> {

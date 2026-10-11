@@ -7,6 +7,7 @@
 
 namespace vehiclesurvey {
 namespace {
+constexpr float kReach = 20.0f;
 using namespace gta;
 
 // How the last survey's probes went: no result, nothing hit, another
@@ -54,13 +55,29 @@ void Tick(RuntimeBridge& runtime, float radius, void (*log)(const char*)) {
     const int n = worldGetAllVehicles(vehicles, 256);
     const int ped = Call<int>(PLAYER_PED_ID);
     const Vector3 me = Call<Vector3>(GET_ENTITY_COORDS, ped, 0);
-    for (int i = 0; i < n; ++i) {
-        const int v = vehicles[i];
-        const Vector3 p = Call<Vector3>(GET_ENTITY_COORDS, v, 0);
-        const float dx = p.x - me.x, dy = p.y - me.y, dz = p.z - me.z;
-        if (dx * dx + dy * dy + dz * dz > radius * radius) continue;
-        const std::uint32_t model = Call<std::uint32_t>(GET_ENTITY_MODEL, v);
-        if (!runtime.VehicleNeedsShape(model)) continue;
+    // GTA's shape tests met no vehicle farther than about 20 m (the first
+    // test: every far survey hit nothing, the same model close by did), so
+    // the nearest vehicle within that goes first.
+    const float reach = radius < kReach ? radius : kReach;
+    int v = 0;
+    std::uint32_t model = 0;
+    float best = reach * reach;
+    for (int pass = 0; pass < 8 && !v; ++pass) {
+        int pick = 0;
+        float pickD = best;
+        for (int i = 0; i < n; ++i) {
+            const Vector3 p = Call<Vector3>(GET_ENTITY_COORDS, vehicles[i], 0);
+            const float dx = p.x - me.x, dy = p.y - me.y, dz = p.z - me.z, d = dx * dx + dy * dy + dz * dz;
+            if (d < pickD && vehicles[i]) pick = i + 1, pickD = d;
+        }
+        if (!pick) break;
+        const int candidate = vehicles[pick - 1];
+        vehicles[pick - 1] = 0;  // not again this call
+        const std::uint32_t m = Call<std::uint32_t>(GET_ENTITY_MODEL, candidate);
+        if (runtime.VehicleNeedsShape(m)) v = candidate, model = m;
+    }
+    if (!v) return;
+    {
         Vector3 lo{}, hi{};
         Call<void>(GET_MODEL_DIMENSIONS, model, &lo, &hi);
         Tally t{v, {lo.x, lo.y, lo.z}, {hi.x, hi.y, hi.z}};
@@ -74,7 +91,6 @@ void Tick(RuntimeBridge& runtime, float radius, void (*log)(const char*)) {
                           t.none, t.pending);
             log(line);
         }
-        return;  // one model per frame: a survey is up to 500 probes
     }
 }
 
