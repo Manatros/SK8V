@@ -96,6 +96,9 @@ struct Config {
     // CameraView: the view skating starts in: 0 Skate 3's camera, 1-3 GTA's near, middle, far
     // follow camera (the mouse turns it), 4 GTA's first person. V cycles them while skating.
     int cameraView = 0;
+    std::string cinemaFilter = "NG_filmic01"; // CinemaFilter: GTA timecycle look of the cinematic camera ("" = none)
+    std::string filmerFilter = "NG_filmic06"; // FilmerFilter: the skate filmer's look
+    float filmFilterStrength = 0.85f;         // FilmFilterStrength
     bool cameraRemember = true; // CameraRemember: skating starts in the view last used (walking or skating)
     int gestures[4] = {23, 7, 24, 22}; // EmoteUp/Down/Left/Right: d-pad gesture per direction (kGestures index, -1 None)
     int posture = 0;               // Posture=Normal|Stiff|Slouch|Buff: Skate 3's riding posture (kPostures index)
@@ -262,6 +265,9 @@ const Key kKeys[] = {
      }},
     {"Camera", [](Config& c, const std::string& v) { c.cameraType = menu::SameText(v, "Low") ? 0 : 1; }},
     {"CameraRemember", Store<&Config::cameraRemember>},
+    {"CinemaFilter", [](Config& c, const std::string& v) { c.cinemaFilter = menu::SameText(v, "none") ? "" : v; }},
+    {"FilmerFilter", [](Config& c, const std::string& v) { c.filmerFilter = menu::SameText(v, "none") ? "" : v; }},
+    {"FilmFilterStrength", Store<&Config::filmFilterStrength>},
     {"CameraView", [](Config& c, const std::string& v) {
         const char* names[] = {"Skate", "Near", "Middle", "Far", "FirstPerson", "Head"};
         for (int i = 0; i < 6; ++i)
@@ -992,6 +998,8 @@ void NearMiss(Session& s, const Config& cfg, const std::vector<SvDynamicBody>& b
     }
 }
 
+void FilmLook(Session& s, const Config& cfg, int action, float focus);
+
 // The view the next skate session starts in: with CameraRemember the one
 // last used (or GTA's on-foot near/middle/far/first person when V changed it
 // on foot), else CameraView.
@@ -1019,6 +1027,7 @@ void RememberView(Session& s, const Config& cfg) {
 // skater last was.
 void Leave(Session& s, const Config& cfg, const char* why, bool voluntary) {
     RememberView(s, cfg);
+    FilmLook(s, cfg, 0, 0.0f);
     g_gtaView = false, s.view = -1; // the next entry picks its view again (CameraView / CameraRemember)
     if (s.action) {
         float none[7]{};
@@ -2149,7 +2158,51 @@ void HeadCamera(Session& s, const SvOutput& o) {
 // The cinematic camera or the skate filmer (R) on the script camera: the
 // runtime picks the shot from the skater's place and speed, and the eye is
 // kept in front of walls and off the ground.
-void ActionCamera(Session& s, const SvOutput& o) {
+// The look of the cinematic camera and the skate filmer, as if shot through
+// a real lens: a film grade (a GTA timecycle modifier), the frame (2.39:1
+// bars for the cinematic camera, the filmer's 4:3), a shallow depth of field
+// focused on the skater (cinematic) and a handheld shake (strong for the
+// filmer, slight for the cinematic camera). `action` 0 takes it all off.
+int g_filmLook = 0;
+void FilmLook(Session& s, const Config& cfg, int action, float focus) {
+    if (action != g_filmLook) {
+        if (g_filmLook) {
+            Call<void>(gta::CLEAR_TIMECYCLE_MODIFIER);
+            if (s.cam) Call<void>(gta::STOP_CAM_SHAKING, s.cam, 1), Call<void>(gta::SET_CAM_USE_SHALLOW_DOF_MODE, s.cam, 0);
+        }
+        g_filmLook = action;
+        if (action) {
+            const std::string& look = action == 1 ? cfg.cinemaFilter : cfg.filmerFilter;
+            if (!look.empty()) {
+                Call<void>(gta::SET_TIMECYCLE_MODIFIER, look.c_str());
+                Call<void>(gta::SET_TIMECYCLE_MODIFIER_STRENGTH, std::clamp(cfg.filmFilterStrength, 0.0f, 1.0f));
+            }
+            if (s.cam) {
+                Call<void>(gta::SHAKE_CAM, s.cam, "HAND_SHAKE", action == 1 ? 0.25f : 0.9f);
+                Call<void>(gta::SET_CAM_USE_SHALLOW_DOF_MODE, s.cam, action == 1 ? 1 : 0);
+            }
+        }
+    }
+    if (!action || !s.cam) return;
+    if (action == 1) {
+        Call<void>(gta::SET_USE_HI_DOF);
+        Call<void>(gta::SET_CAM_NEAR_DOF, s.cam, std::max(0.1f, focus - 1.5f));
+        Call<void>(gta::SET_CAM_FAR_DOF, s.cam, focus + 6.0f);
+        Call<void>(gta::SET_CAM_DOF_STRENGTH, s.cam, 1.0f);
+    }
+    const float aspect = Call<float>(gta::GET_ASPECT_RATIO, 0);
+    if (action == 1 && aspect < 2.39f) {
+        const float bar = (1.0f - aspect / 2.39f) * 0.5f;
+        Call<void>(gta::DRAW_RECT, 0.5f, bar * 0.5f, 1.0f, bar, 0, 0, 0, 255);
+        Call<void>(gta::DRAW_RECT, 0.5f, 1.0f - bar * 0.5f, 1.0f, bar, 0, 0, 0, 255);
+    } else if (action == 2 && aspect > 4.0f / 3.0f) {
+        const float bar = (1.0f - (4.0f / 3.0f) / aspect) * 0.5f;
+        Call<void>(gta::DRAW_RECT, bar * 0.5f, 0.5f, bar, 1.0f, 0, 0, 0, 255);
+        Call<void>(gta::DRAW_RECT, 1.0f - bar * 0.5f, 0.5f, bar, 1.0f, 0, 0, 0, 255);
+    }
+}
+
+void ActionCamera(Session& s, const SvOutput& o, const Config& cfg) {
     const float at[3] = {o.skater_position.x, o.skater_position.y, o.skater_position.z};
     const float velocity[3] = {o.velocity.x, o.velocity.y, o.velocity.z};
     float shot[7];
@@ -2179,6 +2232,7 @@ void ActionCamera(Session& s, const SvOutput& o) {
     Call<void>(gta::SET_CAM_COORD, s.cam, eye[0], eye[1], eye[2]);
     Call<void>(gta::SET_CAM_ROT, s.cam, std::atan2(dz, flat) * 57.29578f, 0.0f, std::atan2(-dx, dy) * 57.29578f, 2);
     Call<void>(gta::SET_CAM_FOV, s.cam, std::clamp(shot[6], 10.0f, 120.0f));
+    FilmLook(s, cfg, s.action, std::sqrt(dx * dx + dy * dy + dz * dz));
 }
 
 // The camera view while skating: Skate 3's camera (SK8V's script camera) or
@@ -2449,7 +2503,8 @@ void UpdateActive(Session& s, const Config& cfg, const SvPad& pad) {
     }
     if (s.view >= 1 && s.view <= 3 && !s.action) OrbitCamera(s, o, cfg);
     if (s.view == 5 && !s.action) HeadCamera(s, o);
-    if (s.action) ActionCamera(s, o);
+    if (s.action) ActionCamera(s, o, cfg);
+    else if (g_filmLook) FilmLook(s, cfg, 0, 0.0f);
 
     // Dev A/B (GtaCamera): GTA's gameplay camera renders instead of the script
     // camera (as while aiming), so the frame report compares the two.
@@ -2873,6 +2928,11 @@ std::vector<menu::Page> MenuPages(Session& s) {
         Choice("Skate 3 camera", "Camera", {"High", "Low"}, {"High (Skate 3 default)", "Low"},
                Bound("Camera", [] { g_runtime.SetCameraType(g_config.cameraType); })),
         Number("Field of view scale", "CameraFovScale", D.fovScale, 0.5f, 1.5f, 0.05f, Fixed("x%.2f"), Bound("CameraFovScale")),
+        Choice("Cinematic camera look (R)", "CinemaFilter", {"NG_filmic01", "NG_filmic02", "NG_filmic03", "NG_filmic04", "NG_filmic05", "NG_filmic09", "NG_filmic13", "NG_filmic20", "none"},
+               {"Film 1", "Film 2", "Film 3", "Film 4", "Film 5", "Film 9", "Film 13", "Film 20", "None"}, Bound("CinemaFilter")),
+        Choice("Skate filmer look (R twice)", "FilmerFilter", {"NG_filmic06", "NG_filmic07", "NG_filmic08", "NG_filmic10", "NG_filmic11", "NG_filmic12", "NG_filmic15", "NG_filmic18", "none"},
+               {"Film 6", "Film 7", "Film 8", "Film 10", "Film 11", "Film 12", "Film 15", "Film 18", "None"}, Bound("FilmerFilter")),
+        Number("Film look strength", "FilmFilterStrength", D.filmFilterStrength, 0.0f, 1.0f, 0.05f, Fixed("%.2f"), Bound("FilmFilterStrength")),
     }});
 
     pages.push_back({"Controller and HUD", {
