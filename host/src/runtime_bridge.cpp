@@ -50,6 +50,9 @@ bool RuntimeBridge::Load(const wchar_t* dllPath, const std::string& dataRoot, co
     sym(setPosture_, "sv_set_posture");
     sym(setRidingStyle_, "sv_set_riding_style");
     sym(setEquipment_, "sv_set_equipment");
+    // Optional: vehicle shapes from probes.
+    vehicleNeedsShape_ = reinterpret_cast<SvVehicleNeedsShapeFn>(GetProcAddress(module_, "sv_vehicle_needs_shape"));
+    vehicleSurvey_ = reinterpret_cast<SvVehicleSurveyFn>(GetProcAddress(module_, "sv_vehicle_survey"));
     sym(setVerboseLog_, "sv_set_verbose_log");
     sym(setSkitchStandoff_, "sv_set_skitch_standoff");
     sym(skitchVehicle_, "sv_skitch_vehicle");
@@ -227,6 +230,14 @@ bool RuntimeBridge::SetPosture(int profile) {
 
 bool RuntimeBridge::SetRidingStyle(int style) {
     return runtime_ && setRidingStyle_ && style >= 0 && setRidingStyle_(runtime_, static_cast<std::uint32_t>(style)) != 0;
+}
+
+bool RuntimeBridge::VehicleNeedsShape(std::uint32_t model) {
+    return runtime_ && vehicleNeedsShape_ && vehicleNeedsShape_(runtime_, model) != 0;
+}
+
+int RuntimeBridge::VehicleSurvey(std::uint32_t model, const float (&min)[3], const float (&max)[3], SvModelProbeFn probe, void* ctx) {
+    return runtime_ && vehicleSurvey_ ? static_cast<int>(vehicleSurvey_(runtime_, model, min, max, probe, ctx)) : 0;
 }
 
 bool RuntimeBridge::SetEquipment(float truck, float wheel) {

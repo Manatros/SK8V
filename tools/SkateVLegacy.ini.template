@@ -13,6 +13,9 @@ Snow=0
 RadioControls=1
 ; TrickAnalyzer: 1 = Skate 3's Trick Analyzer shows each trick's stick gesture (bottom centre); 0 = off.
 TrickAnalyzer=1
+; VehicleShapes: 1 = a vehicle model with no extracted bound (most DLC cars) is surveyed once with probes, so it
+;   has a roof, hood and trunk to ride and a gap under it to hippie jump, not its bounding box. 0 = the box.
+VehicleShapes=1
 DrawBoard=1
 ; Native Skate board: owned skeletal drawable, original texture/normal/specular inputs, GTA lighting and shadows.
 BoardNative=1

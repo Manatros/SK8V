@@ -348,6 +348,11 @@ using SvSetPostureFn = std::uint32_t(__cdecl*)(void*, std::uint32_t);
 using SvSetRidingStyleFn = std::uint32_t(__cdecl*)(void*, std::uint32_t);
 // sv_set_equipment(rt, truck, wheel): truck tightness, wheel hardness, 0..1. Export: sv_set_equipment.
 using SvSetEquipmentFn = std::uint32_t(__cdecl*)(void*, float, float);
+// Vehicle shapes from probes (vehicle_shapes.rs, contributed by GTAxSkate). Optional exports.
+using SvVehicleNeedsShapeFn = std::uint32_t(__cdecl*)(void*, std::uint32_t model);
+using SvModelProbeFn = std::uint32_t(__cdecl*)(void* ctx, const float* from, const float* to, float* hit);
+using SvVehicleSurveyFn = std::uint32_t(__cdecl*)(void*, std::uint32_t model, const float* min, const float* max,
+                                                  SvModelProbeFn probe, void* ctx);
 // sv_set_difficulty(rt, index): Skate 3's physics_mode, 0 easy, 1 normal,
 // 2 hardcore, 3 motorized; live and for later sessions. Returns 1 when queued.
 // Export: sv_set_difficulty.

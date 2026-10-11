@@ -50,7 +50,7 @@ python tools/prepare.py --skate "<Skate 3.iso or folder>" --gta "<GTA V folder>"
 | D-pad left/right, gun equipped | Change weapon |
 | Double-tap `X` on foot near a grabbable wall | GTA mantle, then return to Skate |
 
-Swimming switches to GTA automatically and returns to Skate afterward. **Hall of Meat is on by default** and can be disabled in the SK8V menu, alongside other gameplay settings.
+Swimming switches to GTA automatically and returns to Skate afterward. Vehicles without an extracted collision model (most DLC cars) are measured once with probes, so their roof, hood and trunk can be ridden and hippie jumped instead of a box (`VehicleShapes=`). **Hall of Meat is on by default** and can be disabled in the SK8V menu, alongside other gameplay settings.
 
 ### Unable to save settings in the menu?
 

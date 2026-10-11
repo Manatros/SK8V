@@ -56,6 +56,9 @@ public:
     bool SetPosture(int profile);                // 0 none, 1 stiff, 2 slouch, 3 buff
     bool SetRidingStyle(int style);              // 0 none, 1 Loose, 2 Gonzo, 3 Aggressive
     bool SetEquipment(float truck, float wheel); // 0..1 each
+    bool HasVehicleSurvey() const { return vehicleNeedsShape_ && vehicleSurvey_; }
+    bool VehicleNeedsShape(std::uint32_t model);
+    int VehicleSurvey(std::uint32_t model, const float (&min)[3], const float (&max)[3], SvModelProbeFn probe, void* ctx);
     bool SetVerboseLog(bool enabled);
     bool SetSkitchStandoff(float metres);
     int SkitchVehicle() const;
@@ -101,6 +104,8 @@ private:
     SvSetPostureFn setPosture_ = nullptr;
     SvSetRidingStyleFn setRidingStyle_ = nullptr;
     SvSetEquipmentFn setEquipment_ = nullptr;
+    SvVehicleNeedsShapeFn vehicleNeedsShape_ = nullptr;
+    SvVehicleSurveyFn vehicleSurvey_ = nullptr;
     SvSetVerboseLogFn setVerboseLog_ = nullptr;
     SvSetSkitchStandoffFn setSkitchStandoff_ = nullptr;
     SvSkitchVehicleFn skitchVehicle_ = nullptr;

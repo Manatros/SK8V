@@ -29,6 +29,7 @@
 #include "lifecycle.h"
 #include "thread_census.h"
 #include "menu.h"
+#include "vehicle_survey.h"
 #include "ps_pad.h"
 #include "map_states.h"
 #include "pack_loader.h"
@@ -55,6 +56,7 @@ struct Config {
     std::string worldCache;
     float pedZOffset = 1.0f;  // ped origin above Skate's ground contact
     float fovScale = 1.0f;
+    bool vehicleShapes = true; // VehicleShapes: survey vehicles without an extracted bound (a roof to ride, a gap to hippie jump)
     bool drawBoard = true;    // DrawBoard: the native board object (and its mesh fallback)
     bool showDebug = false;   // ShowDebug=1: old debug text HUD (the original Skate HUD is hud_overlay)
     bool verboseLog = false;  // VerboseLog=1: periodic runtime log lines (perf, skater trace, collision streaming)
@@ -222,6 +224,7 @@ const Key kKeys[] = {
     {"WorldCache", Store<&Config::worldCache>},
     {"PedZOffset", Store<&Config::pedZOffset>},
     {"CameraFovScale", Store<&Config::fovScale>},
+    {"VehicleShapes", Store<&Config::vehicleShapes>},
     {"DrawBoard", Store<&Config::drawBoard>},
     {"ShowDebug", Store<&Config::showDebug>},
     {"VerboseLog", Store<&Config::verboseLog>},
@@ -2060,6 +2063,7 @@ void UpdateActive(Session& s, const Config& cfg, const SvPad& pad) {
         s.world.SetPedLaunch(cfg.pedLaunch, cfg.pedLaunchScale, cfg.pedLaunchLift, cfg.pedLaunchSpin);
         s.world.SetPedVoices(cfg.pedPain, cfg.pedGetUpSpeech);
         s.world.SetVehicleDamage(cfg.vehicleDamage, cfg.vehicleDamageScale, cfg.vehicleDamageMin, cfg.vehicleDamageRadius);
+        if (cfg.vehicleShapes) vehiclesurvey::Tick(g_runtime, cfg.dynamicRadius + 10.0f, Log);
         s.world.Gather(s.ped, s.last.board_position, cfg.dynamicRadius, boardnative::Entity());
         if (const std::string line = s.world.TakePositionLog(); !line.empty()) Log(line.c_str());
         const auto& bodies = s.world.Bodies();
