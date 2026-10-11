@@ -62,6 +62,8 @@ Without a controller, the keyboard and mouse play Skate. The keys are in `SkateV
 | Arrow keys / numpad | Trick stick: type the motion (kickflip: down, then up-left) |
 | `E` / hold `E` | Mount or dismount / put the board away (Y) |
 | `F` | On foot (no vehicle within 3.5 m): board out and skate. Skating: back to GTA in one press (steps off first) |
+| `B` (hold, behind a moving car) | Skitch: hold on to the car (Skate's RB) |
+| `Tab` / mouse buttons | Gun out or away (hold `Tab`: GTA's weapon wheel); with a gun out the right mouse button aims and the left one shoots |
 | `F10` or `/` | SK8V's menu (every setting; `/` is the US layout's key) |
 | `,` / `.` | Radio: previous / next station |
 | `N` / hold `J` | Set a session marker / back to it |

@@ -454,6 +454,7 @@ XInputGetStateFn PadGetState() {
 
 // Keyboard and mouse: on when the runtime has them and the INI allows it.
 bool g_keyboard = false;
+bool g_boardArmed = false; // a gun out on the board: the mouse buttons aim and shoot
 // The controller is what the player uses now (the keyboard and mouse were not
 // touched since it was): the keys on screen hide, M and F stay the pad's.
 bool g_controller = false;
@@ -474,7 +475,7 @@ bool GameFocused() {
 // controls the player bound in SkateVKeys.txt, plus F back to GTA.
 void DrawKeyboardHints(bool onFoot) {
     std::string& text = g_keyHints[onFoot ? 1 : 0];
-    if (text.empty()) text = g_runtime.KeyboardHints(onFoot) + "F\tBack to GTA\nF10\tSK8V menu (all settings)\n";
+    if (text.empty()) text = g_runtime.KeyboardHints(onFoot) + "F\tBack to GTA\nTab\tGun out / away (hold: weapon wheel)\nMouse buttons\tAim / shoot (gun out)\nF10\tSK8V menu (all settings)\n";
     float y = 0.25f;
     std::size_t at = 0;
     while (at < text.size()) {
@@ -564,7 +565,17 @@ SvPad ReadPadRaw() {
         SvPad keys{};
         const float mx = Call<float>(gta::GET_DISABLED_CONTROL_NORMAL, 0, 1);
         const float my = Call<float>(gta::GET_DISABLED_CONTROL_NORMAL, 0, 2);
-        const bool typed = g_runtime.KeyboardPad(mx, my, dt, GameFocused() && !menu::IsOpen(), keys);
+        bool typed = g_runtime.KeyboardPad(mx, my, dt, GameFocused() && !menu::IsOpen(), keys);
+        // GTA's own weapon keys on the board: Tab is the gun button (tap: gun
+        // out or away, hold: GTA's weapon wheel), and with a gun out the
+        // right mouse button aims and the left one shoots (SK8V's drive-by
+        // layout on a controller: Back, LB, RB).
+        if (GameFocused() && !menu::IsOpen()) {
+            const auto held = [](int vk) { return (GetAsyncKeyState(vk) & 0x8000) != 0; };
+            if (held(VK_TAB)) keys.buttons |= g_config.gunButton, typed = true;
+            if (g_boardArmed && held(VK_RBUTTON)) keys.buttons |= g_config.aimButton, typed = true;
+            if (g_boardArmed && held(VK_LBUTTON)) keys.buttons |= g_config.fireButton, typed = true;
+        }
         const bool was = s_keyboardInUse;
         if (padUsed) s_keyboardInUse = false;
         else if (typed) s_keyboardInUse = true;
@@ -1814,6 +1825,7 @@ void BoardControls(Session& s, const Config& cfg, SvPad& pad) {
         s.gunChordUsed = false;
     }
 
+    g_boardArmed = s.armed;
     if (!s.armed) return;
 
     const std::string_view state(s.last.state_utf8);

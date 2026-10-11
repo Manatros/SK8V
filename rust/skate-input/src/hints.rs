@@ -62,6 +62,7 @@ pub fn skating(controls: &Controls, pad: bool, on_foot: bool) -> Vec<Hint> {
             push(&mut out, c, pad, "", &["mouse_trick"], "Hold: mouse flicks");
         }
         push(&mut out, c, pad, "LT / RT", &["lt", "rt"], "Grabs");
+        push(&mut out, c, pad, "RB", &["rb"], "Hold behind a car: skitch");
         push(&mut out, c, pad, "Y", &["y"], "Get off");
     }
     push(&mut out, c, pad, "LB + Down", &["marker_place"], "Set marker");
@@ -90,6 +91,8 @@ pub fn keyboard(controls: &Controls, on_foot: bool) -> Vec<Hint> {
     push(&mut out, c, false, "", &["trick_up", "trick_left", "trick_down", "trick_right"], "Trick stick (flick)");
     push(&mut out, c, false, "", &["manual", "nose_manual"], "Manual / nose manual");
     push(&mut out, c, false, "", &["lt", "rt"], "Grabs");
+    // Skate's GrabWorld (RB): behind a moving car it holds on (skitching).
+    push(&mut out, c, false, "", &["rb"], "Hold behind a car: skitch");
     push(&mut out, c, false, "", &["hippie"], "Hippie jump");
     push(&mut out, c, false, "", &["x"], "X");
     push(&mut out, c, false, "", &["b"], "B");
