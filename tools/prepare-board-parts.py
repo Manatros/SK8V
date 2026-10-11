@@ -36,6 +36,14 @@ BONES = ['SKATEBOARD_ROOT', 'TRUCK_FRONT', 'TRUCK_BACK', 'LEFT_WHEELFRONT',
 RIGID = ('d', 'g')
 TRUCKS = ('t', 'tb', 'th')
 WHEELS = ('w',)
+# Skate 3 has one deck, one truck and one wheel model, so the native board's
+# retail specular map of each fits every finish of that part: it gives the
+# grip its grain, the wood and metal their shine, the urethane its sheen.
+RETAIL = {'d': 'skateboard', 'g': 'skateboard', 't': 'skatetruck', 'tb': 'skatetruck', 'th': 'skatetruck',
+          'w': 'skatewheel'}
+# The specular strength, falloff and fresnel the native board uses; a painted
+# part keeps its paint's own (matte, gloss, metallic).
+SHINE = ('specularIntensityMult', 'specularFalloffMult', 'specularFresnel')
 
 
 def kind(name):
@@ -49,6 +57,9 @@ def floats(row, start, count):
 def board_template(board_xml):
     root = ET.parse(board_xml).getroot()
     shader = root.find('./ShaderGroup/Shaders/Item')
+    # The native board's embedded textures (retail_* maps), by name.
+    retail = {t.find('Name').text: t for t in root.iter('Item') if t.find('Usage') is not None and t.find('Name') is not None
+              and (t.find('Name').text or '').startswith('retail_')}
     skeleton = root.find('./Skeleton')
     trucks = []
     for geometry in root.iter('Geometries'):
@@ -62,7 +73,7 @@ def board_template(board_xml):
     # their truck (the deck is above 0.08 and far wider in y).
     truck_points = np.array([p for p, b in trucks if b != 0 or p[2] < 0.088])
     truck_bones = np.array([b for p, b in trucks if b != 0 or p[2] < 0.088])
-    return shader, skeleton, truck_points, truck_bones
+    return shader, skeleton, truck_points, truck_bones, retail, Path(board_xml).parent
 
 
 def translation(deck_xml, board_xml):
@@ -115,7 +126,9 @@ def text(values):
 
 
 def convert(source_dir, name, out_name, offset, template, work):
-    shader_template, skeleton, truck_points, truck_bones = template
+    shader_template, skeleton, truck_points, truck_bones, retail, retail_dir = template
+    spec = f'retail_{RETAIL[kind(name)]}_s' if kind(name) in RETAIL and f'retail_{RETAIL[kind(name)]}_s' in retail else None
+    painted = 'paint' in name
     drawable = ET.parse(source_dir / f'{name}.ydr.xml').getroot()
     textures = ET.parse(source_dir / f'{name}.ytd.xml').getroot()
     name_kind = kind(name)
@@ -131,7 +144,11 @@ def convert(source_dir, name, out_name, offset, template, work):
             if mine is None:
                 continue
             if p.get('type') == 'Texture':
-                p.find('Name').text = mine.find('Name').text
+                # The exporter's flat placeholder spec map gives way to the retail one.
+                own = mine.find('Name').text
+                p.find('Name').text = spec if spec and p.get('name') == 'SpecSampler' and own.startswith('skate3board_') else own
+            elif p.get('name') in SHINE and spec and not painted:
+                continue  # the native board's shine
             else:
                 for axis in 'xyzw':
                     if mine.get(axis) is not None:
@@ -140,6 +157,11 @@ def convert(source_dir, name, out_name, offset, template, work):
         shaders.insert(i, shader)
     embedded = copy.deepcopy(textures)
     embedded.tag = 'TextureDictionary'
+    if spec:
+        for t in list(embedded):
+            if (t.find('Name').text or '').startswith('skate3board_s'):
+                embedded.remove(t)
+        embedded.append(copy.deepcopy(retail[spec]))
     group.insert(0, embedded)
     # Geometry: into the board's object space, rigidly skinned like the board.
     lo, hi = np.full(3, np.inf), np.full(3, -np.inf)
@@ -187,6 +209,8 @@ def convert(source_dir, name, out_name, offset, template, work):
     folder.mkdir(parents=True, exist_ok=True)
     for dds in (source_dir / name).glob('*.dds'):
         shutil.copyfile(dds, folder / dds.name)
+    if spec:
+        shutil.copyfile(retail_dir / f'{spec}.dds', folder / f'{spec}.dds')
     xml = folder / f'{out_name}.ydr.xml'
     ET.ElementTree(drawable).write(xml, encoding='UTF-8', xml_declaration=True)
     return xml
