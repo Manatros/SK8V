@@ -1257,9 +1257,9 @@ void TryEnter(Session& s, const Config& cfg, bool strict) {
             return;
         }
     }
-    // Skate reads only the controller (no keyboard): without one the player
-    // would be held with nothing to move them.
-    if (!ReadPadRaw().connected) {
+    // Skate reads a controller, or the keyboard when it is on (SkateVKeys.txt):
+    // with neither the player would be held with nothing to move them.
+    if (!ReadPadRaw().connected && !g_keyboard) {
         static bool logged = false;
         if (!logged) {
             logged = true;
