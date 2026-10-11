@@ -186,9 +186,8 @@ bool DynamicWorld::AddBody(int entity, EntityKind kind) {
     return true;
 }
 
-void DynamicWorld::Gather(int self, SvVec3 center, float radius, int presentationEntity) {
-    if (doorRefs_.size() > 4096) doorRefs_.clear(); // handles of long-gone objects
 void DynamicWorld::Gather(int self, SvVec3 center, float radius, const std::vector<int>& presentation) {
+    if (doorRefs_.size() > 4096) doorRefs_.clear(); // handles of long-gone objects
     bodies_.clear();
     parts_.clear();
     debris_.clear();
