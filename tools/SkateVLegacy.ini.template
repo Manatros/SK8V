@@ -13,6 +13,9 @@ Snow=0
 RadioControls=1
 ; TrickAnalyzer: 1 = Skate 3's Trick Analyzer shows each trick's stick gesture (bottom centre); 0 = off.
 TrickAnalyzer=1
+; PedsSurvive: 1 = peds the board knocks down cannot die until they are up again (bowled over, not
+;   killed; with PedLaunch=0 they are pushed rather than launched). 0 = as Skate's impulse leaves them.
+PedsSurvive=0
 DrawBoard=1
 ; Native Skate board: owned skeletal drawable, original texture/normal/specular inputs, GTA lighting and shadows.
 BoardNative=1
