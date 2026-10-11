@@ -2130,7 +2130,19 @@ void OrbitCamera(Session& s, const SvOutput& o, const Config& cfg) {
         want = std::max(0.9f, d - 0.25f);
     }
     dist = want < dist ? want : dist + (want - dist) * ease(3.0f);
-    Call<void>(gta::SET_CAM_COORD, s.cam, aim[0] - dir[0] * dist, aim[1] - dir[1] * dist, aim[2] - dir[2] * dist);
+    float eye[3] = {aim[0] - dir[0] * dist, aim[1] - dir[1] * dist, aim[2] - dir[2] * dist};
+    // Never under the ground (slopes, stairs, the skater below the camera):
+    // at least 0.3 m above what is under the eye.
+    {
+        const int down = Call<int>(gta::START_EXPENSIVE_SYNCHRONOUS_SHAPE_TEST_LOS_PROBE, eye[0], eye[1], eye[2] + 1.5f, eye[0], eye[1],
+                                   eye[2] - 2.0f, 1, s.ped, 7);
+        BOOL under = 0;
+        Vector3 ground{}, n{};
+        Entity e = 0;
+        if (Call<int>(gta::GET_SHAPE_TEST_RESULT, down, &under, &ground, &n, &e) == 2 && under && eye[2] < ground.z + 0.3f)
+            eye[2] = ground.z + 0.3f;
+    }
+    Call<void>(gta::SET_CAM_COORD, s.cam, eye[0], eye[1], eye[2]);
     Call<void>(gta::SET_CAM_ROT, s.cam, pitch, 0.0f, camYaw, 2);
     Call<void>(gta::SET_CAM_FOV, s.cam, std::clamp(55.0f * cfg.fovScale, 20.0f, 120.0f));
     g_orbitYaw = camYaw;
