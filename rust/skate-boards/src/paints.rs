@@ -49,9 +49,9 @@ impl Finish {
     /// Shine for the models' specular map (0 to 255).
     pub fn shine(self) -> u8 {
         match self {
-            Self::Matte => 12,
-            Self::Gloss => 110,
-            Self::Metallic => 230,
+            Self::Matte => 4,
+            Self::Gloss => 140,
+            Self::Metallic => 255,
         }
     }
 }
