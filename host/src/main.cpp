@@ -342,7 +342,8 @@ std::atomic<bool> g_lineRequested{false};
 std::atomic<bool> g_lineNext{false};  // next line in Line='s ';' list
 
 void Keyboard(DWORD key, WORD, BYTE, BOOL, BOOL, BOOL wasDownBefore, BOOL isUpNow) {
-    if (key == VK_OEM_2 && !wasDownBefore && !isUpNow) g_menuToggle.store(true);
+    // F10 too: '/' is VK_OEM_2 only on a US layout (Shift+7 on a German one).
+    if ((key == VK_OEM_2 || key == VK_F10) && !wasDownBefore && !isUpNow) g_menuToggle.store(true);
 }
 
 // ---- GTA presentation ------------------------------------------------------
@@ -473,7 +474,7 @@ bool GameFocused() {
 // controls the player bound in SkateVKeys.txt, plus F back to GTA.
 void DrawKeyboardHints(bool onFoot) {
     std::string& text = g_keyHints[onFoot ? 1 : 0];
-    if (text.empty()) text = g_runtime.KeyboardHints(onFoot) + "F\tBack to GTA\n/\tSK8V menu (all settings)\n";
+    if (text.empty()) text = g_runtime.KeyboardHints(onFoot) + "F\tBack to GTA\nF10\tSK8V menu (all settings)\n";
     float y = 0.25f;
     std::size_t at = 0;
     while (at < text.size()) {
@@ -2730,6 +2731,28 @@ std::vector<menu::Page> MenuPages(Session& s) {
         Number("Master gain", "AudioMasterGain", 1, 0, 2, 0.1f, Fixed("x%.1f"), {}, true),
         Choice("Output", "AudioOutput", {"Gta", "Off"}, {"GTA mixer", "Off"}, {}, true),
     }});
+
+    // Keyboard keys (contributed by GTAxSkate): Enter, then the new key; saved to SkateVKeys.txt.
+    {
+        menu::Page keys{"Keyboard keys", {}};
+        const std::pair<const char*, const char*> actions[] = {
+            {"lean_forward", "Lean forward / walk"}, {"lean_back", "Lean back"}, {"steer_left", "Steer left"},
+            {"steer_right", "Steer right"}, {"a", "Push"}, {"pop", "Ollie (hold, let go)"}, {"trick_up", "Trick stick up"},
+            {"trick_down", "Trick stick down"}, {"trick_left", "Trick stick left"}, {"trick_right", "Trick stick right"},
+            {"manual", "Manual"}, {"nose_manual", "Nose manual"}, {"lt", "Left grab"}, {"rt", "Right grab"},
+            {"hippie", "Hippie jump"}, {"y", "Get on / off (hold: put away)"}, {"x", "X"}, {"b", "B"},
+            {"retry", "Radio: previous"}, {"object_dropper", "Radio: next"}, {"marker_place", "Set a marker"},
+            {"marker_return", "Back to the marker (hold)"}};
+        for (const auto& [id, label] : actions) {
+            const std::string action = id;
+            keys.items.push_back(menu::Key(
+                label, [action] { const std::string k = g_runtime.KeyboardKey(action.c_str()); return k.empty() ? std::string("-") : k; },
+                [action](int vk) {
+                    if (g_runtime.KeyboardBind(action.c_str(), vk)) g_keyHints[0].clear(), g_keyHints[1].clear();
+                }));
+        }
+        pages.push_back(std::move(keys));
+    }
 
     pages.push_back({"Controller and HUD", {
         Chord("Open menu (with /)", "MenuButton", D.life.menuButton, true, Bound("MenuButton")),

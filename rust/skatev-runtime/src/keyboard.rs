@@ -32,6 +32,7 @@ unsafe fn GetAsyncKeyState(_key: i32) -> i16 {
 struct Keyboard {
     controls: Controls,
     translator: Translator,
+    path: PathBuf,
 }
 
 static KEYBOARD: Mutex<Option<Keyboard>> = Mutex::new(None);
@@ -83,7 +84,7 @@ pub fn configure(path: PathBuf) -> Vec<String> {
         }
     };
     if let Ok(mut k) = KEYBOARD.lock() {
-        *k = Some(Keyboard { controls, translator: Translator::new() });
+        *k = Some(Keyboard { controls, translator: Translator::new(), path: path.clone() });
     }
     problems
 }
@@ -118,6 +119,25 @@ pub fn hints(on_foot: bool) -> String {
         .collect()
 }
 
+/// The key bound to action `id` (by `Controls::ACTIONS` id), "" when none.
+pub fn key_of(id: &str) -> String {
+    let Ok(guard) = KEYBOARD.lock() else { return String::new() };
+    let (Some(k), Some(i)) = (guard.as_ref(), Controls::action_index(id)) else { return String::new() };
+    k.controls.keys.get(i).and_then(|keys| keys.first()).map(|k| k.to_string()).unwrap_or_default()
+}
+
+/// Binds Windows virtual key `vk` to action `id` alone (taking it from any
+/// other action) and saves the key file. The key's name, or an error.
+pub fn bind(id: &str, vk: u32) -> Result<String, String> {
+    let name = skate_input::keys::from_virtual_key(vk).ok_or_else(|| format!("key {vk:#x} has no name"))?;
+    let mut guard = KEYBOARD.lock().map_err(|_| "keyboard state poisoned".to_string())?;
+    let k = guard.as_mut().ok_or("the keyboard is not configured")?;
+    let index = Controls::action_index(id).ok_or_else(|| format!("no action {id}"))?;
+    k.controls.bind(index, name)?;
+    std::fs::write(&k.path, k.controls.to_text()).map_err(|e| e.to_string())?;
+    Ok(name.to_string())
+}
+
 pub fn is_active(p: &skate_input::Pad) -> bool {
     p.buttons != 0 || p.triggers != [0, 0] || p.left.iter().chain(&p.right).any(|v| v.abs() > 0.01)
 }
@@ -138,6 +158,17 @@ mod tests {
         let text = std::fs::read_to_string(&path).unwrap();
         assert!(text.contains("bind object_dropper = Period") && text.contains("bind marker_return = J"), "{text}");
         assert!(hints(false).contains("Comma, Period\tRadio"), "{}", hints(false));
+    }
+
+    #[test]
+    fn a_key_is_rebound_and_saved() {
+        let path = std::env::temp_dir().join(format!("skatev-keys-bind-{}.txt", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        configure(path.clone());
+        assert_eq!(bind("hippie", 0x47).unwrap(), "G"); // VK 'G'
+        assert_eq!(key_of("hippie"), "G");
+        assert!(std::fs::read_to_string(&path).unwrap().contains("bind hippie = G"));
+        assert!(bind("no_such_action", 0x47).is_err());
     }
 
     #[test]

@@ -1140,6 +1140,30 @@ pub unsafe extern "C" fn sv_keyboard_hints(_rt: *mut c_void, on_foot: u32, buf: 
     })
 }
 
+/// The key bound to Skate action `id` (UTF-8, SkateVKeys.txt's names), into
+/// `buf`; returns the bytes needed (NUL included).
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sv_keyboard_key(_rt: *mut c_void, id: *const c_char, buf: *mut u8, cap: u32) -> u32 {
+    guard(0, || {
+        let text = keyboard::key_of(&unsafe { str_arg(id) });
+        let need = text.len() as u32 + 1;
+        if !buf.is_null() && cap >= need {
+            unsafe {
+                std::ptr::copy_nonoverlapping(text.as_ptr(), buf, text.len());
+                *buf.add(text.len()) = 0;
+            }
+        }
+        need
+    })
+}
+
+/// Binds Windows virtual key `vk` to Skate action `id` alone and saves
+/// SkateVKeys.txt. Returns 1 when bound.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sv_keyboard_bind(_rt: *mut c_void, id: *const c_char, vk: u32) -> u32 {
+    guard(0, || keyboard::bind(&unsafe { str_arg(id) }, vk).is_ok() as u32)
+}
+
 /// The SkateV ramp-lip rule (overlay patch 0033): nonzero (the default) lets
 /// a rolling board stall on a lip only riding up into it slowly; 0 restores
 /// retail grind admission. Returns 1 when queued.

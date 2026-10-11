@@ -60,6 +60,8 @@ bool RuntimeBridge::Load(const wchar_t* dllPath, const std::string& dataRoot, co
     keyboardConfigure_ = reinterpret_cast<SvKeyboardConfigureFn>(GetProcAddress(module_, "sv_keyboard_configure"));
     keyboardPad_ = reinterpret_cast<SvKeyboardPadFn>(GetProcAddress(module_, "sv_keyboard_pad"));
     keyboardHints_ = reinterpret_cast<SvKeyboardHintsFn>(GetProcAddress(module_, "sv_keyboard_hints"));
+    keyboardKey_ = reinterpret_cast<SvKeyboardKeyFn>(GetProcAddress(module_, "sv_keyboard_key"));
+    keyboardBind_ = reinterpret_cast<SvKeyboardBindFn>(GetProcAddress(module_, "sv_keyboard_bind"));
     if (!missing.empty()) {
         error = "SkateVRuntime.dll is missing required ABI exports: " + missing;
         return false;
@@ -216,6 +218,17 @@ bool RuntimeBridge::KeyboardConfigure(const std::string& utf8KeysFile, std::uint
     if (!runtime_ || !keyboardConfigure_) return false;
     problems = keyboardConfigure_(runtime_, utf8KeysFile.c_str());
     return true;
+}
+
+std::string RuntimeBridge::KeyboardKey(const char* action) {
+    if (!runtime_ || !keyboardKey_) return {};
+    char text[64]{};
+    keyboardKey_(runtime_, action, text, sizeof(text));
+    return text;
+}
+
+bool RuntimeBridge::KeyboardBind(const char* action, int vk) {
+    return runtime_ && keyboardBind_ && keyboardBind_(runtime_, action, static_cast<std::uint32_t>(vk)) != 0;
 }
 
 std::string RuntimeBridge::KeyboardHints(bool onFoot) {
