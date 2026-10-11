@@ -7,8 +7,12 @@ use std::collections::BTreeMap;
 
 use crate::{BoardChoice, Library, Part, PartRef};
 
-/// Wear at which a part shows its worn finish.
+/// Wear at which a part is worn through.
 pub const WORN: f32 = 1.0;
+/// Wear from which a part shows Skate 3's worn finish: halfway, so a board
+/// looks used after about half a session of hard skating (the scuff decals in
+/// between cannot be drawn on the skinned board parts).
+pub const WORN_LOOK: f32 = 0.5;
 
 /// The scuffs a deck worn `wear` shows: none, then light, worn, battered
 /// (1 to 3) on the way to its worn finish.
@@ -67,7 +71,7 @@ impl Wear {
         self.parts.get(&key(part)).copied().unwrap_or(0.)
     }
 
-    /// Wears a part; true when that wore it through.
+    /// Wears a part; true when its worn finish starts to show ([`WORN_LOOK`]).
     pub fn add(&mut self, part: &PartRef, amount: f32) -> bool {
         if !amount.is_finite() || amount <= 0. {
             return false;
@@ -75,7 +79,8 @@ impl Wear {
         let wear = self.parts.entry(key(part)).or_insert(0.);
         let before = *wear;
         *wear = (*wear + amount).min(WORN * 2.);
-        before < WORN && *wear >= WORN
+        // True when the look changes: the worn finish starts to show.
+        before < WORN_LOOK && *wear >= WORN_LOOK
     }
 
     /// Wears the parts of `board` (new finishes) by `usage`; true when one
@@ -96,13 +101,13 @@ impl Wear {
         self.parts.remove(&key(part));
     }
 
-    /// The board as it looks after its wear: each worn-through part in its
-    /// worn finish, when Skate 3 has one.
+    /// The board as it looks after its wear: each part worn halfway or more
+    /// in its worn finish, when Skate 3 has one.
     pub fn look(&self, board: &BoardChoice, library: &Library) -> BoardChoice {
         let mut out = board.clone();
         for part in Part::ALL {
             if let Some(wanted) = board.get(part)
-                && self.of(wanted) >= WORN
+                && self.of(wanted) >= WORN_LOOK
                 && let Some(worn) = library.worn_of(part, wanted)
             {
                 out.set(part, Some(worn));
