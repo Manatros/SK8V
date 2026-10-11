@@ -32,6 +32,7 @@ add_library(SkateVLegacy SHARED
   src/xray_renderer.cpp
   src/records_ui.cpp
   src/board_native.cpp
+  src/injuries.cpp
   src/stall_sampler.cpp
   src/physics_level.cpp
   src/menu.cpp
