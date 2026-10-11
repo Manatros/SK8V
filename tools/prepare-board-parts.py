@@ -127,8 +127,10 @@ def text(values):
 
 def convert(source_dir, name, out_name, offset, template, work):
     shader_template, skeleton, truck_points, truck_bones, retail, retail_dir = template
-    spec = f'retail_{RETAIL[kind(name)]}_s' if kind(name) in RETAIL and f'retail_{RETAIL[kind(name)]}_s' in retail else None
     painted = 'paint' in name
+    # A painted part's own spec map holds its paint's shine (matte, gloss,
+    # metallic): it keeps it, with its own strength.
+    spec = None if painted else (f'retail_{RETAIL[kind(name)]}_s' if kind(name) in RETAIL and f'retail_{RETAIL[kind(name)]}_s' in retail else None)
     drawable = ET.parse(source_dir / f'{name}.ydr.xml').getroot()
     textures = ET.parse(source_dir / f'{name}.ytd.xml').getroot()
     name_kind = kind(name)
