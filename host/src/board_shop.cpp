@@ -182,6 +182,14 @@ void Hint(const char* text) {
     gta::Text(text, 0.0f, 0.93f, 0.36f, 255, 255, 255, 230, gta::Align::Right, 0.985f, true);
 }
 
+// GTA's own help box (top left), as the store's other goods prompt with it:
+// "~INPUT_CONTEXT~" draws the key the player has for E.
+void HelpBox(const char* text) {
+    Call<void>(BEGIN_TEXT_COMMAND_DISPLAY_HELP, "STRING");
+    Call<void>(ADD_TEXT_COMPONENT_SUBSTRING_PLAYER_NAME, text);
+    Call<void>(END_TEXT_COMMAND_DISPLAY_HELP, 0, 0, 1, -1);
+}
+
 void Sound(const char* name, const char* set = "HUD_FRONTEND_DEFAULT_SOUNDSET") {
     Call<void>(PLAY_SOUND_FRONTEND, -1, name, set, 1);
 }
@@ -380,7 +388,10 @@ void Tick(bool busy) {
         return;
     const bool atShow = LookingAtShow(ped);
     if (atShow) Call<void>(DISABLE_CONTROL_ACTION, 0, 51, 1);  // INPUT_CONTEXT: ours while looking at the boards
-    Hint(atShow ? "E or G:  Skate 3 boards (complete or build your own)" : "G / D-pad left:  Skate 3 boards (complete or build your own)");
+    // Looking at the boards: GTA's help box, as at the clothes. Elsewhere in
+    // the store the box stays the store's own, and a line names G.
+    if (atShow) HelpBox("Press ~INPUT_CONTEXT~ to browse Skate 3 boards.");
+    else Hint("G / D-pad left:  Skate 3 boards (complete or build your own)");
     // Skate mode disables GTA's controls; the key is read either way.
     const bool e = atShow && Call<BOOL>(IS_DISABLED_CONTROL_JUST_PRESSED, 0, 51);
     if ((e || Call<BOOL>(IS_CONTROL_JUST_PRESSED, 0, kOpen) || Call<BOOL>(IS_DISABLED_CONTROL_JUST_PRESSED, 0, kOpen)) &&
