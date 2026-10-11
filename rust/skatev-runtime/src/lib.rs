@@ -1069,7 +1069,7 @@ pub unsafe extern "C" fn sv_set_equipment(rt: *mut c_void, truck: f32, wheel: f3
     })
 }
 
-/// Trainer tuning (overlay patch 0049): `tuning` points at 11 positive
+/// Trainer tuning (overlay patch 1000): `tuning` points at 11 positive
 /// multipliers in TrainerTuning order (pop, grind pop, push speed, push power,
 /// braking, steering, wobble, off-board jump, grip, turn power, manual drag),
 /// 1 = Skate 3; `hold_fakie` nonzero keeps fakie. Applied live and to every
@@ -1090,7 +1090,7 @@ pub unsafe extern "C" fn sv_set_trainer(rt: *mut c_void, tuning: *const f32, hol
     })
 }
 
-/// The hippie jump's height, times Skate 3's (overlay patch 0050): above 1 it
+/// The hippie jump's height, times Skate 3's (overlay patch 1001): above 1 it
 /// clears a car. Applied live and to every later session. Returns 1 when queued.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sv_set_hippie_jump(rt: *mut c_void, scale: f32) -> u32 {

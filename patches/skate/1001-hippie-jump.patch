@@ -88,7 +88,7 @@ diff --git a/crates/skate-host/src/physics/bridge/trainer.rs b/crates/skate-host
          true
      }
 +
-+    /// How high a hippie jump goes, times Skate 3's (overlay patch 0050):
++    /// How high a hippie jump goes, times Skate 3's (overlay patch 1001):
 +    /// above 1 it clears a car. False (unchanged) unless positive.
 +    pub fn set_hippie_jump(&mut self, scale: f32) -> bool {
 +        if !scale.is_finite() || scale <= 0.0 {

@@ -83,9 +83,9 @@ pub enum Job {
     RidingStyle(u32),
     /// Truck tightness, wheel hardness (0..1).
     Equipment(f32, f32),
-    /// Trainer multipliers and hold-fakie (overlay patch 0049).
+    /// Trainer multipliers and hold-fakie (overlay patch 1000).
     Trainer([f32; 11], bool),
-    /// The hippie jump's height, times Skate 3's (overlay patch 0050).
+    /// The hippie jump's height, times Skate 3's (overlay patch 1001).
     HippieJump(f32),
     /// Metres behind a car's rear the skitch grab line sits.
     SkitchStandoff(f32),
@@ -1783,9 +1783,9 @@ struct SkaterPrefs {
     posture: u32,
     style: u32,
     equipment: (f32, f32),
-    /// Trainer multipliers (TrainerTuning order) and hold-fakie (patch 0049).
+    /// Trainer multipliers (TrainerTuning order) and hold-fakie (patch 1000).
     trainer: ([f32; 11], bool),
-    /// The hippie jump's height scale (patch 0050).
+    /// The hippie jump's height scale (patch 1001).
     hippie_jump: f32,
 }
 
