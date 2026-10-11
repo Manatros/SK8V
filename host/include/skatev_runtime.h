@@ -695,3 +695,9 @@ using SvShopCloseFn = void(__cdecl*)(void*);
 using SvShopInputFn = std::uint32_t(__cdecl*)(void*, std::uint32_t input, std::int64_t cash, SvShopResult* out);
 using SvShopTextFn = std::uint32_t(__cdecl*)(void*, std::uint32_t which, char* buf, std::uint32_t cap);
 using SvShopRestPoseFn = std::uint32_t(__cdecl*)(void*, const float* at, SvBoardPose* out);
+// A line the host casts for the store's show: writes where it hits, returns 1 (else 0).
+using SvProbeFn = std::uint32_t(__cdecl*)(void* ctx, const float* from, const float* to, float* hit);
+// sv_shop_display(rt, tier, interior[3], eye[3], clerk[6] or null, day, probe, ctx, out[max*16], max,
+// models, cap): the boards on show (entity matrices, comma lists of models a line each); returns how many.
+using SvShopDisplayFn = std::uint32_t(__cdecl*)(void*, std::uint32_t, const float*, const float*, const float*,
+                                                std::uint32_t, SvProbeFn, void*, float*, std::uint32_t, char*, std::uint32_t);

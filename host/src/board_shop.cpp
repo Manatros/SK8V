@@ -69,6 +69,89 @@ std::vector<std::string> Split(const std::string& text, char by) {
     return out;
 }
 
+// The boards on show in the store the player is in (found once per store and
+// kept by the runtime; tried again every 1.5 s until a place is found).
+struct OnShow {
+    float at[16];
+    std::vector<std::string> models;
+};
+std::vector<OnShow> g_onShow;
+std::uint32_t g_showStore = 0;  // the interior they are for
+DWORD g_showRetry = 0;
+
+std::uint32_t __cdecl Probe(void* ctx, const float* from, const float* to, float* hit) {
+    const int test = Call<int>(START_EXPENSIVE_SYNCHRONOUS_SHAPE_TEST_LOS_PROBE, from[0], from[1], from[2], to[0], to[1], to[2],
+                               1 | 16, static_cast<int>(reinterpret_cast<std::intptr_t>(ctx)), 7);
+    BOOL any = 0;
+    Vector3 end{}, normal{};
+    Entity entity = 0;
+    if (Call<int>(GET_SHAPE_TEST_RESULT, test, &any, &end, &normal, &entity) != 2 || !any) return 0;
+    hit[0] = end.x, hit[1] = end.y, hit[2] = end.z;
+    return 1;
+}
+
+// The store's clerk standing near (s_f_y_shop_low/mid, the mask shop's).
+int Clerk(int ped) {
+    static int peds[256];
+    const int n = worldGetAllPeds(peds, 256);
+    const Vector3 me = Call<Vector3>(GET_ENTITY_COORDS, ped, 0);
+    int best = 0;
+    float bestD = 20.0f * 20.0f;
+    for (int i = 0; i < n; ++i) {
+        const int p = peds[i];
+        if (p == ped || Call<BOOL>(IS_ENTITY_DEAD, p, 0)) continue;
+        const std::uint32_t m = Call<std::uint32_t>(GET_ENTITY_MODEL, p);
+        if (m != util::Joaat("s_f_y_shop_low") && m != util::Joaat("s_f_y_shop_mid") && m != util::Joaat("s_m_y_shop_mask")) continue;
+        const Vector3 c = Call<Vector3>(GET_ENTITY_COORDS, p, 0);
+        const float d = (c.x - me.x) * (c.x - me.x) + (c.y - me.y) * (c.y - me.y) + (c.z - me.z) * (c.z - me.z);
+        if (d < bestD) bestD = d, best = p;
+    }
+    return best;
+}
+
+void ClearShow() {
+    if (!g_onShow.empty()) boardparts::ClearDisplay();
+    g_onShow.clear();
+    g_showStore = 0;
+}
+
+// Boards on show: placed once, then kept posed at rest every frame.
+void ShowBoards(int ped, int tier) {
+    const int interior = Call<int>(GET_INTERIOR_FROM_ENTITY, ped);
+    Vector3 place{};
+    std::uint32_t hash = 0;
+    Call<void>(GET_INTERIOR_LOCATION_AND_NAMEHASH, interior, &place, &hash);
+    const std::uint32_t key = static_cast<std::uint32_t>(interior);
+    if (key != g_showStore) ClearShow(), g_showStore = key, g_showRetry = 0;
+    if (g_onShow.empty() && static_cast<LONG>(GetTickCount() - g_showRetry) >= 0) {
+        g_showRetry = GetTickCount() + 1500;
+        const Vector3 me = Call<Vector3>(GET_ENTITY_COORDS, ped, 0);
+        const float at[3] = {place.x, place.y, place.z}, eye[3] = {me.x, me.y, me.z + 0.3f};
+        float clerk[6];
+        const int c = Clerk(ped);
+        if (c) {
+            const Vector3 p = Call<Vector3>(GET_ENTITY_COORDS, c, 0), f = Call<Vector3>(GET_ENTITY_FORWARD_VECTOR, c);
+            clerk[0] = p.x, clerk[1] = p.y, clerk[2] = p.z, clerk[3] = f.x, clerk[4] = f.y, clerk[5] = f.z;
+        }
+        const unsigned day = static_cast<unsigned>(Call<int>(GET_CLOCK_MONTH) * 31 + Call<int>(GET_CLOCK_DAY_OF_MONTH));
+        float out[8 * 16];
+        std::vector<std::string> models;
+        const int n = g_rt->ShopDisplay(tier, at, eye, c ? clerk : nullptr, day, Probe,
+                                        reinterpret_cast<void*>(static_cast<std::intptr_t>(ped)), out, 8, models);
+        for (int i = 0; i < n; ++i) {
+            OnShow b;
+            std::memcpy(b.at, out + i * 16, sizeof(b.at));
+            b.models = Split(models[static_cast<std::size_t>(i)], ',');
+            g_onShow.push_back(b);
+        }
+        if (n) Log("board shop: " + std::to_string(n) + " boards on show (" + (c ? "behind the till" : "on a wall") + ")");
+    }
+    for (std::size_t i = 0; i < g_onShow.size(); ++i) {
+        SvBoardPose pose{};
+        if (g_rt->ShopRestPose(g_onShow[i].at, pose)) boardparts::Display(static_cast<int>(i), g_onShow[i].models, pose);
+    }
+}
+
 // A line at the bottom right: GTA's help box stays the store's own (its
 // clothing counter prompt), which a help text of ours would replace.
 void Hint(const char* text) {
@@ -225,6 +308,10 @@ void Tick(bool busy) {
         if (tier >= 0) Log("board shop: in a clothing store (tier " + std::to_string(tier) + (tier < 2 ? ", G opens the boards)" : ", sells no boards)"));
     }
     const bool can = !busy && (tier == 0 || tier == 1);
+    // The boards on show stay while the player is in the store (on the
+    // board too); they go when leaving it.
+    if (tier == 0 || tier == 1) ShowBoards(ped, tier);
+    else ClearShow();
     if (g_open) {
         if (!can) {
             Close();

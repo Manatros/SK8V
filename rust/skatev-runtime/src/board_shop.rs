@@ -33,7 +33,15 @@ pub struct BoardShop {
     menu: Option<Menu>,
     message: String,
     message_frames: u32,
+    /// Where each store shows its boards (kept in `SkateVDisplay.txt`).
+    shows: Vec<crate::shop::ShowCase>,
+    /// The part exporter's board frame to the native board's object space
+    /// (prepare-board-parts.py's ROTATION and offset).
+    frame: bevy_math::Mat4,
 }
+
+/// The boards a store shows: up to this many.
+pub const ON_SHOW: usize = 5;
 
 /// What an input did, for the host: it takes the money for a purchase.
 #[repr(C)]
@@ -80,6 +88,22 @@ pub fn models_of(riding: &BoardChoice, grip: Option<&str>, base: Option<&str>, h
     out
 }
 
+/// Where the stores' shows are kept, in the garages' folder.
+const DISPLAY_FILE: &str = "SkateVDisplay.txt";
+
+/// The exporter's board frame (length +Z from the grip end, deck facing -X)
+/// to the native board's object space: rows (0 1 0), (0 0 -1), (-1 0 0),
+/// then `offset`.
+pub fn exporter_frame(offset: bevy_math::Vec3) -> bevy_math::Mat4 {
+    use bevy_math::{Vec3, Vec4};
+    bevy_math::Mat4::from_cols(
+        Vec4::new(0.0, 0.0, -1.0, 0.0),
+        Vec4::new(1.0, 0.0, 0.0, 0.0),
+        Vec4::new(0.0, -1.0, 0.0, 0.0),
+        Vec3::ZERO.extend(1.0) + offset.extend(0.0),
+    )
+}
+
 /// Row-vector `a` then `b` (4x4, rows X, Y, Z, translation).
 fn compose(a: &[f32; 16], b: &[f32; 16]) -> [f32; 16] {
     let mut o = [0.0; 16];
@@ -114,7 +138,15 @@ impl BoardShop {
                 *v = json["binds"][i][j].as_f64().ok_or_else(|| format!("{}: no bind matrices", parts.display()))? as f32;
             }
         }
-        Ok(Self::new(library, available, binds, garages))
+        let offset = json["offset"].as_array().map(|o| {
+            let v = |i: usize| o.get(i).and_then(serde_json::Value::as_f64).unwrap_or(0.0) as f32;
+            bevy_math::Vec3::new(v(0), v(1), v(2))
+        });
+        let mut shop = Self::new(library, available, binds, garages);
+        if let Some(offset) = offset {
+            shop.frame = exporter_frame(offset);
+        }
+        Ok(shop)
     }
 
     pub fn new(library: Library, available: HashSet<String>, binds: [[f32; 16]; 7], garages: &Path) -> Self {
@@ -128,6 +160,11 @@ impl BoardShop {
             menu: None,
             message: String::new(),
             message_frames: 0,
+            shows: std::fs::read_to_string(garages.join(DISPLAY_FILE))
+                .or_else(|_| std::fs::read_to_string(garages.join("SkateGTA-display.txt")))
+                .map(|t| crate::shop::shows_from_text(&t))
+                .unwrap_or_default(),
+            frame: exporter_frame(bevy_math::Vec3::new(0.0, 0.352, 0.064)),
         }
     }
 
@@ -322,6 +359,61 @@ impl BoardShop {
     pub fn rest_pose(&self, at: &[f32; 16]) -> SvBoardPose {
         rest_pose(&self.binds, at)
     }
+
+    /// The boards a store of `tier` shows (its interior at `interior`), the
+    /// player's eye at `eye`, its clerk (place, forward) if one stands near,
+    /// on game day `day`: each board's entity matrix (host layout) and part
+    /// models. The place is found once per store with lines `probe` casts
+    /// (from, to -> where it hits) and kept: behind the till when there is a
+    /// clerk, else a free stretch of wall. None found yet: empty.
+    pub fn display(
+        &mut self,
+        tier: Tier,
+        interior: bevy_math::Vec3,
+        eye: bevy_math::Vec3,
+        clerk: Option<(bevy_math::Vec3, bevy_math::Vec3)>,
+        day: u32,
+        mut probe: impl FnMut(bevy_math::Vec3, bevy_math::Vec3) -> Option<bevy_math::Vec3>,
+    ) -> Vec<([f32; 16], Vec<String>)> {
+        use bevy_math::Vec3;
+        if !tier.sells_boards() {
+            return Vec::new();
+        }
+        let store = crate::shop::store_key(interior);
+        let show = match self.shows.iter().find(|s| s.store == store) {
+            Some(kept) => kept.clone(),
+            None => {
+                let till = clerk.and_then(|(at, forward)| crate::shop::wall_behind(at + Vec3::Z * 0.3, forward, &mut probe));
+                let found = till.map(|w| (w, true)).or_else(|| crate::shop::display_wall(eye, &mut probe).map(|w| (w, false)));
+                let Some(((at, normal), till)) = found else { return Vec::new() };
+                let above = at + normal * 0.3;
+                let floor = probe(above, above - Vec3::Z * 4.0).map_or(eye.z - 1.3, |p| p.z);
+                let show = crate::shop::ShowCase { store, at, normal, floor, till };
+                self.shows.push(show.clone());
+                let _ = std::fs::write(self.garages.join(DISPLAY_FILE), crate::shop::shows_to_text(&self.shows));
+                show
+            }
+        };
+        let completes: Vec<BoardChoice> = crate::shop::stock(&self.library, tier)
+            .into_iter()
+            .flat_map(|section| section.offers)
+            .filter(|offer| self.sells(&offer.goods))
+            .filter_map(|offer| match offer.goods {
+                Goods::Complete(board) => Some(board),
+                _ => None,
+            })
+            .collect();
+        let boards = crate::shop::show_picks(&completes, store, day, ON_SHOW);
+        let to_board = self.frame.inverse();
+        show.places(boards.len())
+            .into_iter()
+            .zip(boards)
+            .map(|(place, board)| {
+                let models = models_of(&board, None, None, None).into_iter().filter(|m| self.available.contains(m)).collect();
+                ((place * to_board).to_cols_array(), models)
+            })
+            .collect()
+    }
 }
 
 static SHOP: Mutex<Option<BoardShop>> = Mutex::new(None);
@@ -472,6 +564,58 @@ pub unsafe extern "C" fn sv_shop_rest_pose(_rt: *mut c_void, at: *const f32, out
     })
 }
 
+/// A line the host casts for the store's show: from, to (3 floats each);
+/// writes where it hits to `hit` and returns 1, or returns 0.
+pub type SvProbe = unsafe extern "C" fn(ctx: *mut c_void, from: *const f32, to: *const f32, hit: *mut f32) -> u32;
+
+/// The boards a store shows (see `BoardShop::display`). `interior`, `eye`:
+/// 3 floats; `clerk`: 6 (place, forward) or null; `out`: room for `max`
+/// matrices of 16 floats; `models`: one comma list per board, a line each.
+/// Returns how many boards (0: none yet, or `models` too small).
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sv_shop_display(
+    _rt: *mut c_void,
+    tier: u32,
+    interior: *const f32,
+    eye: *const f32,
+    clerk: *const f32,
+    day: u32,
+    probe: Option<SvProbe>,
+    ctx: *mut c_void,
+    out: *mut f32,
+    max: u32,
+    models: *mut u8,
+    cap: u32,
+) -> u32 {
+    crate::guard(0, || {
+        let Some(probe) = probe else { return 0 };
+        if interior.is_null() || eye.is_null() || out.is_null() {
+            return 0;
+        }
+        let v3 = |p: *const f32| unsafe { bevy_math::Vec3::new(*p, *p.add(1), *p.add(2)) };
+        let clerk = (!clerk.is_null()).then(|| (v3(clerk), v3(unsafe { clerk.add(3) })));
+        let tier = match tier {
+            0 => Tier::Low,
+            1 => Tier::Mid,
+            _ => Tier::High,
+        };
+        let cast = |a: bevy_math::Vec3, b: bevy_math::Vec3| {
+            let (from, to, mut hit) = ([a.x, a.y, a.z], [b.x, b.y, b.z], [0.0f32; 3]);
+            (unsafe { probe(ctx, from.as_ptr(), to.as_ptr(), hit.as_mut_ptr()) } != 0).then(|| bevy_math::Vec3::from(hit))
+        };
+        let shown = with(Vec::new(), |s| s.display(tier, v3(interior), v3(eye), clerk, day, cast));
+        let shown: Vec<_> = shown.into_iter().take(max as usize).collect();
+        let text: String = shown.iter().map(|(_, m)| m.join(",") + "\n").collect();
+        if give(&text, models, cap) > cap {
+            return 0;
+        }
+        for (i, (m, _)) in shown.iter().enumerate() {
+            unsafe { std::ptr::copy_nonoverlapping(m.as_ptr(), out.add(i * 16), 16) };
+        }
+        shown.len() as u32
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -579,6 +723,33 @@ mod tests {
         let paint = skate_boards::paints::catalog().into_iter().next().unwrap();
         s.garage.riding.set(Part::Wheels, Some(paint.part_ref()));
         assert_eq!(s.wheel_hardness(), Some(paint.finish.hardness()));
+    }
+
+    #[test]
+    fn a_kept_show_puts_five_boards_on_the_exporters_frame() {
+        let d = dir("show");
+        std::fs::write(d.join("SkateVDisplay.txt"), "show3 10 20  12.000 20.000 1.500  -1.0000 0.0000  0.500  wall\n").unwrap();
+        let mut s = shop(&d);
+        let v = bevy_math::Vec3::new;
+        let shown = s.display(Tier::Low, v(10.0, 20.0, 1.0), v(10.0, 20.0, 1.5), None, 3, |_, _| None);
+        assert_eq!(shown.len(), ON_SHOW);
+        let places = crate::shop::ShowCase { store: (10, 20), at: v(12.0, 20.0, 1.5), normal: v(-1.0, 0.0, 0.0), floor: 0.5, till: false }
+            .places(ON_SHOW);
+        // A point of the exported board lands where the place puts it.
+        let w = v(0.02, 0.05, 0.4);
+        let entity = bevy_math::Mat4::from_cols_array(&shown[0].0);
+        let at = entity.transform_point3(s.frame.transform_point3(w));
+        assert!((at - places[0].transform_point3(w)).length() < 1e-4, "{at:?}");
+        assert!(!shown[0].1.is_empty());
+        assert_eq!(s.display(Tier::High, v(10.0, 20.0, 1.0), v(10.0, 20.0, 1.5), None, 3, |_, _| None).len(), 0);
+    }
+
+    #[test]
+    fn the_exporters_frame_is_the_parts_rotation() {
+        let f = exporter_frame(bevy_math::Vec3::new(0.0, 0.352, 0.064));
+        // (x, y, z) -> (y, 0.352 - z, 0.064 - x), as prepare-board-parts.py.
+        let p = f.transform_point3(bevy_math::Vec3::new(-0.0517, 0.0216, -0.0929));
+        assert!((p - bevy_math::Vec3::new(0.0216, 0.4449, 0.1157)).length() < 1e-3, "{p:?}");
     }
 
     #[test]

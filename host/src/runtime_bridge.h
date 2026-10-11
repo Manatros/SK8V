@@ -2,6 +2,7 @@
 #include "skatev_runtime.h"
 #include <windows.h>
 #include <string>
+#include <vector>
 
 class RuntimeBridge {
 public:
@@ -65,6 +66,9 @@ public:
     SvShopResult ShopInput(int input, long long cash);
     std::string ShopText(int which);
     bool ShopRestPose(const float (&at)[16], SvBoardPose& out);
+    // The boards on show in a store: up to `max` entity matrices (16 floats each) and their models.
+    int ShopDisplay(int tier, const float (&interior)[3], const float (&eye)[3], const float* clerk, unsigned day,
+                    SvProbeFn probe, void* ctx, float* out, int max, std::vector<std::string>& models);
     bool SetVerboseLog(bool enabled);
     bool SetSkitchStandoff(float metres);
     int SkitchVehicle() const;
@@ -117,6 +121,7 @@ private:
     SvShopInputFn shopInput_ = nullptr;
     SvShopTextFn shopText_ = nullptr;
     SvShopRestPoseFn shopRestPose_ = nullptr;
+    SvShopDisplayFn shopDisplay_ = nullptr;
     SvSetVerboseLogFn setVerboseLog_ = nullptr;
     SvSetSkitchStandoffFn setSkitchStandoff_ = nullptr;
     SvSkitchVehicleFn skitchVehicle_ = nullptr;

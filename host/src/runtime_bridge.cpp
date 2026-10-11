@@ -1,5 +1,6 @@
 #include "runtime_bridge.h"
 #include <type_traits>
+#include <cstring>
 
 bool RuntimeBridge::Load(const wchar_t* dllPath, const std::string& dataRoot, const std::string& worldCache,
                          const std::string& logPath, std::uint32_t skaterTriangles, std::uint32_t presentationFlags, std::string& error) {
@@ -61,6 +62,7 @@ bool RuntimeBridge::Load(const wchar_t* dllPath, const std::string& dataRoot, co
     optional(shopInput_, "sv_shop_input");
     optional(shopText_, "sv_shop_text");
     optional(shopRestPose_, "sv_shop_rest_pose");
+    optional(shopDisplay_, "sv_shop_display");
     sym(setVerboseLog_, "sv_set_verbose_log");
     sym(setSkitchStandoff_, "sv_set_skitch_standoff");
     sym(skitchVehicle_, "sv_skitch_vehicle");
@@ -272,6 +274,23 @@ std::string RuntimeBridge::ShopText(int which) {
     }
     text.resize(need ? need - 1 : 0);
     return text;
+}
+
+int RuntimeBridge::ShopDisplay(int tier, const float (&interior)[3], const float (&eye)[3], const float* clerk, unsigned day,
+                               SvProbeFn probe, void* ctx, float* out, int max, std::vector<std::string>& models) {
+    models.clear();
+    if (!runtime_ || !shopDisplay_ || max <= 0) return 0;
+    std::string text(8192, '\0');
+    const std::uint32_t n = shopDisplay_(runtime_, static_cast<std::uint32_t>(tier), interior, eye, clerk, day, probe, ctx, out,
+                                         static_cast<std::uint32_t>(max), text.data(), static_cast<std::uint32_t>(text.size()));
+    text.resize(std::strlen(text.c_str()));
+    std::size_t at = 0;
+    while (models.size() < n && at < text.size()) {
+        const std::size_t end = text.find('\n', at);
+        models.push_back(text.substr(at, end == std::string::npos ? std::string::npos : end - at));
+        at = end == std::string::npos ? text.size() : end + 1;
+    }
+    return static_cast<int>(models.size() == n ? n : 0);
 }
 
 bool RuntimeBridge::ShopRestPose(const float (&at)[16], SvBoardPose& out) {

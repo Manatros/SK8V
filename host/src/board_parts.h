@@ -26,6 +26,11 @@ bool Tick(bool skating, const SvBoardPose& pose);
 // runtime). Empty `models` removes it.
 bool Preview(const std::vector<std::string>& models, const SvBoardPose& pose);
 
+// The store's boards on show: board `index` (0..7) as `models` at rest in
+// `pose`. ClearDisplay removes them all.
+bool Display(int index, const std::vector<std::string>& models, const SvBoardPose& pose);
+void ClearDisplay();
+
 // Every part object shown (riding and preview): presentation only, never collision.
 std::vector<int> Entities();
 

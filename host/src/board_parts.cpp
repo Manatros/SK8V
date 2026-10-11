@@ -39,6 +39,7 @@ struct Set {
     ULONGLONG waitingSince = 0;  // not all parts loaded yet (for the log)
 };
 Set g_ride, g_preview;
+Set g_display[8];
 
 void Log(const char* s) {
     if (g_log) g_log(s);
@@ -233,10 +234,31 @@ bool Preview(const std::vector<std::string>& models, const SvBoardPose& pose) {
     return Show(g_preview, pose);
 }
 
+bool Display(int index, const std::vector<std::string>& models, const SvBoardPose& pose) {
+    if (!g_started || index < 0 || index >= 8) return false;
+    Set& set = g_display[index];
+    if (models != set.models) {
+        RemoveAll(set);
+        set.models = models;
+        set.announced = true;  // boards on show are logged by the shop
+    }
+    return !models.empty() && Show(set, pose);
+}
+
+void ClearDisplay() {
+    for (Set& set : g_display) {
+        RemoveAll(set);
+        set.models.clear();
+    }
+}
+
 std::vector<int> Entities() {
     std::vector<int> out;
     for (const Set* set : {&g_ride, &g_preview})
         for (const Shown& s : set->shown)
+            if (s.object) out.push_back(s.object);
+    for (const Set& set : g_display)
+        for (const Shown& s : set.shown)
             if (s.object) out.push_back(s.object);
     return out;
 }
