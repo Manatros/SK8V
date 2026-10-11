@@ -99,7 +99,7 @@ struct Config {
     int ridingStyle = 0;           // RidingStyle=Default|Loose|Gonzo|Aggressive: Skate 3's riding animations (kRidingStyles index)
     float truckTightness = 0.7f;   // TruckTightness: 0 loose .. 1 tight (Skate 3 default 0.7)
     float wheelHardness = 0.7f;    // WheelHardness: 0 soft .. 1 hard (Skate 3 default 0.7)
-    // Trainer multipliers (1 = Skate 3), overlay patch 0048: Pop, GrindPop, PushSpeed,
+    // Trainer multipliers (1 = Skate 3), overlay patch 0049: Pop, GrindPop, PushSpeed,
     // PushPower, Braking, Steering, Wobble, OffboardJump, Grip, TurnPower, ManualDrag.
     float trainer[11] = {1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1};
     bool holdFakie = false;        // HoldFakie: rolling fakie stays fakie
@@ -2532,7 +2532,7 @@ menu::Apply Bound(const char* key, std::function<void()> then = {}) {
     };
 }
 
-// The trainer multipliers and hold-fakie to the runtime (overlay patch 0048).
+// The trainer multipliers and hold-fakie to the runtime (overlay patch 0049).
 // GTA's stamina skill (0..100) as leg strength: 85 % with none, all with
 // full, on pop, push speed, push power and the jump on foot.
 float g_strength = 1.0f;

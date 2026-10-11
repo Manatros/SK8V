@@ -14,7 +14,7 @@ new file mode 100644
 --- /dev/null
 +++ b/crates/skate-host/src/physics/bridge/trainer.rs
 @@ -0,0 +1,22 @@
-+//! SkateV trainer tuning (overlay patch 0048, contributed by GTAxSkate): the
++//! SkateV trainer tuning (overlay patch 0049, contributed by GTAxSkate): the
 +//! skate-host trainer multipliers (pop, grind pop, push, braking, steering,
 +//! wobble, off-board jump, grip, turn power, manual drag) and hold-fakie,
 +//! which the port reads but nothing set.

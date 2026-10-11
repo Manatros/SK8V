@@ -83,7 +83,7 @@ pub enum Job {
     RidingStyle(u32),
     /// Truck tightness, wheel hardness (0..1).
     Equipment(f32, f32),
-    /// Trainer multipliers and hold-fakie (overlay patch 0048).
+    /// Trainer multipliers and hold-fakie (overlay patch 0049).
     Trainer([f32; 11], bool),
     /// Metres behind a car's rear the skitch grab line sits.
     SkitchStandoff(f32),
@@ -1774,7 +1774,7 @@ struct SkaterPrefs {
     posture: u32,
     style: u32,
     equipment: (f32, f32),
-    /// Trainer multipliers (TrainerTuning order) and hold-fakie (patch 0048).
+    /// Trainer multipliers (TrainerTuning order) and hold-fakie (patch 0049).
     trainer: ([f32; 11], bool),
 }
 

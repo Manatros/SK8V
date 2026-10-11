@@ -1069,7 +1069,7 @@ pub unsafe extern "C" fn sv_set_equipment(rt: *mut c_void, truck: f32, wheel: f3
     })
 }
 
-/// Trainer tuning (overlay patch 0048): `tuning` points at 11 positive
+/// Trainer tuning (overlay patch 0049): `tuning` points at 11 positive
 /// multipliers in TrainerTuning order (pop, grind pop, push speed, push power,
 /// braking, steering, wobble, off-board jump, grip, turn power, manual drag),
 /// 1 = Skate 3; `hold_fakie` nonzero keeps fakie. Applied live and to every
