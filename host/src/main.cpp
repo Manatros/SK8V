@@ -2621,6 +2621,12 @@ std::vector<menu::Page> MenuPages(Session& s) {
         Number("Dent strength", "VehicleDamageScale", D.vehicleDamageScale, 0, 2, 0.1f, Fixed("x%.1f"), Bound("VehicleDamageScale")),
     }});
 
+    // Skate buddies (contributed by GTAxSkate): a crew without a trainer.
+    pages.push_back({"Skate buddies", {
+        Action("Call a skater friend (up to 3)", [] { skatebuddies::Summon(); }),
+        Action("Send the friends home", [] { skatebuddies::Dismiss(); }),
+    }});
+
     pages.push_back({"BackwardsMan", {
         Flag("BackwardsMan assist", "BackwardsMan", D.backwardsMan, Bound("BackwardsMan", ApplyQuirk)),
         Number("Remount delay", "BackwardsManRemountDelay", static_cast<float>(D.backwardsManRemountDelay), 0, 30, 1, Fixed("%.0f"),
@@ -2649,12 +2655,6 @@ std::vector<menu::Page> MenuPages(Session& s) {
         Flag("Original Skate HUD", "Hud", true, {}, true),
         Flag("Trick Analyzer", "TrickAnalyzer", D.trickAnalyzer,
              Bound("TrickAnalyzer", [] { hudoverlay::SetTrickAnalyzer(g_config.trickAnalyzer); })),
-    }});
-
-    // Skate buddies (contributed by GTAxSkate): a crew without a trainer.
-    pages.push_back({"Skate buddies", {
-        Action("Call a skater friend (up to 3)", [] { skatebuddies::Summon(); }),
-        Action("Send the friends home", [] { skatebuddies::Dismiss(); }),
     }});
 
     pages.push_back({"Dev", {
