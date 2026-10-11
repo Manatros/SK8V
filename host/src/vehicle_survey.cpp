@@ -1,6 +1,7 @@
 #include "vehicle_survey.h"
 #include "natives.h"
 #include "runtime_bridge.h"
+#include <windows.h>
 #include <cstdint>
 #include <cstdio>
 
@@ -29,6 +30,11 @@ std::uint32_t __cdecl Probe(void* ctx, const float* from, const float* to, float
 
 void Tick(RuntimeBridge& runtime, float radius, void (*log)(const char*)) {
     if (!runtime.HasVehicleSurvey()) return;
+    // The pool scan twice a second is plenty: a model is surveyed only once.
+    static unsigned long s_next = 0;
+    const unsigned long now = GetTickCount();
+    if (static_cast<long>(now - s_next) < 0) return;
+    s_next = now + 500;
     static int vehicles[256];
     const int n = worldGetAllVehicles(vehicles, 256);
     const int ped = Call<int>(PLAYER_PED_ID);
