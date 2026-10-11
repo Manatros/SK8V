@@ -2067,11 +2067,10 @@ void UpdateActive(Session& s, const Config& cfg, const SvPad& pad) {
         s.world.SetPedLaunch(cfg.pedLaunch, cfg.pedLaunchScale, cfg.pedLaunchLift, cfg.pedLaunchSpin);
         s.world.SetPedVoices(cfg.pedPain, cfg.pedGetUpSpeech);
         s.world.SetVehicleDamage(cfg.vehicleDamage, cfg.vehicleDamageScale, cfg.vehicleDamageMin, cfg.vehicleDamageRadius);
-        s.world.Gather(s.ped, s.last.board_position, cfg.dynamicRadius, boardnative::Entity());
-        if (const std::string line = s.world.TakePositionLog(); !line.empty()) Log(line.c_str());
         std::vector<int> presentation = boardparts::Entities();
         presentation.push_back(boardnative::Entity());
         s.world.Gather(s.ped, s.last.board_position, cfg.dynamicRadius, presentation);
+        if (const std::string line = s.world.TakePositionLog(); !line.empty()) Log(line.c_str());
         const auto& bodies = s.world.Bodies();
         g_runtime.SetDynamicBodies(bodies.data(), static_cast<std::uint32_t>(bodies.size()));
         if (cfg.pedHitboxes) {
@@ -2276,16 +2275,13 @@ void UpdateActive(Session& s, const Config& cfg, const SvPad& pad) {
 
     Lap(kPartWorld);
     SvBoardPose boardPose{};
-    const bool nativeBoard = cfg.drawBoard && g_runtime.BoardPose(boardPose)
-        && boardnative::Tick(true, boardPose);
-    if (!cfg.drawBoard || boardPose.bone_count != 7) boardnative::Tick(false, SvBoardPose{});
-    BoardWeather(s, cfg, nativeBoard ? &boardPose : nullptr);
     const bool havePose = cfg.drawBoard && g_runtime.BoardPose(boardPose) && boardPose.bone_count == 7;
     // The board shop's parts replace the native board once all of them are in.
     const bool shopParts = havePose && boardparts::Tick(true, boardPose);
     const bool nativeBoard = shopParts || (havePose && boardnative::Tick(true, boardPose));
     if (!havePose || shopParts) boardnative::Tick(false, SvBoardPose{});
     if (!havePose) boardparts::Tick(false, SvBoardPose{});
+    BoardWeather(s, cfg, nativeBoard ? &boardPose : nullptr);
     if (cfg.drawSkater && !nativeBoard) DrawBoardMesh();
     if (g_quirkRequested.exchange(false) && cfg.backwardsMan) g_runtime.TriggerQuirk(0);
     if (cfg.showDebug) { // dev only; the player sees hud_overlay
