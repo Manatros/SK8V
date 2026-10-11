@@ -96,6 +96,7 @@ struct Config {
     // CameraView: the view skating starts in: 0 Skate 3's camera, 1-3 GTA's near, middle, far
     // follow camera (the mouse turns it), 4 GTA's first person. V cycles them while skating.
     int cameraView = 0;
+    bool cameraRemember = true; // CameraRemember: skating starts in the view last used (walking or skating)
     int gestures[4] = {23, 7, 24, 22}; // EmoteUp/Down/Left/Right: d-pad gesture per direction (kGestures index, -1 None)
     int posture = 0;               // Posture=Normal|Stiff|Slouch|Buff: Skate 3's riding posture (kPostures index)
     int ridingStyle = 0;           // RidingStyle=Default|Loose|Gonzo|Aggressive: Skate 3's riding animations (kRidingStyles index)
@@ -260,6 +261,7 @@ const Key kKeys[] = {
              if (menu::SameText(v, kDifficulties[i])) c.difficulty = i;
      }},
     {"Camera", [](Config& c, const std::string& v) { c.cameraType = menu::SameText(v, "Low") ? 0 : 1; }},
+    {"CameraRemember", Store<&Config::cameraRemember>},
     {"CameraView", [](Config& c, const std::string& v) {
         const char* names[] = {"Skate", "Near", "Middle", "Far", "FirstPerson", "Head"};
         for (int i = 0; i < 6; ++i)
@@ -338,6 +340,14 @@ Config LoadConfig() {
 Config g_config;
 // GTA's follow camera is the view (CameraView 1-4): the mouse turns it.
 bool g_gtaView = false;
+// The view last used while skating, and GTA's on-foot camera mode when the
+// skater left (a V pressed on foot since then wins).
+int g_lastView = -1, g_footModeAtLeave = -1;
+// The third person camera of views near/middle/far (OrbitCamera): its yaw
+// in degrees, for walking that follows the camera.
+float g_orbitYaw = 0.0f;
+bool g_orbitOn = false;
+constexpr int kFootMode[6] = {-1, 0, 1, 2, 4, -1}; // view -> GTA's follow camera mode
 
 // '/' opens the settings menu (menu.h). Everything else that used a hotkey is a
 // menu item; the items that act on a frame of the main loop set these flags.
@@ -982,12 +992,34 @@ void NearMiss(Session& s, const Config& cfg, const std::vector<SvDynamicBody>& b
     }
 }
 
+// The view the next skate session starts in: with CameraRemember the one
+// last used (or GTA's on-foot near/middle/far/first person when V changed it
+// on foot), else CameraView.
+int StartView(const Config& cfg) {
+    if (!cfg.cameraRemember) return std::clamp(cfg.cameraView, 0, 5);
+    const int foot = Call<int>(gta::GET_FOLLOW_PED_CAM_VIEW_MODE);
+    if (g_lastView >= 0 && foot == g_footModeAtLeave) return g_lastView;
+    for (int v = 1; v <= 4; ++v)
+        if (kFootMode[v] == foot) return v;
+    return g_lastView >= 0 ? g_lastView : std::clamp(cfg.cameraView, 0, 5);
+}
+
+// Leaving skate mode: the view is kept for the next session, and walking goes
+// on at the same distance (GTA's near/middle/far/first person).
+void RememberView(Session& s, const Config& cfg) {
+    if (s.view < 0) return;
+    g_lastView = s.view;
+    if (cfg.cameraRemember && kFootMode[s.view] >= 0) Call<void>(gta::SET_FOLLOW_PED_CAM_VIEW_MODE, kFootMode[s.view]);
+    g_footModeAtLeave = Call<int>(gta::GET_FOLLOW_PED_CAM_VIEW_MODE);
+}
+
 // Hands the player back to GTA. `voluntary`: Y held or the menu; the GTA
 // ped takes Skate's current place and facing, whether riding or on foot.
 // Otherwise (menu, death, runtime error, network) the ped is put where the
 // skater last was.
 void Leave(Session& s, const Config& cfg, const char* why, bool voluntary) {
-    g_gtaView = false, s.view = -1; // the next entry starts in CameraView again
+    RememberView(s, cfg);
+    g_gtaView = false, s.view = -1; // the next entry picks its view again (CameraView / CameraRemember)
     if (s.action) {
         float none[7]{};
         g_runtime.ActionCam(0, {}, {}, 0.0f, none);
@@ -1414,7 +1446,7 @@ void DisableSkateControls(std::uint16_t buttons, bool aiming) {
         skip[c] = (g_weaponWheel && ((c >= 12 && c <= 17) || c == 37 || c == 1 || c == 2)) ||
                   c == 199 || c == 200 || c == 170 || c == 288 || c == 289 || (c >= 296 && c <= 328) || c == 349 ||
                   (c == 19 && !(buttons & 0x0100)) ||
-                  (g_gtaView && (c == 1 || c == 2) && Call<BOOL>(gta::IS_USING_KEYBOARD_AND_MOUSE, 0)) ||
+                  ((g_gtaView || g_orbitOn) && (c == 1 || c == 2) && Call<BOOL>(gta::IS_USING_KEYBOARD_AND_MOUSE, 0)) ||
                   (aiming && (c == 1 || c == 2 || c == 24 || c == 25 || c == 45 || (c >= 270 && c <= 273) || (c >= 290 && c <= 295)));
         if (skip[c]) continue;
         // GTA's value this frame whether or not it is disabled (scripts run after the input update).
@@ -2023,6 +2055,66 @@ void BoardWeather(Session& s, const Config& cfg, const SvBoardPose* pose) {
     }
 }
 
+// Third person while skating (views near, middle, far), like GTA's follow
+// camera but on the script camera: it follows the board, not the body, so
+// flips, grabs and bails never swing it into the skater; ollies barely lift
+// it (the height follows slowly). It swings in behind the direction of
+// travel; the mouse turns it round and up or down, and after 2 s without the
+// mouse it swings back behind. A wall between it and the skater pulls it in.
+void OrbitCamera(Session& s, const SvOutput& o, const Config& cfg) {
+    static const float kDist[4] = {0.0f, 3.0f, 4.3f, 6.0f}, kLift[4] = {0.0f, 0.35f, 0.55f, 0.85f};
+    static float at[3], yaw = 0.0f, userYaw = 0.0f, userPitch = 0.0f, dist = 0.0f;
+    static ULONGLONG lastLook = 0, lastFrame = 0;
+    const ULONGLONG now = GetTickCount64();
+    const float dt = std::clamp(Call<float>(gta::GET_FRAME_TIME), 0.001f, 0.1f);
+    const float board[3] = {o.board_position.x, o.board_position.y, o.board_position.z + 1.15f};
+    auto ease = [&](float rate) { return 1.0f - std::exp(-rate * dt); };
+    auto wrap = [](float a) { return std::fmod(a + 540.0f, 360.0f) - 180.0f; };
+    const float speed = std::hypot(o.velocity.x, o.velocity.y);
+    if (now - lastFrame > 500) { // a new session (or the menu was open): start behind the skater
+        for (int i = 0; i < 3; ++i) at[i] = board[i];
+        yaw = o.skater_heading_degrees, userYaw = 0.0f, userPitch = 0.0f, dist = kDist[s.view];
+    }
+    lastFrame = now;
+    at[0] += (board[0] - at[0]) * ease(14.0f);
+    at[1] += (board[1] - at[1]) * ease(14.0f);
+    // Height: slow up (ollies), quicker down (drops), so the view stays calm.
+    at[2] += (board[2] - at[2]) * ease(board[2] < at[2] ? 6.0f : 2.5f);
+    if (std::fabs(board[2] - at[2]) > 3.0f) at[2] = board[2] + (at[2] > board[2] ? 3.0f : -3.0f);
+    const float travel = speed > 1.5f ? std::atan2(-o.velocity.x, o.velocity.y) * 57.29578f : yaw;
+    yaw += wrap(travel - yaw) * ease(speed > 1.5f ? 2.2f : 0.0f);
+    if (Call<BOOL>(gta::IS_USING_KEYBOARD_AND_MOUSE, 0)) {
+        const float mx = Call<float>(gta::GET_DISABLED_CONTROL_NORMAL, 0, 1), my = Call<float>(gta::GET_DISABLED_CONTROL_NORMAL, 0, 2);
+        if (std::fabs(mx) > 0.0005f || std::fabs(my) > 0.0005f) {
+            userYaw = wrap(userYaw - mx * 9.0f);
+            userPitch = std::clamp(userPitch - my * 6.0f, -50.0f, 35.0f);
+            lastLook = now;
+        }
+    }
+    if (now - lastLook > 2000 && speed > 1.5f) userYaw *= 1.0f - ease(1.8f), userPitch *= 1.0f - ease(1.8f);
+    const float camYaw = yaw + userYaw, pitch = -12.0f + userPitch;
+    const float h = camYaw * 0.017453292f, pr = pitch * 0.017453292f;
+    const float dir[3] = {-std::sin(h) * std::cos(pr), std::cos(h) * std::cos(pr), std::sin(pr)};
+    const float aim[3] = {at[0], at[1], at[2] + kLift[s.view]};
+    // A wall or car between the skater and the camera pulls the camera in front of it.
+    float want = kDist[s.view];
+    const float behind[3] = {aim[0] - dir[0] * want, aim[1] - dir[1] * want, aim[2] - dir[2] * want};
+    const int test = Call<int>(gta::START_EXPENSIVE_SYNCHRONOUS_SHAPE_TEST_LOS_PROBE, aim[0], aim[1], aim[2], behind[0], behind[1], behind[2],
+                               1 | 2 | 16, s.ped, 7);
+    BOOL hit = 0;
+    Vector3 end{}, normal{};
+    Entity entity = 0;
+    if (Call<int>(gta::GET_SHAPE_TEST_RESULT, test, &hit, &end, &normal, &entity) == 2 && hit) {
+        const float d = std::sqrt((end.x - aim[0]) * (end.x - aim[0]) + (end.y - aim[1]) * (end.y - aim[1]) + (end.z - aim[2]) * (end.z - aim[2]));
+        want = std::max(0.9f, d - 0.25f);
+    }
+    dist = want < dist ? want : dist + (want - dist) * ease(3.0f);
+    Call<void>(gta::SET_CAM_COORD, s.cam, aim[0] - dir[0] * dist, aim[1] - dir[1] * dist, aim[2] - dir[2] * dist);
+    Call<void>(gta::SET_CAM_ROT, s.cam, pitch, 0.0f, camYaw, 2);
+    Call<void>(gta::SET_CAM_FOV, s.cam, std::clamp(55.0f * cfg.fovScale, 20.0f, 120.0f));
+    g_orbitYaw = camYaw;
+}
+
 // The skater's eyes (view 5, as GTAxSkate's own mod had it): the script
 // camera at the head, looking where the board goes; the mouse looks round
 // (up to 150 degrees each way) and the view drifts back ahead after 1.5 s.
@@ -2094,7 +2186,10 @@ void ActionCamera(Session& s, const SvOutput& o) {
 // turns. V (INPUT_NEXT_CAMERA) cycles them. In a GTA view the on-foot stick
 // is turned from Skate's camera into GTA's, so walking follows what is seen.
 void UpdateCameraView(Session& s, const Config& cfg, SvPad& pad) {
-    if (s.view < 0) s.view = std::clamp(cfg.cameraView, 0, 5);
+    if (s.view < 0) {
+        s.view = StartView(cfg);
+        Logf("SkateV Legacy: camera view %d at the start", s.view);
+    }
     if (!menu::IsOpen() && Call<BOOL>(gta::IS_DISABLED_CONTROL_JUST_PRESSED, 0, 0)) {
         s.view = (s.view + 1) % 6;
         Logf("SkateV Legacy: camera view %d", s.view);
@@ -2108,17 +2203,19 @@ void UpdateCameraView(Session& s, const Config& cfg, SvPad& pad) {
         g_runtime.ActionCam(0, {}, {}, 0.0f, none);
         Logf("SkateV Legacy: cinematic camera %s", s.action == 1 ? "on" : s.action == 2 ? "filmer" : "off");
     }
-    const bool gta = s.view > 0 && s.view < 5 && !s.action;
-    if (gta) {
-        constexpr int kMode[5] = {0, 0, 1, 2, 4}; // near, middle, far, first person
-        Call<void>(gta::SET_FOLLOW_PED_CAM_VIEW_MODE, kMode[s.view]);
-    }
+    // GTA's gameplay camera only for first person: near, middle and far are
+    // OrbitCamera on the script camera (GTA's follow camera swung into the
+    // skater in tricks and did not change distance while the ped was held).
+    const bool gta = s.view == 4 && !s.action;
+    if (gta) Call<void>(gta::SET_FOLLOW_PED_CAM_VIEW_MODE, kFootMode[4]);
+    g_orbitOn = s.view >= 1 && s.view <= 3 && !s.action;
     if (gta != g_gtaView && !s.aiming) {
         if (s.cam) Call<void>(gta::RENDER_SCRIPT_CAMS, gta ? 0 : 1, 1, kAimBlendMs, 1, 0, 0);
         g_gtaView = gta;
     }
-    if (g_gtaView && s.last.camera_valid && std::string_view(s.last.state_utf8).rfind("Biped", 0) == 0) {
-        const float d = (Call<Vector3>(gta::GET_GAMEPLAY_CAM_ROT, 2).z - s.last.camera_rotation.z) * 0.017453292f;
+    if ((g_gtaView || g_orbitOn) && s.last.camera_valid && std::string_view(s.last.state_utf8).rfind("Biped", 0) == 0) {
+        const float yaw = g_gtaView ? Call<Vector3>(gta::GET_GAMEPLAY_CAM_ROT, 2).z : g_orbitYaw;
+        const float d = (yaw - s.last.camera_rotation.z) * 0.017453292f;
         const float x = pad.left_x, y = pad.left_y, c = std::cos(d), sn = std::sin(d);
         pad.left_x = static_cast<std::int16_t>(std::clamp(x * c - y * sn, -32767.0f, 32767.0f));
         pad.left_y = static_cast<std::int16_t>(std::clamp(x * sn + y * c, -32767.0f, 32767.0f));
@@ -2350,6 +2447,7 @@ void UpdateActive(Session& s, const Config& cfg, const SvPad& pad) {
         Call<void>(gta::SET_CAM_ROT, s.cam, -12.0f, 0.0f, o.skater_heading_degrees, 2);
         Call<void>(gta::SET_CAM_FOV, s.cam, 60.0f);
     }
+    if (s.view >= 1 && s.view <= 3 && !s.action) OrbitCamera(s, o, cfg);
     if (s.view == 5 && !s.action) HeadCamera(s, o);
     if (s.action) ActionCamera(s, o);
 
@@ -2768,8 +2866,10 @@ std::vector<menu::Page> MenuPages(Session& s) {
     // in (V cycles them while skating; R on the keyboard: cinematic camera,
     // skate filmer), Skate 3's camera height, the field of view.
     pages.push_back({"Camera", {
-        Choice("View at the start (V cycles)", "CameraView", {"Skate", "Near", "Middle", "Far", "FirstPerson", "Head"},
-               {"Skate 3", "GTA near", "GTA middle", "GTA far", "GTA first person", "Skater's eyes (mouse looks)"}, Bound("CameraView")),
+        Choice("Keep the view (walking and skating)", "CameraRemember", {"1", "0"},
+               {"On: the view last used", "Off: always the standard view"}, Bound("CameraRemember")),
+        Choice("Standard view (V cycles)", "CameraView", {"Skate", "Near", "Middle", "Far", "FirstPerson", "Head"},
+               {"Skate 3", "Near", "Middle", "Far", "First person (GTA)", "Skater's eyes (mouse looks)"}, Bound("CameraView")),
         Choice("Skate 3 camera", "Camera", {"High", "Low"}, {"High (Skate 3 default)", "Low"},
                Bound("Camera", [] { g_runtime.SetCameraType(g_config.cameraType); })),
         Number("Field of view scale", "CameraFovScale", D.fovScale, 0.5f, 1.5f, 0.05f, Fixed("x%.2f"), Bound("CameraFovScale")),
