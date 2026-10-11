@@ -63,7 +63,8 @@ pub fn default_controls() -> Controls {
 pub fn skate_controls() -> Controls {
     let mut controls = default_controls();
     let index = |id: &str| Controls::action_index(id).expect("a Skate action");
-    for (id, key) in [("trick_up", "I"), ("trick_left", "J"), ("trick_down", "K"), ("trick_right", "L"), ("a", "Space"),
+    // U and O the upper diagonals, as on a stick (I J K L held together give the others).
+    for (id, key) in [("trick_up", "I"), ("trick_left", "J"), ("trick_down", "K"), ("trick_right", "L"), ("trick_7", "U"), ("trick_9", "O"), ("a", "Space"),
                       ("x", "LShift"), ("b", "LCtrl"), ("y", "E"), ("marker_return", "H")] {
         controls.bind(index(id), key).expect("a key");
     }
