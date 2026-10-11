@@ -13,6 +13,12 @@ Snow=0
 RadioControls=1
 ; TrickAnalyzer: 1 = Skate 3's Trick Analyzer shows each trick's stick gesture (bottom centre); 0 = off.
 TrickAnalyzer=1
+; BoardShop: Skate 3's boards and parts for sale in Binco, the Discount Store and Suburban (G in the store).
+;   Needs the part models (tools/prepare-board-parts.py). 0 turns it off.
+BoardShop=1
+; WheelsFromPaint: painted wheels from the shop set the wheel hardness (matte soft, gloss medium, metallic hard);
+;   0 keeps WheelHardness.
+WheelsFromPaint=1
 DrawBoard=1
 ; Native Skate board: owned skeletal drawable, original texture/normal/specular inputs, GTA lighting and shadows.
 BoardNative=1

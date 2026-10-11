@@ -5,6 +5,8 @@
 //! Layout mirrors host/include/skatev_runtime.h; both sides assert sizes.
 
 pub mod coords;
+pub mod shop;
+pub mod board_shop;
 pub mod board_pose;
 pub mod curbs;
 pub mod dynamic;

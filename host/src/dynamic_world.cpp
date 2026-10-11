@@ -188,6 +188,7 @@ bool DynamicWorld::AddBody(int entity, EntityKind kind) {
 
 void DynamicWorld::Gather(int self, SvVec3 center, float radius, int presentationEntity) {
     if (doorRefs_.size() > 4096) doorRefs_.clear(); // handles of long-gone objects
+void DynamicWorld::Gather(int self, SvVec3 center, float radius, const std::vector<int>& presentation) {
     bodies_.clear();
     parts_.clear();
     debris_.clear();
@@ -207,6 +208,8 @@ void DynamicWorld::Gather(int self, SvVec3 center, float radius, int presentatio
             const int e = scratch_[i];
             if (e == self || e == presentationEntity) continue;
             const Vector3 p = Position(e, positionCheck_, positionLog_);
+            if (e == self || std::find(presentation.begin(), presentation.end(), e) != presentation.end()) continue;
+            const Vector3 p = Call<Vector3>(gta::GET_ENTITY_COORDS, e, 0);
             const float d2 = Dist2(p, center);
             if (d2 <= kindRadius2) nearby.push_back({d2, e, kind});
         }

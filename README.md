@@ -50,7 +50,7 @@ python tools/prepare.py --skate "<Skate 3.iso or folder>" --gta "<GTA V folder>"
 | D-pad left/right, gun equipped | Change weapon |
 | Double-tap `X` on foot near a grabbable wall | GTA mantle, then return to Skate |
 
-Swimming switches to GTA automatically and returns to Skate afterward. **Hall of Meat is on by default** and can be disabled in the SK8V menu, alongside other gameplay settings.
+Swimming switches to GTA automatically and returns to Skate afterward. In Binco, the Discount Store and Suburban, **G** opens Skate 3's board shop: complete boards and every deck, truck, wheel, griptape and paint on its own, paid with the character's cash. Michael, Franklin and Trevor each keep their own boards (`SkateVBoards-<name>.txt` in the game folder), and the bought board is the one you ride (`BoardShop=` in `SkateVLegacy.ini`). **Hall of Meat is on by default** and can be disabled in the SK8V menu, alongside other gameplay settings.
 
 ### Unable to save settings in the menu?
 

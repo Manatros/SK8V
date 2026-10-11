@@ -50,6 +50,17 @@ bool RuntimeBridge::Load(const wchar_t* dllPath, const std::string& dataRoot, co
     sym(setPosture_, "sv_set_posture");
     sym(setRidingStyle_, "sv_set_riding_style");
     sym(setEquipment_, "sv_set_equipment");
+    // Optional: the board shop.
+    auto optional = [&](auto& fn, const char* name) {
+        fn = reinterpret_cast<std::remove_reference_t<decltype(fn)>>(GetProcAddress(module_, name));
+    };
+    optional(shopStart_, "sv_shop_start");
+    optional(shopCharacter_, "sv_shop_character");
+    optional(shopOpen_, "sv_shop_open");
+    optional(shopClose_, "sv_shop_close");
+    optional(shopInput_, "sv_shop_input");
+    optional(shopText_, "sv_shop_text");
+    optional(shopRestPose_, "sv_shop_rest_pose");
     sym(setVerboseLog_, "sv_set_verbose_log");
     sym(setSkitchStandoff_, "sv_set_skitch_standoff");
     sym(skitchVehicle_, "sv_skitch_vehicle");
@@ -227,6 +238,44 @@ bool RuntimeBridge::SetPosture(int profile) {
 
 bool RuntimeBridge::SetRidingStyle(int style) {
     return runtime_ && setRidingStyle_ && style >= 0 && setRidingStyle_(runtime_, static_cast<std::uint32_t>(style)) != 0;
+}
+
+bool RuntimeBridge::ShopStart(const std::string& assets, const std::string& garages) {
+    return runtime_ && shopStart_ && shopStart_(runtime_, assets.c_str(), garages.c_str()) != 0;
+}
+
+bool RuntimeBridge::ShopCharacter(const std::string& who) {
+    return runtime_ && shopCharacter_ && shopCharacter_(runtime_, who.c_str()) != 0;
+}
+
+bool RuntimeBridge::ShopOpen(int tier) {
+    return runtime_ && shopOpen_ && shopOpen_(runtime_, static_cast<std::uint32_t>(tier)) != 0;
+}
+
+void RuntimeBridge::ShopClose() {
+    if (runtime_ && shopClose_) shopClose_(runtime_);
+}
+
+SvShopResult RuntimeBridge::ShopInput(int input, long long cash) {
+    SvShopResult out{1, 0};
+    if (runtime_ && shopInput_) shopInput_(runtime_, static_cast<std::uint32_t>(input), cash, &out);
+    return out;
+}
+
+std::string RuntimeBridge::ShopText(int which) {
+    if (!runtime_ || !shopText_) return {};
+    std::string text(4096, '\0');
+    std::uint32_t need = shopText_(runtime_, static_cast<std::uint32_t>(which), text.data(), static_cast<std::uint32_t>(text.size()));
+    if (need > text.size()) {
+        text.assign(need, '\0');
+        need = shopText_(runtime_, static_cast<std::uint32_t>(which), text.data(), static_cast<std::uint32_t>(text.size()));
+    }
+    text.resize(need ? need - 1 : 0);
+    return text;
+}
+
+bool RuntimeBridge::ShopRestPose(const float (&at)[16], SvBoardPose& out) {
+    return runtime_ && shopRestPose_ && shopRestPose_(runtime_, at, &out) != 0;
 }
 
 bool RuntimeBridge::SetEquipment(float truck, float wheel) {

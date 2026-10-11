@@ -682,3 +682,16 @@ static_assert(sizeof(SvBoardPose) == 528);
 static_assert(offsetof(SvBoardPose, entity) == 16);
 static_assert(offsetof(SvBoardPose, world) == 80);
 using SvGetBoardPoseFn = std::uint32_t(__cdecl*)(const void*, SvBoardPose*);
+
+// The board shop (board_shop.rs, contributed by GTAxSkate). Optional exports.
+struct SvShopResult {
+    std::uint32_t kind;   // 0 nothing, 1 closed, 2 bought (charge price), 3 riding an owned part, 4 default board, 5 too little money
+    std::uint32_t price;
+};
+using SvShopStartFn = std::uint32_t(__cdecl*)(void*, const char* assets, const char* garages);
+using SvShopCharacterFn = std::uint32_t(__cdecl*)(void*, const char* who);
+using SvShopOpenFn = std::uint32_t(__cdecl*)(void*, std::uint32_t tier);
+using SvShopCloseFn = void(__cdecl*)(void*);
+using SvShopInputFn = std::uint32_t(__cdecl*)(void*, std::uint32_t input, std::int64_t cash, SvShopResult* out);
+using SvShopTextFn = std::uint32_t(__cdecl*)(void*, std::uint32_t which, char* buf, std::uint32_t cap);
+using SvShopRestPoseFn = std::uint32_t(__cdecl*)(void*, const float* at, SvBoardPose* out);
