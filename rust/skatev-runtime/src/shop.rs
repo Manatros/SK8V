@@ -731,7 +731,7 @@ pub fn wall_behind(clerk: bevy_math::Vec3, forward: bevy_math::Vec3, mut probe: 
 
 /// Boards hung behind the till like a skate shop's wall rack: lying
 /// level, length along the wall, graphic out, two rows of two either side
-/// of the clerk (the middle left free for them), high enough (1.7 and 2.05 m
+/// of the clerk (the middle left free for them), high enough (1.45 and 1.8 m
 /// over the floor) to hang above the shelves on that wall. In the board
 /// models' frame (length along Z from the grip, the deck facing -X).
 pub fn till_places(at: bevy_math::Vec3, normal: bevy_math::Vec3, floor: f32) -> Vec<bevy_math::Mat4> {
@@ -742,7 +742,7 @@ pub fn till_places(at: bevy_math::Vec3, normal: bevy_math::Vec3, floor: f32) -> 
     // The model runs from 0.1 m behind the grip to about 0.7 m ahead of it:
     // its middle 0.3 m from the origin.
     const MIDDLE: f32 = 0.3;
-    [(-0.8f32, 1.7f32), (0.8, 1.7), (-0.8, 2.05), (0.8, 2.05)]
+    [(-0.8f32, 1.45f32), (0.8, 1.45), (-0.8, 1.8), (0.8, 1.8)]
         .iter()
         .map(|(offset, height)| {
             let middle = Vec3::new(at.x, at.y, floor + height) + along * *offset + normal * 0.1;
@@ -928,7 +928,7 @@ mod tests {
         assert_eq!(places.len(), 4);
         // Each board's middle (0.3 m along it from the origin) clear of the clerk.
         assert!(places.iter().all(|m| (m.w_axis.x + m.z_axis.x * 0.3).abs() > 0.5), "the middle stays free for the clerk");
-        assert!(places.iter().all(|m| m.w_axis.z >= 1.69 && m.x_axis.y > 0.99), "high on the wall, graphic out");
+        assert!(places.iter().all(|m| m.w_axis.z >= 1.44 && m.x_axis.y > 0.99), "high on the wall, graphic out");
         assert!(places.iter().all(|m| m.z_axis.z.abs() < 1e-4), "lying level along the wall");
         assert!(places.iter().all(|m| (m.determinant() - 1.).abs() < 1e-4), "a rotation, not a mirror");
         // No wall behind: none.
