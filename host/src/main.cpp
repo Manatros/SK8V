@@ -2026,6 +2026,9 @@ void BoardWeather(Session& s, const Config& cfg, const SvBoardPose* pose) {
 // The skater's eyes (view 5, as GTAxSkate's own mod had it): the script
 // camera at the head, looking where the board goes; the mouse looks round
 // (up to 150 degrees each way) and the view drifts back ahead after 1.5 s.
+float g_head[3] = {0, 0, 0}; // the head bone in Skate's pose this frame (world)
+bool g_headValid = false;
+
 void HeadCamera(Session& s, const SvOutput& o) {
     static float yaw = 0.0f, pitch = 0.0f;
     static ULONGLONG lastLook = 0;
@@ -2038,10 +2041,14 @@ void HeadCamera(Session& s, const SvOutput& o) {
     } else if (now - lastLook > 1500) {
         yaw *= 0.94f, pitch *= 0.94f;
     }
-    const Vector3 head = Call<Vector3>(gta::GET_PED_BONE_COORDS, s.ped, 31086, 0.0f, 0.0f, 0.0f); // SKEL_Head
+    // Skate's pose of this frame: GTA's own bone is a frame (or a whole
+    // animation) behind, which put the eye inside the head.
+    Vector3 head{};
+    if (g_headValid) head.x = g_head[0], head.y = g_head[1], head.z = g_head[2];
+    else head = Call<Vector3>(gta::GET_PED_BONE_COORDS, s.ped, 31086, 0.0f, 0.0f, 0.0f); // SKEL_Head
     const float h = (o.skater_heading_degrees + yaw) * 0.017453292f;
     const float fx = -std::sin(h), fy = std::cos(h);
-    Call<void>(gta::SET_CAM_COORD, s.cam, head.x + fx * 0.16f, head.y + fy * 0.16f, head.z + 0.06f);
+    Call<void>(gta::SET_CAM_COORD, s.cam, head.x + fx * 0.18f, head.y + fy * 0.18f, head.z + 0.10f);
     Call<void>(gta::SET_CAM_ROT, s.cam, pitch - 8.0f, 0.0f, o.skater_heading_degrees + yaw, 2);
     Call<void>(gta::SET_CAM_FOV, s.cam, 75.0f);
     Call<void>(gta::SET_CAM_NEAR_CLIP, s.cam, 0.05f);
@@ -2316,6 +2323,9 @@ void UpdateActive(Session& s, const Config& cfg, const SvPad& pad) {
         static std::vector<float> s_pose(512 * 16);
         const std::uint32_t n = g_runtime.CharacterPose(s_pose.data(), 512);
         const bool posed = n > 0 && static_cast<int>(n) == s_bones;
+        g_headValid = posed && s_hitBones[2] >= 0;
+        if (g_headValid)
+            for (int i = 0; i < 3; ++i) g_head[i] = s_pose[16 * s_hitBones[2] + 12 + i];
         if (posed) {
             posehook::PublishPose(s_pose.data(), static_cast<int>(n));
             ImpactGrunts(s, cfg, s_pose.data(), s_hitBones, o.tick);
