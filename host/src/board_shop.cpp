@@ -155,6 +155,27 @@ void ShowBoards(int ped, int tier) {
     }
 }
 
+// Looking at the boards on show from up to 3.5 m (the camera within 25
+// degrees of them): E opens the shop there, as at the store's other goods.
+// Looking elsewhere (the counter, the clerk) E stays the store's own.
+bool LookingAtShow(int ped) {
+    if (g_onShow.empty()) return false;
+    float c[3] = {0, 0, 0};
+    for (const OnShow& b : g_onShow)
+        for (int i = 0; i < 3; ++i) c[i] += b.at[12 + i] / static_cast<float>(g_onShow.size());
+    const Vector3 me = Call<Vector3>(GET_ENTITY_COORDS, ped, 0);
+    const float dx = c[0] - me.x, dy = c[1] - me.y;
+    if (dx * dx + dy * dy > 3.5f * 3.5f) return false;
+    const Vector3 cam = Call<Vector3>(GET_GAMEPLAY_CAM_COORD);
+    const Vector3 rot = Call<Vector3>(GET_GAMEPLAY_CAM_ROT, 2);
+    const float yaw = rot.z * 0.017453292f, pitch = rot.x * 0.017453292f;
+    const float f[3] = {-std::sin(yaw) * std::cos(pitch), std::cos(yaw) * std::cos(pitch), std::sin(pitch)};
+    float to[3] = {c[0] - cam.x, c[1] - cam.y, c[2] - cam.z};
+    const float len = std::sqrt(to[0] * to[0] + to[1] * to[1] + to[2] * to[2]);
+    if (len < 0.1f) return true;
+    return (f[0] * to[0] + f[1] * to[1] + f[2] * to[2]) / len > std::cos(25.0f * 0.017453292f);
+}
+
 // A line at the bottom right: GTA's help box stays the store's own (its
 // clothing counter prompt), which a help text of ours would replace.
 void Hint(const char* text) {
@@ -335,9 +356,12 @@ void Tick(bool busy) {
     if (!can || menu::IsOpen() || Call<BOOL>(IS_PED_IN_ANY_VEHICLE, ped, false) ||
         Call<BOOL>(IS_PLAYER_WANTED_LEVEL_GREATER, Call<int>(PLAYER_ID), 0))
         return;
-    Hint("G / D-pad left:  Skate 3 boards (complete or build your own)");
+    const bool atShow = LookingAtShow(ped);
+    if (atShow) Call<void>(DISABLE_CONTROL_ACTION, 0, 51, 1);  // INPUT_CONTEXT: ours while looking at the boards
+    Hint(atShow ? "E or G:  Skate 3 boards (complete or build your own)" : "G / D-pad left:  Skate 3 boards (complete or build your own)");
     // Skate mode disables GTA's controls; the key is read either way.
-    if ((Call<BOOL>(IS_CONTROL_JUST_PRESSED, 0, kOpen) || Call<BOOL>(IS_DISABLED_CONTROL_JUST_PRESSED, 0, kOpen)) &&
+    const bool e = atShow && Call<BOOL>(IS_DISABLED_CONTROL_JUST_PRESSED, 0, 51);
+    if ((e || Call<BOOL>(IS_CONTROL_JUST_PRESSED, 0, kOpen) || Call<BOOL>(IS_DISABLED_CONTROL_JUST_PRESSED, 0, kOpen)) &&
         g_rt->ShopOpen(tier)) {
         g_open = true;
         ResetOrient();
