@@ -2885,10 +2885,17 @@ void ScriptMain() {
             const ULONGLONG now64 = GetTickCount64();
             const bool mDown = s.state == LifeState::Skating && Call<BOOL>(gta::IS_USING_KEYBOARD_AND_MOUSE, 0) &&
                                !gta::FrontendActive() && !menu::IsOpen() && Call<BOOL>(gta::IS_DISABLED_CONTROL_PRESSED, 0, 244);
+            static ULONGLONG s_menuUntil = 0;
+            static int s_before = -1;
+            const int menus = Call<int>(gta::GET_NUMBER_OF_THREADS_RUNNING_THE_SCRIPT_WITH_THIS_HASH, util::Joaat("pi_menu"));
             if (mDown) {
-                if (!s_thawUntil || now64 >= s_thawUntil) s_checkAt = now64 + 600;
+                if (!s_thawUntil || now64 >= s_thawUntil) s_checkAt = now64 + 600, s_before = menus;
                 s_thawUntil = now64 + 400;
+                s_menuUntil = now64 + 30000;
             }
+            // GTA's menu checks the player each frame: unfrozen while it runs
+            // (it started from this press), at most 30 s.
+            if (s_before == 0 && menus > 0 && now64 < s_menuUntil) s_thawUntil = std::max(s_thawUntil, now64 + 100);
             if (s.state == LifeState::Skating && s_thawUntil) {
                 const bool thaw = now64 < s_thawUntil;
                 Call<void>(gta::FREEZE_ENTITY_POSITION, s.ped, thaw ? 0 : 1);
@@ -2899,8 +2906,7 @@ void ScriptMain() {
             }
             if (s_checkAt && now64 >= s_checkAt) {
                 s_checkAt = 0;
-                Logf("SkateV Legacy: M while skating: GTA's menu script pi_menu threads %d",
-                     Call<int>(gta::GET_NUMBER_OF_THREADS_RUNNING_THE_SCRIPT_WITH_THIS_HASH, util::Joaat("pi_menu")));
+                Logf("SkateV Legacy: M while skating: GTA's menu script pi_menu threads %d (before the press %d)", menus, s_before);
             }
         }
         physlevel::Tick();
