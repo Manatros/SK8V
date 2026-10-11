@@ -9,10 +9,12 @@ namespace skatemap {
 // INI switches (GpsWhileSkating, SkateSpots).
 void Tick(bool skating, bool gps, bool spots);
 
-// The next GPS destination while skating (M on the keyboard): the nearest
-// clothing store (the board shop), then the nearest skate spot, then none.
-// Returns what was set, for a notice.
-const char* NextDestination();
+// GPS destinations for the M menu (GTAxSkate's interaction page): the
+// nearest clothing store (GTA's own store blips; the board shop), the nearest
+// skate spot, or no waypoint. Each returns what was set, for a notice.
+const char* RouteToClothingStore();
+const char* RouteToSkateSpot();
+const char* ClearRoute();
 
 // Removes what this module put on the map (script shutdown).
 void Clear();

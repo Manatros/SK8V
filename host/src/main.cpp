@@ -333,6 +333,7 @@ Config LoadConfig() {
 }
 
 Config g_config;
+const char* g_routeNotice = nullptr; // the Interaction page's last GPS change, shown once
 
 // '/' opens the settings menu (menu.h). Everything else that used a hotkey is a
 // menu item; the items that act on a frame of the main loop set these flags.
@@ -2655,6 +2656,13 @@ std::vector<menu::Page> MenuPages(Session& s) {
              Bound("TrickAnalyzer", [] { hudoverlay::SetTrickAnalyzer(g_config.trickAnalyzer); })),
     }});
 
+    // GTAxSkate's interaction page (M on the keyboard): GPS destinations.
+    pages.push_back({"Interaction", {
+        Action("GPS: nearest clothing store (boards)", [] { g_routeNotice = skatemap::RouteToClothingStore(); }),
+        Action("GPS: nearest skate spot", [] { g_routeNotice = skatemap::RouteToSkateSpot(); }),
+        Action("GPS: remove the waypoint", [] { g_routeNotice = skatemap::ClearRoute(); }),
+    }});
+
     pages.push_back({"Dev", {
         Action("Play showcase line", [] { g_lineRequested.store(true); }),
         Action("Next showcase line", [] { g_lineNext.store(true); }),
@@ -2858,6 +2866,7 @@ void ScriptMain() {
             else menu::Toggle();
         }
         menu::Tick();
+        if (g_routeNotice) Notify(s, g_routeNotice, 3000), g_routeNotice = nullptr;
         Lap(kPartMenu);
         recordsui::Tick(s.state == LifeState::Skating,
                         g_hallOfMeatOn && std::string_view(s.last.state_utf8).rfind("Wipeout", 0) == 0);
@@ -2866,11 +2875,20 @@ void ScriptMain() {
         gtaaudio::Tick(s.state == LifeState::Skating);
         Lap(kPartAudio);
         skatemap::Tick(SkateOwnsPlayer(s), g_config.gpsWhileSkating, g_config.skateSpots);
-        // M while skating on the keyboard (GTA's interaction menu does not open
-        // then): the GPS to the nearest board shop, the nearest skate spot, off.
-        if (s.state == LifeState::Skating && !menu::IsOpen() && Call<BOOL>(gta::IS_USING_KEYBOARD_AND_MOUSE, 0) &&
-            Call<BOOL>(gta::IS_DISABLED_CONTROL_JUST_PRESSED, 0, 244))
-            if (const char* what = skatemap::NextDestination(); *what) Notify(s, what, 3000);
+        // M while skating: GTA's interaction menu (its own on foot) does not
+        // open while Skate holds the player, so the menu's Interaction page
+        // does; what the player's state was is logged, to find GTA's reason.
+        if (s.state == LifeState::Skating && Call<BOOL>(gta::IS_USING_KEYBOARD_AND_MOUSE, 0) && !gta::FrontendActive() &&
+            !menu::IsOpen() && Call<BOOL>(gta::IS_DISABLED_CONTROL_JUST_PRESSED, 0, 244)) {
+            const Ped p = s.ped;
+            Logf("SkateV Legacy: M while skating: control_on=%d on_foot=%d in_air=%d falling=%d ragdoll=%d static=%d "
+                 "dead=%d busy_phone=%d control244_enabled=%d",
+                 Call<BOOL>(gta::IS_PLAYER_CONTROL_ON, Call<int>(gta::PLAYER_ID)), Call<BOOL>(gta::IS_PED_ON_FOOT, p),
+                 Call<BOOL>(gta::IS_ENTITY_IN_AIR, p), Call<BOOL>(gta::IS_PED_FALLING, p), Call<BOOL>(gta::IS_PED_RAGDOLL, p),
+                 Call<BOOL>(gta::IS_ENTITY_STATIC, p), Call<BOOL>(gta::IS_ENTITY_DEAD, p, 0),
+                 Call<BOOL>(gta::IS_PED_RUNNING_MOBILE_PHONE_TASK, p), Call<BOOL>(gta::IS_CONTROL_ENABLED, 0, 244));
+            menu::OpenPage("Interaction");
+        }
         physlevel::Tick();
         Lap(kPartLevel);
         monitor.Work(monitor.Now() - workStart);

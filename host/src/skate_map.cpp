@@ -87,41 +87,36 @@ void Tick(bool skating, bool gps, bool spots) {
     if (g_route) SetRoute(false);
 }
 
-const char* NextDestination() {
-    static int s_step = 0;
-    const Vector3 me = Call<Vector3>(GET_ENTITY_COORDS, Call<int>(PLAYER_PED_ID), 0);
-    auto nearest = [&](float& x, float& y) -> bool {
-        // GTA's own clothing store blips (sprite 73: Binco, Discount Store, Suburban, Ponsonbys).
-        float best = 1e12f;
-        for (int b = Call<int>(GET_FIRST_BLIP_INFO_ID, 73); Call<BOOL>(DOES_BLIP_EXIST, b); b = Call<int>(GET_NEXT_BLIP_INFO_ID, 73)) {
-            const Vector3 at = Call<Vector3>(GET_BLIP_INFO_ID_COORD, b);
-            const float d = (at.x - me.x) * (at.x - me.x) + (at.y - me.y) * (at.y - me.y);
-            if (d < best) best = d, x = at.x, y = at.y;
-        }
-        return best < 1e12f;
-    };
-    for (int tries = 0; tries < 3; ++tries) {
-        const int step = s_step++ % 3;
-        float x = 0.0f, y = 0.0f;
-        if (step == 0 && nearest(x, y)) {
-            Call<void>(SET_NEW_WAYPOINT, x, y);
-            return "GPS: nearest clothing store (Skate 3 boards)";
-        }
-        if (step == 1) {
-            float best = 1e12f;
-            for (const Spot& s : kSpots) {
-                const float d = (s.x - me.x) * (s.x - me.x) + (s.y - me.y) * (s.y - me.y);
-                if (d < best) best = d, x = s.x, y = s.y;
-            }
-            Call<void>(SET_NEW_WAYPOINT, x, y);
-            return "GPS: nearest skate spot";
-        }
-        if (step == 2) {
-            Call<void>(SET_WAYPOINT_OFF);
-            return "GPS: off";
-        }
+Vector3 Me() { return Call<Vector3>(GET_ENTITY_COORDS, Call<int>(PLAYER_PED_ID), 0); }
+
+const char* RouteToClothingStore() {
+    // GTA's own clothing store blips (sprite 73: Binco, Discount Store, Suburban, Ponsonbys).
+    const Vector3 me = Me();
+    float best = 1e12f, x = 0.0f, y = 0.0f;
+    for (int b = Call<int>(GET_FIRST_BLIP_INFO_ID, 73); Call<BOOL>(DOES_BLIP_EXIST, b); b = Call<int>(GET_NEXT_BLIP_INFO_ID, 73)) {
+        const Vector3 at = Call<Vector3>(GET_BLIP_INFO_ID_COORD, b);
+        const float d = (at.x - me.x) * (at.x - me.x) + (at.y - me.y) * (at.y - me.y);
+        if (d < best) best = d, x = at.x, y = at.y;
     }
-    return "";
+    if (best >= 1e12f) return "No clothing store on the map";
+    Call<void>(SET_NEW_WAYPOINT, x, y);
+    return "GPS: nearest clothing store (Skate 3 boards)";
+}
+
+const char* RouteToSkateSpot() {
+    const Vector3 me = Me();
+    float best = 1e12f, x = 0.0f, y = 0.0f;
+    for (const Spot& s : kSpots) {
+        const float d = (s.x - me.x) * (s.x - me.x) + (s.y - me.y) * (s.y - me.y);
+        if (d < best) best = d, x = s.x, y = s.y;
+    }
+    Call<void>(SET_NEW_WAYPOINT, x, y);
+    return "GPS: nearest skate spot";
+}
+
+const char* ClearRoute() {
+    Call<void>(SET_WAYPOINT_OFF);
+    return "GPS: waypoint removed";
 }
 
 void Clear() {
