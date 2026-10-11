@@ -234,7 +234,21 @@ void Turn(int axis, float angle) {
 
 float g_zoom = 1.6f; // the preview's distance from the camera (mouse wheel)
 
+// The side the offer is about faces the player: the grip for a griptape, the
+// graphic (and trucks and wheels) for the rest. Turning by hand stays until
+// the cursor reaches an offer about the other side.
+void FaceOffer() {
+    static std::string s_face;
+    const std::string face = g_rt->ShopText(6);
+    if (face.empty() || face == s_face) return;
+    s_face = face;
+    ResetOrient();  // the top toward the camera
+    if (face == "bottom")
+        for (int i = 0; i < 3; ++i) g_orient[0][i] = -g_orient[0][i], g_orient[2][i] = -g_orient[2][i];  // half a turn about its length
+}
+
 void ShowPreview() {
+    FaceOffer();
     if (Call<BOOL>(IS_DISABLED_CONTROL_PRESSED, 0, 24)) {
         Turn(2, Call<float>(GET_DISABLED_CONTROL_NORMAL, 0, 1) * 4.0f);
         Turn(0, Call<float>(GET_DISABLED_CONTROL_NORMAL, 0, 2) * 4.0f);

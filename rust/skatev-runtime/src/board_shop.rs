@@ -338,6 +338,17 @@ impl BoardShop {
         models.into_iter().filter(|m| kinds.contains(&m.split('_').nth(1).unwrap_or_default())).collect()
     }
 
+    /// The side of the board the preview turns to the player for the offer
+    /// at the cursor: "top" for a griptape, "bottom" for everything else (the
+    /// graphic, the trucks and wheels), "" outside the shop's offers.
+    pub fn preview_face(&self) -> &'static str {
+        match self.menu.as_ref().and_then(Menu::current).map(|o| &o.goods) {
+            Some(Goods::Grip(_)) => "top",
+            Some(_) => "bottom",
+            None => "",
+        }
+    }
+
     fn sells(&self, goods: &Goods) -> bool {
         match goods {
             // Stickers are decals the part models cannot draw yet.
@@ -638,7 +649,8 @@ pub unsafe extern "C" fn sv_shop_input(_rt: *mut c_void, input: u32, cash: i64, 
 /// 1 the ridden board's models (comma list; empty for the native board),
 /// 2 the store preview's models, 3 what starting the shop found, 4 the
 /// ridden painted wheels' hardness ("0.60"; empty for unpainted wheels), 5 the
-/// store preview's models in the part view (only the offer's part).
+/// store preview's models in the part view (only the offer's part), 6 the side
+/// the preview shows ("top" for a griptape, "bottom" else, "" outside offers).
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sv_shop_text(_rt: *mut c_void, which: u32, buf: *mut u8, cap: u32) -> u32 {
     crate::guard(0, || {
@@ -650,6 +662,7 @@ pub unsafe extern "C" fn sv_shop_text(_rt: *mut c_void, which: u32, buf: *mut u8
             1 => s.riding().join(","),
             2 => s.preview().join(","),
             5 => s.preview_part().join(","),
+            6 => s.preview_face().to_string(),
             4 => s.wheel_hardness().map(|h| format!("{h:.2}")).unwrap_or_default(),
             _ => String::new(),
         });
