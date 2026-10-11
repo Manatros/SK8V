@@ -319,16 +319,26 @@ fn sticker_group(s: &skate_boards::stickers::Sticker) -> String {
 }
 
 /// The griptapes on sale ($10-15).
+/// The griptape id for "none": the deck's own grip, as Skate 3 draws it.
+pub const DECK_GRIP: &str = "";
+
 pub fn grip_offers(library: Option<&Library>, tier: Tier) -> Vec<Offer> {
-    skate_boards::grips::catalog(library)
-        .into_iter()
-        .map(|grip| Offer {
+    // First the deck's own grip (no griptape laid on it): free, always owned.
+    let own = Offer {
+        title: "The deck's own grip (no griptape)".into(),
+        price: 0,
+        preview: String::new(),
+        group: None,
+        goods: Goods::Grip(DECK_GRIP.into()),
+    };
+    std::iter::once(own)
+        .chain(skate_boards::grips::catalog(library).into_iter().map(|grip| Offer {
             title: format!("{} griptape", grip.name),
             price: price_of(tier, Kind::Grip, &format!("grip:{}", grip.id)),
             preview: grip.id.clone(),
             group: None,
             goods: Goods::Grip(grip.id),
-        })
+        }))
         .collect()
 }
 
@@ -356,7 +366,7 @@ impl Garage {
             Goods::Complete(board) => Part::ALL
                 .iter()
                 .all(|&part| board.get(part).is_none_or(|value| self.owned.contains(&(part, value.clone())))),
-            Goods::Grip(id) => self.grips.contains(id),
+            Goods::Grip(id) => id == DECK_GRIP || self.grips.contains(id),
             Goods::Sticker(id) => self.stickers.contains(id),
             Goods::TruckPaint(side, id) => self.truck_paints.contains(&(*side, id.clone())),
         }
@@ -374,6 +384,7 @@ impl Garage {
         match goods {
             Goods::Part(part, value) => self.riding.get(*part) == Some(value),
             Goods::Complete(board) => self.riding == *board,
+            Goods::Grip(id) if id == DECK_GRIP => self.grip.is_none(),
             Goods::Grip(id) => self.grip.as_deref() == Some(id.as_str()),
             Goods::Sticker(id) => self.sticker.as_deref() == Some(id.as_str()),
             Goods::TruckPaint(side, id) => self.truck_paint(*side) == Some(id.as_str()),
@@ -408,7 +419,7 @@ impl Garage {
         match goods {
             Goods::Part(part, value) => self.riding.set(*part, Some(value.clone())),
             Goods::Complete(board) => self.riding = board.clone(),
-            Goods::Grip(id) => self.grip = Some(id.clone()),
+            Goods::Grip(id) => self.grip = (id != DECK_GRIP).then(|| id.clone()),
             Goods::Sticker(id) => self.sticker = Some(id.clone()),
             Goods::TruckPaint(skate_boards::paints::TruckPart::Base, id) => self.truck_base = Some(id.clone()),
             Goods::TruckPaint(skate_boards::paints::TruckPart::Hanger, id) => self.truck_hanger = Some(id.clone()),
@@ -884,6 +895,18 @@ pub fn preview_start() -> bevy_math::Quat {
 #[cfg(test)]
 mod tests {
     #[test]
+    fn the_decks_own_grip_is_free_owned_and_takes_the_griptape_off() {
+        let offers = super::grip_offers(None, super::Tier::Mid);
+        assert_eq!((offers[0].price, offers[0].goods.clone()), (0, super::Goods::Grip(super::DECK_GRIP.into())));
+        let mut g = super::Garage::default();
+        assert!(g.owns(&offers[0].goods) && g.rides(&offers[0].goods));
+        g.ride(&super::Goods::Grip("red".into()));
+        assert!(!g.rides(&offers[0].goods));
+        g.ride(&offers[0].goods);
+        assert_eq!(g.grip, None);
+    }
+
+    #[test]
     fn stickers_are_grouped_by_maker() {
         let sticker = |group: &str, title: &str| skate_boards::stickers::Sticker { id: "x".into(), title: title.into(), group: group.into() };
         assert_eq!(super::sticker_group(&sticker("Brand logos", "Adidas (bw)")), "Adidas");
@@ -1104,6 +1127,9 @@ mod tests {
         for tier in [Tier::Low, Tier::Mid] {
             for section in stock(&library, tier).into_iter().skip(1) {
                 for offer in section.offers {
+                    if offer.goods == Goods::Grip(DECK_GRIP.into()) {
+                        continue; // the deck's own grip: free
+                    }
                     // Street prices: nothing over a deck's 95, nothing under a sticker's 5.
                     assert!((5..=95).contains(&offer.price) && offer.price % 5 == 0, "{tier:?} {} {}", offer.title, offer.price);
                     if section.title == "Build: Griptape" {
