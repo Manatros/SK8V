@@ -2159,10 +2159,16 @@ void HeadCamera(Session& s, const SvOutput& o) {
     Vector3 head{};
     if (g_headValid) head.x = g_head[0], head.y = g_head[1], head.z = g_head[2];
     else head = Call<Vector3>(gta::GET_PED_BONE_COORDS, s.ped, 31086, 0.0f, 0.0f, 0.0f); // SKEL_Head
-    const float h = (o.skater_heading_degrees + yaw) * 0.017453292f;
+    // Where the board goes (Skate's skater heading pointed backwards on the
+    // board); standing, the last way it went, at first the skater's.
+    static float ahead = NAN;
+    const float speed = std::hypot(o.velocity.x, o.velocity.y);
+    if (speed > 0.8f) ahead = std::atan2(-o.velocity.x, o.velocity.y) * 57.29578f;
+    else if (!std::isfinite(ahead)) ahead = o.skater_heading_degrees;
+    const float h = (ahead + yaw) * 0.017453292f;
     const float fx = -std::sin(h), fy = std::cos(h);
     Call<void>(gta::SET_CAM_COORD, s.cam, head.x + fx * 0.18f, head.y + fy * 0.18f, head.z + 0.10f);
-    Call<void>(gta::SET_CAM_ROT, s.cam, pitch - 8.0f, 0.0f, o.skater_heading_degrees + yaw, 2);
+    Call<void>(gta::SET_CAM_ROT, s.cam, pitch - 8.0f, 0.0f, ahead + yaw, 2);
     Call<void>(gta::SET_CAM_FOV, s.cam, 75.0f);
     Call<void>(gta::SET_CAM_NEAR_CLIP, s.cam, 0.05f);
 }
