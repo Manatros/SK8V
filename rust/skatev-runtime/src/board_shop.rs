@@ -322,6 +322,22 @@ impl BoardShop {
         self.models(&garage)
     }
 
+    /// The store's part view: only the current offer's part (the deck with
+    /// its griptape, the trucks, or the wheels); the whole board for a
+    /// complete one.
+    pub fn preview_part(&self) -> Vec<String> {
+        let models = self.preview();
+        let Some(part) = self.menu.as_ref().and_then(Menu::current).and_then(|o| crate::shop::focus_of(&o.goods)) else {
+            return models;
+        };
+        let kinds: &[&str] = match part {
+            Part::Deck => &["d", "g"],
+            Part::Trucks => &["t", "tb", "th"],
+            Part::Wheels => &["w"],
+        };
+        models.into_iter().filter(|m| kinds.contains(&m.split('_').nth(1).unwrap_or_default())).collect()
+    }
+
     fn sells(&self, goods: &Goods) -> bool {
         match goods {
             // Stickers are decals the part models cannot draw yet.
@@ -621,7 +637,8 @@ pub unsafe extern "C" fn sv_shop_input(_rt: *mut c_void, input: u32, cash: i64, 
 /// enough; returns the bytes needed): 0 the menu (see `BoardShop::view`),
 /// 1 the ridden board's models (comma list; empty for the native board),
 /// 2 the store preview's models, 3 what starting the shop found, 4 the
-/// ridden painted wheels' hardness ("0.60"; empty for unpainted wheels).
+/// ridden painted wheels' hardness ("0.60"; empty for unpainted wheels), 5 the
+/// store preview's models in the part view (only the offer's part).
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sv_shop_text(_rt: *mut c_void, which: u32, buf: *mut u8, cap: u32) -> u32 {
     crate::guard(0, || {
@@ -632,6 +649,7 @@ pub unsafe extern "C" fn sv_shop_text(_rt: *mut c_void, which: u32, buf: *mut u8
             0 => s.view(),
             1 => s.riding().join(","),
             2 => s.preview().join(","),
+            5 => s.preview_part().join(","),
             4 => s.wheel_hardness().map(|h| format!("{h:.2}")).unwrap_or_default(),
             _ => String::new(),
         });
@@ -896,6 +914,17 @@ mod tests {
         assert!(d.join("SkateVWear-franklin.txt").is_file());
         s.wear.renew(&deck);
         assert_eq!(s.wear.of(&deck), 0.0);
+    }
+
+    #[test]
+    fn the_part_view_shows_only_the_offers_part() {
+        let d = dir("partview");
+        let mut s = shop(&d);
+        assert!(s.open(Tier::Low));
+        assert_eq!(s.preview_part().len(), 3, "a complete board shows whole");
+        s.input(Input::Right, 0); // Build: Deck, listed by maker
+        s.input(Input::Accept, 0); // open the maker
+        assert!(s.preview_part().iter().all(|m| m.starts_with("skatev_d_") || m.starts_with("skatev_g_")), "{:?}", s.preview_part());
     }
 
     #[test]

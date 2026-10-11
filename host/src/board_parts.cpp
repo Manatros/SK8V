@@ -37,6 +37,7 @@ struct Set {
     int interior = 0;            // the room the objects are kept in (the player's)
     std::uint32_t room = 0;
     ULONGLONG waitingSince = 0;  // not all parts loaded yet (for the log)
+    bool notRigidLogged = false;
 };
 Set g_ride, g_preview;
 Set g_display[8];
@@ -181,7 +182,10 @@ bool Show(Set& set, const SvBoardPose& pose) {
     posemath::M entity;
     std::memcpy(&entity, pose.entity, sizeof(entity));
     posemath::Q q;
-    if (!posemath::RigidQuaternion(entity, q)) return false;
+    if (!posemath::RigidQuaternion(entity, q)) {
+        if (!set.notRigidLogged) set.notRigidLogged = true, Log("board parts: a pose's entity matrix is not a rotation; parts not shown");
+        return false;
+    }
     bool all = true;
     std::string missing;
     for (const std::string& name : set.models)

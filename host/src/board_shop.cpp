@@ -27,6 +27,7 @@ void (*g_wheels)(float) = nullptr;
 bool g_ready = false, g_open = false;
 std::uint32_t g_model = 0;
 int g_tierShown = -1;
+bool g_partView = false;  // Tab: the offer's part alone, or the whole board
 
 void Log(const std::string& s) {
     if (g_log) g_log(s.c_str());
@@ -178,10 +179,11 @@ void Close() {
     boardparts::Preview({}, SvBoardPose{});
 }
 
-// The preview board's axes (rows: board X, Y, Z) in the camera's frame
-// (right, toward the camera, up): first the deck tilted 35 degrees toward
-// the camera; turned all ways round with the mouse while the left button is
-// held (it never turns by itself).
+// The preview board's axes (rows: board X, Y, Z) in the camera's level frame
+// (right, forward, up: right-handed, so the matrix stays a rotation that
+// SET_ENTITY_QUATERNION takes): first the deck tilted 35 degrees toward the
+// camera; turned all ways round with the mouse while the left button is held
+// (it never turns by itself).
 float g_orient[3][3];
 
 void ResetOrient() {
@@ -211,10 +213,10 @@ void ShowPreview() {
     const float yaw = rot.z * 0.017453292f, pitch = rot.x * 0.017453292f;
     const float fx = -std::sin(yaw) * std::cos(pitch), fy = std::cos(yaw) * std::cos(pitch), fz = std::sin(pitch);
     const float rx = std::cos(yaw), ry = std::sin(yaw);
-    const float right[3] = {rx, ry, 0.0f}, back[3] = {std::sin(yaw), -std::cos(yaw), 0.0f}, up[3] = {0.0f, 0.0f, 1.0f};
+    const float right[3] = {rx, ry, 0.0f}, forward[3] = {-std::sin(yaw), std::cos(yaw), 0.0f}, up[3] = {0.0f, 0.0f, 1.0f};
     float at[16];
     for (int r = 0; r < 3; ++r) {
-        for (int i = 0; i < 3; ++i) at[r * 4 + i] = g_orient[r][0] * right[i] + g_orient[r][1] * back[i] + g_orient[r][2] * up[i];
+        for (int i = 0; i < 3; ++i) at[r * 4 + i] = g_orient[r][0] * right[i] + g_orient[r][1] * forward[i] + g_orient[r][2] * up[i];
         at[r * 4 + 3] = 0.0f;
     }
     // 1.6 m ahead and 0.5 m right of the camera, a little below its line.
@@ -223,7 +225,7 @@ void ShowPreview() {
     at[14] = cam.z + fz * 1.6f - 0.2f;
     at[15] = 1.0f;
     SvBoardPose pose{};
-    if (g_rt->ShopRestPose(at, pose)) boardparts::Preview(Split(g_rt->ShopText(2), ','), pose);
+    if (g_rt->ShopRestPose(at, pose)) boardparts::Preview(Split(g_rt->ShopText(g_partView ? 5 : 2), ','), pose);
 }
 
 void Menu(int ped) {
@@ -238,6 +240,11 @@ void Menu(int ped) {
                             {kReset, 6, "SELECT"}};
     const std::uint32_t model = Call<std::uint32_t>(GET_ENTITY_MODEL, ped);
     const std::uint32_t stat = CashStat(model);
+    // Tab (INPUT_FRONTEND_Y, the pad's Y): the whole board or the part alone.
+    if (Call<BOOL>(IS_DISABLED_CONTROL_JUST_PRESSED, 2, 204)) {
+        g_partView = !g_partView;
+        Sound("NAV_LEFT_RIGHT");
+    }
     for (const Key& k : keys) {
         if (!Call<BOOL>(IS_DISABLED_CONTROL_JUST_PRESSED, 2, k.control)) continue;
         int cash = 0;
@@ -273,7 +280,7 @@ void Menu(int ped) {
         rows.push_back(row);
     }
     menu::DrawPanel("Boards", head.empty() ? "" : head[0], head.size() > 1 ? head[1] : "", rows,
-                    lines[1] + "  Left mouse button + mouse: turn the board");
+                    lines[1] + (g_partView ? "  Tab: whole board" : "  Tab: the part alone") + "  Left mouse button + mouse: turn it");
     ShowPreview();
 }
 
