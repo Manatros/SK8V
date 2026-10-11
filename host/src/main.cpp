@@ -93,6 +93,9 @@ struct Config {
     bool lipRule = true;           // LipRule=1: stall on a ramp lip only riding up slowly; 0 retail grind admission
     int difficulty = 0;            // Difficulty=Easy|Normal|Hardcore|Motorized: Skate 3's physics_mode (index)
     int cameraType = 1;            // Camera=Low|High: Skate 3's stock camera graph branch (0 Low, 1 High)
+    // CameraView: the view skating starts in: 0 Skate 3's camera, 1-3 GTA's near, middle, far
+    // follow camera (the mouse turns it), 4 GTA's first person. V cycles them while skating.
+    int cameraView = 0;
     int gestures[4] = {23, 7, 24, 22}; // EmoteUp/Down/Left/Right: d-pad gesture per direction (kGestures index, -1 None)
     int posture = 0;               // Posture=Normal|Stiff|Slouch|Buff: Skate 3's riding posture (kPostures index)
     int ridingStyle = 0;           // RidingStyle=Default|Loose|Gonzo|Aggressive: Skate 3's riding animations (kRidingStyles index)
@@ -257,6 +260,11 @@ const Key kKeys[] = {
              if (menu::SameText(v, kDifficulties[i])) c.difficulty = i;
      }},
     {"Camera", [](Config& c, const std::string& v) { c.cameraType = menu::SameText(v, "Low") ? 0 : 1; }},
+    {"CameraView", [](Config& c, const std::string& v) {
+        const char* names[] = {"Skate", "Near", "Middle", "Far", "FirstPerson"};
+        for (int i = 0; i < 5; ++i)
+            if (menu::SameText(v, names[i])) c.cameraView = i;
+    }},
     {"EmoteUp", [](Config& c, const std::string& v) { c.gestures[0] = GestureIndex(v); }},
     {"EmoteDown", [](Config& c, const std::string& v) { c.gestures[1] = GestureIndex(v); }},
     {"EmoteLeft", [](Config& c, const std::string& v) { c.gestures[2] = GestureIndex(v); }},
@@ -328,6 +336,8 @@ Config LoadConfig() {
 }
 
 Config g_config;
+// GTA's follow camera is the view (CameraView 1-4): the mouse turns it.
+bool g_gtaView = false;
 
 // '/' opens the settings menu (menu.h). Everything else that used a hotkey is a
 // menu item; the items that act on a frame of the main loop set these flags.
@@ -699,6 +709,7 @@ struct Session {
     DWORD messageUntil = 0;
     std::string message;
     SvOutput last{};
+    int view = -1;                // CameraView in use (-1: not chosen since entering)
     bool wipingOut = false; // last output was a Wipeout state (bail voice)
     // Bail impacts: the skater's velocity from Skate's positions (60 Hz ticks).
     SvVec3 bailPos{}, bailVel{};
@@ -975,6 +986,7 @@ void NearMiss(Session& s, const Config& cfg, const std::vector<SvDynamicBody>& b
 // Otherwise (menu, death, runtime error, network) the ped is put where the
 // skater last was.
 void Leave(Session& s, const Config& cfg, const char* why, bool voluntary) {
+    g_gtaView = false, s.view = -1; // the next entry starts in CameraView again
     if (!SkateOwnsPlayer(s)) return;
     const bool wasSkating = s.state == LifeState::Skating;
     SetState(s, LifeState::Leaving, why);
@@ -1361,7 +1373,7 @@ void StopAim(Session& s, bool restoreCam) {
     s.aiming = false;
     s.aimCycle = 0;
     s.fireWas = false;
-    if (restoreCam && s.cam) Call<void>(gta::RENDER_SCRIPT_CAMS, 1, 1, kAimBlendMs, 1, 0, 0);
+    if (restoreCam && s.cam && !g_gtaView) Call<void>(gta::RENDER_SCRIPT_CAMS, 1, 1, kAimBlendMs, 1, 0, 0);
     Log("SkateV Legacy: board aim off");
 }
 
@@ -1396,6 +1408,7 @@ void DisableSkateControls(std::uint16_t buttons, bool aiming) {
         skip[c] = (g_weaponWheel && ((c >= 12 && c <= 17) || c == 37 || c == 1 || c == 2)) ||
                   c == 199 || c == 200 || c == 170 || c == 288 || c == 289 || (c >= 296 && c <= 328) || c == 349 ||
                   (c == 19 && !(buttons & 0x0100)) ||
+                  (g_gtaView && (c == 1 || c == 2) && Call<BOOL>(gta::IS_USING_KEYBOARD_AND_MOUSE, 0)) ||
                   (aiming && (c == 1 || c == 2 || c == 24 || c == 25 || c == 45 || (c >= 270 && c <= 273) || (c >= 290 && c <= 295)));
         if (skip[c]) continue;
         // GTA's value this frame whether or not it is disabled (scripts run after the input update).
@@ -1633,7 +1646,7 @@ void BoardControls(Session& s, const Config& cfg, SvPad& pad) {
         s.wheelOpen = false;
         s.wheelClosedAt = tick;
         Call<void>(gta::HUD_FORCE_WEAPON_WHEEL, 0);
-        if (s.cam && !s.aiming) Call<void>(gta::RENDER_SCRIPT_CAMS, 1, 1, kAimBlendMs, 1, 0, 0);
+        if (s.cam && !g_gtaView && !s.aiming) Call<void>(gta::RENDER_SCRIPT_CAMS, 1, 1, kAimBlendMs, 1, 0, 0);
         // GTA's own highlight is what the wheel picks; where it never moved
         // (no GTA task running on the ped), the stick's slice below.
         if (s.wheelLitMoved && s.wheelLastLit) s.wheelPick = s.wheelLastLit;
@@ -2001,6 +2014,30 @@ void BoardWeather(Session& s, const Config& cfg, const SvBoardPose* pose) {
     if (s.firstTrack.decal > 0 && s.firstTrack.checkAt && static_cast<int>(GetTickCount() - s.firstTrack.checkAt) >= 0) {
         Logf("board tracks: first mark alive a second later: %d", Call<BOOL>(gta::IS_DECAL_ALIVE, s.firstTrack.decal));
         s.firstTrack.checkAt = 0;
+// The camera view while skating: Skate 3's camera (SK8V's script camera) or
+// GTA's own follow camera (near, middle, far, first person), which the mouse
+// turns. V (INPUT_NEXT_CAMERA) cycles them. In a GTA view the on-foot stick
+// is turned from Skate's camera into GTA's, so walking follows what is seen.
+void UpdateCameraView(Session& s, const Config& cfg, SvPad& pad) {
+    if (s.view < 0) s.view = std::clamp(cfg.cameraView, 0, 4);
+    if (!menu::IsOpen() && Call<BOOL>(gta::IS_DISABLED_CONTROL_JUST_PRESSED, 0, 0)) {
+        s.view = (s.view + 1) % 5;
+        Logf("SkateV Legacy: camera view %d", s.view);
+    }
+    const bool gta = s.view > 0;
+    if (gta) {
+        constexpr int kMode[5] = {0, 0, 1, 2, 4}; // near, middle, far, first person
+        Call<void>(gta::SET_FOLLOW_PED_CAM_VIEW_MODE, kMode[s.view]);
+    }
+    if (gta != g_gtaView && !s.aiming) {
+        if (s.cam) Call<void>(gta::RENDER_SCRIPT_CAMS, gta ? 0 : 1, 1, kAimBlendMs, 1, 0, 0);
+        g_gtaView = gta;
+    }
+    if (g_gtaView && s.last.camera_valid && std::string_view(s.last.state_utf8).rfind("Biped", 0) == 0) {
+        const float d = (Call<Vector3>(gta::GET_GAMEPLAY_CAM_ROT, 2).z - s.last.camera_rotation.z) * 0.017453292f;
+        const float x = pad.left_x, y = pad.left_y, c = std::cos(d), sn = std::sin(d);
+        pad.left_x = static_cast<std::int16_t>(std::clamp(x * c - y * sn, -32767.0f, 32767.0f));
+        pad.left_y = static_cast<std::int16_t>(std::clamp(x * sn + y * c, -32767.0f, 32767.0f));
     }
 }
 
@@ -2417,7 +2454,8 @@ void LifecycleFrame(Session& s, const Config& cfg, bool f6) {
         break;
     }
     case LifeState::Skating: {
-        const SvPad pad = ReadPad(); // once per frame
+        SvPad pad = ReadPad(); // once per frame
+        UpdateCameraView(s, cfg, pad);
         // Hold Y to put the board away. The press still reaches Skate, so
         // it steps off first, then puts the board away while Y stays down.
         // Only a press made while skating counts; a Y held at entry does not.
@@ -2588,6 +2626,8 @@ std::vector<menu::Page> MenuPages(Session& s) {
         Choice("Board tracks", "BoardTracks", {"1", "0"}, {"On", "Off"}, Bound("BoardTracks")),
         Choice("Snow", "Snow", {"0", "1", "2"}, {"Auto (GTA's snow and weather)", "Always (a trainer's snow)", "Never"},
                Bound("Snow")),
+        Choice("Camera view at the start (V cycles)", "CameraView", {"Skate", "Near", "Middle", "Far", "FirstPerson"},
+               {"Skate 3", "GTA near", "GTA middle", "GTA far", "GTA first person"}, Bound("CameraView")),
     }});
 
     pages.push_back({"Hall of Meat and records", {
