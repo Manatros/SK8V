@@ -78,6 +78,7 @@ struct OnShow {
 std::vector<OnShow> g_onShow;
 std::uint32_t g_showStore = 0;  // the interior they are for
 DWORD g_showRetry = 0;
+bool g_showMissed = false;  // "no place yet" logged for this store
 
 std::uint32_t __cdecl Probe(void* ctx, const float* from, const float* to, float* hit) {
     const int test = Call<int>(START_EXPENSIVE_SYNCHRONOUS_SHAPE_TEST_LOS_PROBE, from[0], from[1], from[2], to[0], to[1], to[2],
@@ -122,7 +123,7 @@ void ShowBoards(int ped, int tier) {
     std::uint32_t hash = 0;
     Call<void>(GET_INTERIOR_LOCATION_AND_NAMEHASH, interior, &place, &hash);
     const std::uint32_t key = static_cast<std::uint32_t>(interior);
-    if (key != g_showStore) ClearShow(), g_showStore = key, g_showRetry = 0;
+    if (key != g_showStore) ClearShow(), g_showStore = key, g_showRetry = 0, g_showMissed = false;
     if (g_onShow.empty() && static_cast<LONG>(GetTickCount() - g_showRetry) >= 0) {
         g_showRetry = GetTickCount() + 1500;
         const Vector3 me = Call<Vector3>(GET_ENTITY_COORDS, ped, 0);
@@ -144,7 +145,8 @@ void ShowBoards(int ped, int tier) {
             b.models = Split(models[static_cast<std::size_t>(i)], ',');
             g_onShow.push_back(b);
         }
-        if (n) Log("board shop: " + std::to_string(n) + " boards on show (" + (c ? "behind the till" : "on a wall") + ")");
+        if (n) Log("board shop: " + std::to_string(n) + " boards on show (" + (c ? "a clerk near: behind the till" : "on a wall") + ")");
+        else if (!g_showMissed) g_showMissed = true, Log("board shop: no place for boards on show found yet (tried again every 1.5 s)");
     }
     for (std::size_t i = 0; i < g_onShow.size(); ++i) {
         SvBoardPose pose{};
@@ -225,7 +227,10 @@ void ShowPreview() {
 }
 
 void Menu(int ped) {
-    Call<void>(DISABLE_ALL_CONTROL_ACTIONS, 0);
+    // Every control but pause, one by one: DISABLE_ALL_CONTROL_ACTIONS would
+    // stop a Rockstar Editor recording (as SK8V's own control handling notes).
+    for (int c = 0; c < 360; ++c)
+        if (c != 199 && c != 200) Call<void>(DISABLE_CONTROL_ACTION, 0, c, 1);
     Call<void>(INVALIDATE_IDLE_CAM);
     struct Key { int control, input; const char* sound; };
     constexpr Key keys[] = {{kUp, 0, "NAV_UP_DOWN"},       {kDown, 1, "NAV_UP_DOWN"},   {kLeft, 2, "NAV_LEFT_RIGHT"},
