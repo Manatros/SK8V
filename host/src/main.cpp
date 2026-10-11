@@ -353,7 +353,10 @@ int g_lastView = -1, g_footModeAtLeave = -1;
 // in degrees, for walking that follows the camera.
 float g_orbitYaw = 0.0f;
 bool g_orbitOn = false;
-constexpr int kFootMode[6] = {-1, 0, 1, 2, 4, -1}; // view -> GTA's follow camera mode
+// view -> GTA's on-foot camera mode. First person while skating is the
+// skater's eyes (GTA's own first person hid the board), so both are GTA's
+// first person on foot.
+constexpr int kFootMode[6] = {-1, 0, 1, 2, 4, 4};
 
 // '/' opens the settings menu (menu.h). Everything else that used a hotkey is a
 // menu item; the items that act on a frame of the main loop set these flags.
@@ -1004,12 +1007,13 @@ void FilmLook(Session& s, const Config& cfg, int action, float focus);
 // last used (or GTA's on-foot near/middle/far/first person when V changed it
 // on foot), else CameraView.
 int StartView(const Config& cfg) {
-    if (!cfg.cameraRemember) return std::clamp(cfg.cameraView, 0, 5);
+    const auto eyes = [](int v) { return v == 4 ? 5 : v; }; // first person: the skater's eyes
+    if (!cfg.cameraRemember) return eyes(std::clamp(cfg.cameraView, 0, 5));
     const int foot = Call<int>(gta::GET_FOLLOW_PED_CAM_VIEW_MODE);
     if (g_lastView >= 0 && foot == g_footModeAtLeave) return g_lastView;
     for (int v = 1; v <= 4; ++v)
-        if (kFootMode[v] == foot) return v;
-    return g_lastView >= 0 ? g_lastView : std::clamp(cfg.cameraView, 0, 5);
+        if (kFootMode[v] == foot) return eyes(v);
+    return eyes(g_lastView >= 0 ? g_lastView : std::clamp(cfg.cameraView, 0, 5));
 }
 
 // Leaving skate mode: the view is kept for the next session, and walking goes
@@ -2245,7 +2249,7 @@ void UpdateCameraView(Session& s, const Config& cfg, SvPad& pad) {
         Logf("SkateV Legacy: camera view %d at the start", s.view);
     }
     if (!menu::IsOpen() && Call<BOOL>(gta::IS_DISABLED_CONTROL_JUST_PRESSED, 0, 0)) {
-        s.view = (s.view + 1) % 6;
+        do s.view = (s.view + 1) % 6; while (s.view == 4); // GTA's first person is not in the cycle
         Logf("SkateV Legacy: camera view %d", s.view);
     }
     // R on the keyboard (the pad's reload is Skate's B): the cinematic camera,
@@ -2924,7 +2928,7 @@ std::vector<menu::Page> MenuPages(Session& s) {
         Choice("Keep the view (walking and skating)", "CameraRemember", {"1", "0"},
                {"On: the view last used", "Off: always the standard view"}, Bound("CameraRemember")),
         Choice("Standard view (V cycles)", "CameraView", {"Skate", "Near", "Middle", "Far", "FirstPerson", "Head"},
-               {"Skate 3", "Near", "Middle", "Far", "First person (GTA)", "Skater's eyes (mouse looks)"}, Bound("CameraView")),
+               {"Skate 3", "Near", "Middle", "Far", "First person", "First person (skater's eyes)"}, Bound("CameraView")),
         Choice("Skate 3 camera", "Camera", {"High", "Low"}, {"High (Skate 3 default)", "Low"},
                Bound("Camera", [] { g_runtime.SetCameraType(g_config.cameraType); })),
         Number("Field of view scale", "CameraFovScale", D.fovScale, 0.5f, 1.5f, 0.05f, Fixed("x%.2f"), Bound("CameraFovScale")),
