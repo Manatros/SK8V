@@ -710,6 +710,7 @@ struct Session {
     std::string message;
     SvOutput last{};
     int view = -1;                // CameraView in use (-1: not chosen since entering)
+    int action = 0;               // R: 0 off, 1 the cinematic camera, 2 the skate filmer
     bool wipingOut = false; // last output was a Wipeout state (bail voice)
     // Bail impacts: the skater's velocity from Skate's positions (60 Hz ticks).
     SvVec3 bailPos{}, bailVel{};
@@ -987,6 +988,11 @@ void NearMiss(Session& s, const Config& cfg, const std::vector<SvDynamicBody>& b
 // skater last was.
 void Leave(Session& s, const Config& cfg, const char* why, bool voluntary) {
     g_gtaView = false, s.view = -1; // the next entry starts in CameraView again
+    if (s.action) {
+        float none[7]{};
+        g_runtime.ActionCam(0, {}, {}, 0.0f, none);
+        s.action = 0;
+    }
     if (!SkateOwnsPlayer(s)) return;
     const bool wasSkating = s.state == LifeState::Skating;
     SetState(s, LifeState::Leaving, why);
@@ -2018,13 +2024,57 @@ void BoardWeather(Session& s, const Config& cfg, const SvBoardPose* pose) {
 // GTA's own follow camera (near, middle, far, first person), which the mouse
 // turns. V (INPUT_NEXT_CAMERA) cycles them. In a GTA view the on-foot stick
 // is turned from Skate's camera into GTA's, so walking follows what is seen.
+// The cinematic camera or the skate filmer (R) on the script camera: the
+// runtime picks the shot from the skater's place and speed, and the eye is
+// kept in front of walls and off the ground.
+void ActionCamera(Session& s, const SvOutput& o) {
+    const float at[3] = {o.skater_position.x, o.skater_position.y, o.skater_position.z};
+    const float velocity[3] = {o.velocity.x, o.velocity.y, o.velocity.z};
+    float shot[7];
+    if (!s.cam || !g_runtime.ActionCam(s.action, at, velocity, Call<float>(gta::GET_FRAME_TIME), shot)) return;
+    float eye[3] = {shot[0], shot[1], shot[2]};
+    const float look[3] = {shot[3], shot[4], shot[5]};
+    auto ray = [&](const float (&from)[3], const float (&to)[3], Vector3& end) {
+        const int test = Call<int>(gta::START_EXPENSIVE_SYNCHRONOUS_SHAPE_TEST_LOS_PROBE, from[0], from[1], from[2], to[0], to[1],
+                                   to[2], 1 | 16, s.ped, 7);
+        BOOL hit = 0;
+        Vector3 normal{};
+        Entity entity = 0;
+        return Call<int>(gta::GET_SHAPE_TEST_RESULT, test, &hit, &end, &normal, &entity) == 2 && hit;
+    };
+    Vector3 end{};
+    if (ray(look, eye, end)) {
+        // In front of the wall, 0.25 m toward the skater.
+        float d[3] = {look[0] - end.x, look[1] - end.y, look[2] - end.z};
+        const float len = std::sqrt(d[0] * d[0] + d[1] * d[1] + d[2] * d[2]);
+        const float k = len > 0.3f ? 0.25f / len : 0.0f;
+        eye[0] = end.x + d[0] * k, eye[1] = end.y + d[1] * k, eye[2] = end.z + d[2] * k;
+    }
+    const float above[3] = {eye[0], eye[1], eye[2] + 1.0f}, below[3] = {eye[0], eye[1], eye[2] - 2.0f};
+    if (ray(above, below, end) && eye[2] < end.z + 0.25f) eye[2] = end.z + 0.25f;
+    const float dx = look[0] - eye[0], dy = look[1] - eye[1], dz = look[2] - eye[2];
+    const float flat = std::sqrt(dx * dx + dy * dy);
+    Call<void>(gta::SET_CAM_COORD, s.cam, eye[0], eye[1], eye[2]);
+    Call<void>(gta::SET_CAM_ROT, s.cam, std::atan2(dz, flat) * 57.29578f, 0.0f, std::atan2(-dx, dy) * 57.29578f, 2);
+    Call<void>(gta::SET_CAM_FOV, s.cam, std::clamp(shot[6], 10.0f, 120.0f));
+}
+
 void UpdateCameraView(Session& s, const Config& cfg, SvPad& pad) {
     if (s.view < 0) s.view = std::clamp(cfg.cameraView, 0, 4);
     if (!menu::IsOpen() && Call<BOOL>(gta::IS_DISABLED_CONTROL_JUST_PRESSED, 0, 0)) {
         s.view = (s.view + 1) % 5;
         Logf("SkateV Legacy: camera view %d", s.view);
     }
-    const bool gta = s.view > 0;
+    // R on the keyboard (the pad's reload is Skate's B): the cinematic camera,
+    // the skate filmer, and back.
+    if (!menu::IsOpen() && !s.aiming && g_runtime.HasActionCam() && Call<BOOL>(gta::IS_USING_KEYBOARD_AND_MOUSE, 0) &&
+        Call<BOOL>(gta::IS_DISABLED_CONTROL_JUST_PRESSED, 0, 45)) {
+        s.action = (s.action + 1) % 3;
+        float none[7]{};
+        g_runtime.ActionCam(0, {}, {}, 0.0f, none);
+        Logf("SkateV Legacy: cinematic camera %s", s.action == 1 ? "on" : s.action == 2 ? "filmer" : "off");
+    }
+    const bool gta = s.view > 0 && !s.action;
     if (gta) {
         constexpr int kMode[5] = {0, 0, 1, 2, 4}; // near, middle, far, first person
         Call<void>(gta::SET_FOLLOW_PED_CAM_VIEW_MODE, kMode[s.view]);
@@ -2263,6 +2313,7 @@ void UpdateActive(Session& s, const Config& cfg, const SvPad& pad) {
         Call<void>(gta::SET_CAM_ROT, s.cam, -12.0f, 0.0f, o.skater_heading_degrees, 2);
         Call<void>(gta::SET_CAM_FOV, s.cam, 60.0f);
     }
+    if (s.action) ActionCamera(s, o);
 
     // Dev A/B (GtaCamera): GTA's gameplay camera renders instead of the script
     // camera (as while aiming), so the frame report compares the two.

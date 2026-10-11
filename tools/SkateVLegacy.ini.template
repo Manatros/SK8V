@@ -14,7 +14,8 @@ RadioControls=1
 ; TrickAnalyzer: 1 = Skate 3's Trick Analyzer shows each trick's stick gesture (bottom centre); 0 = off.
 TrickAnalyzer=1
 ; CameraView: the view skating starts in: Skate (Skate 3's camera), Near, Middle, Far (GTA's follow camera,
-;   the mouse turns it) or FirstPerson. V cycles them while skating.
+;   the mouse turns it) or FirstPerson. V cycles them while skating. R (keyboard) cycles the cinematic camera (shots cut like
+;   GTA's car cinematic camera), the skate filmer (low fisheye) and back.
 CameraView=Skate
 DrawBoard=1
 ; Native Skate board: owned skeletal drawable, original texture/normal/specular inputs, GTA lighting and shadows.

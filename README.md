@@ -50,7 +50,7 @@ python tools/prepare.py --skate "<Skate 3.iso or folder>" --gta "<GTA V folder>"
 | D-pad left/right, gun equipped | Change weapon |
 | Double-tap `X` on foot near a grabbable wall | GTA mantle, then return to Skate |
 
-Swimming switches to GTA automatically and returns to Skate afterward. **V** cycles the camera while skating: Skate 3's camera, GTA's near, middle and far follow camera (turned with the mouse) and GTA's first person; `CameraView=` picks the one skating starts in. In a GTA view, walking follows GTA's camera. **Hall of Meat is on by default** and can be disabled in the SK8V menu, alongside other gameplay settings.
+Swimming switches to GTA automatically and returns to Skate afterward. **V** cycles the camera while skating: Skate 3's camera, GTA's near, middle and far follow camera (turned with the mouse) and GTA's first person; `CameraView=` picks the one skating starts in. In a GTA view, walking follows GTA's camera. On the keyboard **R** cycles the cinematic camera (shots that cut like GTA's cinematic camera in a car: chase, roadside, side, overhead, wheel, telephoto, front) and the skate filmer's low fisheye, then back. **Hall of Meat is on by default** and can be disabled in the SK8V menu, alongside other gameplay settings.
 
 ### Unable to save settings in the menu?
 

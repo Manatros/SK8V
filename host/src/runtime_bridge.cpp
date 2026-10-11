@@ -50,6 +50,8 @@ bool RuntimeBridge::Load(const wchar_t* dllPath, const std::string& dataRoot, co
     sym(setPosture_, "sv_set_posture");
     sym(setRidingStyle_, "sv_set_riding_style");
     sym(setEquipment_, "sv_set_equipment");
+    // Optional: the cinematic cameras.
+    actionCam_ = reinterpret_cast<SvActionCamFn>(GetProcAddress(module_, "sv_action_cam"));
     sym(setVerboseLog_, "sv_set_verbose_log");
     sym(setSkitchStandoff_, "sv_set_skitch_standoff");
     sym(skitchVehicle_, "sv_skitch_vehicle");
@@ -227,6 +229,10 @@ bool RuntimeBridge::SetPosture(int profile) {
 
 bool RuntimeBridge::SetRidingStyle(int style) {
     return runtime_ && setRidingStyle_ && style >= 0 && setRidingStyle_(runtime_, static_cast<std::uint32_t>(style)) != 0;
+}
+
+bool RuntimeBridge::ActionCam(int mode, const float (&at)[3], const float (&velocity)[3], float dt, float (&out)[7]) {
+    return runtime_ && actionCam_ && actionCam_(runtime_, static_cast<std::uint32_t>(mode), at, velocity, dt, out) != 0;
 }
 
 bool RuntimeBridge::SetEquipment(float truck, float wheel) {
