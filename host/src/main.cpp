@@ -2059,11 +2059,12 @@ void UpdateActive(Session& s, const Config& cfg, const SvPad& pad) {
     if (gather) s.dynamicDue = (std::min)(s.dynamicDue - kStep, kStep);
     if (cfg.dynamicWorld && gather) {
         // Moving GTA entities near the skater, for Skate's contact code.
+        // Vehicles SK8V has no extracted bound for: surveyed once (vehicle_survey.cpp).
+        if (cfg.vehicleShapes) vehiclesurvey::Tick(g_runtime, cfg.dynamicRadius + 10.0f, Log);
         s.world.SetPedParts(cfg.pedHitboxes);
         s.world.SetPedLaunch(cfg.pedLaunch, cfg.pedLaunchScale, cfg.pedLaunchLift, cfg.pedLaunchSpin);
         s.world.SetPedVoices(cfg.pedPain, cfg.pedGetUpSpeech);
         s.world.SetVehicleDamage(cfg.vehicleDamage, cfg.vehicleDamageScale, cfg.vehicleDamageMin, cfg.vehicleDamageRadius);
-        if (cfg.vehicleShapes) vehiclesurvey::Tick(g_runtime, cfg.dynamicRadius + 10.0f, Log);
         s.world.Gather(s.ped, s.last.board_position, cfg.dynamicRadius, boardnative::Entity());
         if (const std::string line = s.world.TakePositionLog(); !line.empty()) Log(line.c_str());
         const auto& bodies = s.world.Bodies();
