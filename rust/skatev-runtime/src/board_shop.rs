@@ -56,6 +56,11 @@ struct Riding {
 impl Riding {
     /// One frame in Skate state `state` at `speed` m/s; true every 2 s of riding.
     fn frame(&mut self, state: &str, speed: f32, dt: f32) -> bool {
+        // "Hit": a blow struck with the board in hand (counted at once).
+        if state == "Hit" {
+            self.usage.hits += 1;
+            return true;
+        }
         if !dt.is_finite() || dt <= 0.0 || !speed.is_finite() {
             return false;
         }
@@ -716,7 +721,7 @@ pub unsafe extern "C" fn sv_shop_rest_pose(_rt: *mut c_void, at: *const f32, out
 pub type SvProbe = unsafe extern "C" fn(ctx: *mut c_void, from: *const f32, to: *const f32, hit: *mut f32) -> u32;
 
 /// One frame of skating for the board's wear: Skate's state (UTF-8), speed
-/// (m/s), seconds. Returns 1 when a part wore through (the ridden models
+/// (m/s), seconds; the state "Hit" counts a blow struck with the board. Returns 1 when a part wore through (the ridden models
 /// changed: ask for them again with `sv_shop_text` 1).
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sv_shop_ride(_rt: *mut c_void, state: *const c_char, speed: f32, dt: f32) -> u32 {

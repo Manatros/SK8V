@@ -31,6 +31,10 @@ bool Preview(const std::vector<std::string>& models, const SvBoardPose& pose);
 bool Display(int index, const std::vector<std::string>& models, const SvBoardPose& pose);
 void ClearDisplay();
 
+// The board in hand (GTA mode, the board picked in the weapon wheel) as
+// `models` in `pose`; empty `models` removes it.
+bool Hand(const std::vector<std::string>& models, const SvBoardPose& pose);
+
 // A crew member's board (AI skater `slot`, 0..3) as `models` in `pose`;
 // empty `models` removes it.
 bool Crew(int slot, const std::vector<std::string>& models, const SvBoardPose& pose);

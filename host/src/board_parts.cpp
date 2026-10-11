@@ -42,6 +42,7 @@ struct Set {
 Set g_ride, g_preview;
 Set g_display[8];
 Set g_crew[4];
+Set g_hand;
 
 bool ShownElsewhere(const std::string& name, const Set& except) {
     auto in = [&](const Set& set) {
@@ -55,7 +56,7 @@ bool ShownElsewhere(const std::string& name, const Set& except) {
         if (in(set)) return true;
     for (const Set& set : g_crew)
         if (in(set)) return true;
-    return false;
+    return in(g_hand);
 }
 
 void Log(const char* s) {
@@ -288,6 +289,16 @@ void ClearDisplay() {
     }
 }
 
+bool Hand(const std::vector<std::string>& models, const SvBoardPose& pose) {
+    if (!g_started) return false;
+    if (models != g_hand.models) {
+        RemoveAll(g_hand);
+        g_hand.models = models;
+        g_hand.announced = true;
+    }
+    return !models.empty() && Show(g_hand, pose);
+}
+
 bool Crew(int slot, const std::vector<std::string>& models, const SvBoardPose& pose) {
     if (!g_started || slot < 0 || slot >= 4) return false;
     Set& set = g_crew[slot];
@@ -304,6 +315,8 @@ std::vector<int> Entities() {
     for (const Set* set : {&g_ride, &g_preview})
         for (const Shown& s : set->shown)
             if (s.object) out.push_back(s.object);
+    for (const Shown& s : g_hand.shown)
+        if (s.object) out.push_back(s.object);
     for (const Set* group : {g_display, g_crew})
         for (std::size_t i = 0; i < (group == g_display ? 8u : 4u); ++i)
             for (const Shown& s : group[i].shown)

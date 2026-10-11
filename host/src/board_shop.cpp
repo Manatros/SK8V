@@ -7,6 +7,8 @@
 #include <windows.h>
 #include <cmath>
 #include <cstring>
+#include <cwchar>
+#include <filesystem>
 #include <cstdlib>
 #include <cstdio>
 #include <sstream>
@@ -351,6 +353,93 @@ void Menu(int ped) {
 
 } // namespace
 
+namespace {
+// The board in hand (GTA mode): WEAPON_SKATEBOARD, SK8V's hammer clone whose
+// hammer is hidden, carries the bought board, placed on the hidden hammer.
+// CarryOffset / CarryRotation (INI, the menu's Board shop page) tune it.
+constexpr Hash kBoardWeapon = 0x38A8F85C;
+float g_carryOffset[3] = {0.0f, 0.0f, 0.3f};   // m, in the hammer's frame (its length is +Z)
+float g_carryRotation[3] = {0.0f, 0.0f, 0.0f}; // degrees about the hammer's X, Y, Z
+std::wstring g_iniPath;
+
+void ReadCarry() {
+    if (g_iniPath.empty()) return;
+    auto one = [](const wchar_t* key, float& out) {
+        wchar_t text[32]{};
+        GetPrivateProfileStringW(L"SkateV", key, L"", text, 32, g_iniPath.c_str());
+        float v;
+        if (swscanf_s(text, L"%f", &v) == 1) out = v;
+    };
+    one(L"CarryX", g_carryOffset[0]);
+    one(L"CarryY", g_carryOffset[1]);
+    one(L"CarryZ", g_carryOffset[2]);
+    one(L"CarryTurnX", g_carryRotation[0]);
+    one(L"CarryTurnY", g_carryRotation[1]);
+    one(L"CarryTurnZ", g_carryRotation[2]);
+}
+
+// Rotates the 3x3 `m` (columns) about local axis `axis` by `deg`.
+void Spin(float (&m)[3][3], int axis, float deg) {
+    const float r = deg * 0.017453292f, c = std::cos(r), s = std::sin(r);
+    const int a = (axis + 1) % 3, b = (axis + 2) % 3;
+    for (int i = 0; i < 3; ++i) {
+        const float u = m[a][i], v = m[b][i];
+        m[a][i] = c * u + s * v;
+        m[b][i] = -s * u + c * v;
+    }
+}
+
+void Carry(int ped) {
+    static int s_frame = 0;
+    const bool held = Call<Hash>(GET_SELECTED_PED_WEAPON, ped) == kBoardWeapon;
+    const int standIn = held ? Call<int>(GET_CURRENT_PED_WEAPON_ENTITY_INDEX, ped, 0) : 0;
+    if (!standIn) {
+        boardparts::Hand({}, SvBoardPose{});
+        return;
+    }
+    static ULONGLONG s_readAt = 0;
+    if (GetTickCount64() >= s_readAt) ReadCarry(), s_readAt = GetTickCount64() + 1000;
+    // The hammer's frame from three of its points.
+    const Vector3 o = Call<Vector3>(GET_OFFSET_FROM_ENTITY_IN_WORLD_COORDS, standIn, 0.0f, 0.0f, 0.0f);
+    const Vector3 ex = Call<Vector3>(GET_OFFSET_FROM_ENTITY_IN_WORLD_COORDS, standIn, 1.0f, 0.0f, 0.0f);
+    const Vector3 ey = Call<Vector3>(GET_OFFSET_FROM_ENTITY_IN_WORLD_COORDS, standIn, 0.0f, 1.0f, 0.0f);
+    const Vector3 ez = Call<Vector3>(GET_OFFSET_FROM_ENTITY_IN_WORLD_COORDS, standIn, 0.0f, 0.0f, 1.0f);
+    const float hx[3] = {ex.x - o.x, ex.y - o.y, ex.z - o.z}, hy[3] = {ey.x - o.x, ey.y - o.y, ey.z - o.z},
+                hz[3] = {ez.x - o.x, ez.y - o.y, ez.z - o.z};
+    // The board's axes in the hammer's frame: its length (Y) along the
+    // handle (Z), its deck (Z) along the hammer's X; then the tuning turn.
+    float local[3][3] = {{0, 1, 0}, {0, 0, 1}, {1, 0, 0}};  // rows: board X, Y, Z
+    for (int axis = 0; axis < 3; ++axis) Spin(local, axis, g_carryRotation[axis]);
+    float at[16]{};
+    for (int r = 0; r < 3; ++r)
+        for (int i = 0; i < 3; ++i) at[r * 4 + i] = local[r][0] * hx[i] + local[r][1] * hy[i] + local[r][2] * hz[i];
+    at[12] = o.x + g_carryOffset[0] * hx[0] + g_carryOffset[1] * hy[0] + g_carryOffset[2] * hz[0];
+    at[13] = o.y + g_carryOffset[0] * hx[1] + g_carryOffset[1] * hy[1] + g_carryOffset[2] * hz[1];
+    at[14] = o.z + g_carryOffset[0] * hx[2] + g_carryOffset[1] * hy[2] + g_carryOffset[2] * hz[2];
+    at[15] = 1.0f;
+    SvBoardPose pose{};
+    if (g_rt->ShopRestPose(at, pose)) boardparts::Hand(Split(g_rt->ShopText(1), ','), pose);
+    // Blows struck with it wear the board: people and vehicles within 3 m that
+    // the player damaged, every 6 frames.
+    if (++s_frame % 6) return;
+    const Vector3 me = Call<Vector3>(GET_ENTITY_COORDS, ped, 0);
+    static int s_near[64];
+    for (int pass = 0; pass < 2; ++pass) {
+        const int n = pass == 0 ? worldGetAllPeds(s_near, 64) : worldGetAllVehicles(s_near, 64);
+        for (int i = 0; i < n; ++i) {
+            const int e = s_near[i];
+            if (e == ped) continue;
+            const Vector3 p = Call<Vector3>(GET_ENTITY_COORDS, e, 0);
+            if ((p.x - me.x) * (p.x - me.x) + (p.y - me.y) * (p.y - me.y) > 9.0f) continue;
+            if (Call<BOOL>(HAS_ENTITY_BEEN_DAMAGED_BY_ENTITY, e, ped, 1)) {
+                Call<void>(CLEAR_ENTITY_LAST_DAMAGE_ENTITY, e);
+                if (g_rt->ShopRide("Hit", 0.0f, 0.0f)) Ride();
+            }
+        }
+    }
+}
+} // namespace
+
 bool Start(RuntimeBridge& runtime, const std::string& dataRoot, const std::string& gameDir, void (*log)(const char*),
            void (*wheels)(float hardness)) {
     g_rt = &runtime;
@@ -362,6 +451,7 @@ bool Start(RuntimeBridge& runtime, const std::string& dataRoot, const std::strin
         return g_ready = false;
     }
     g_ready = runtime.ShopStart(dataRoot, gameDir);
+    g_iniPath = std::filesystem::path(gameDir).wstring() + L"\\SkateVLegacy.ini";
     Log("board shop: " + runtime.ShopText(3));
     return g_ready;
 }
@@ -379,6 +469,8 @@ void Tick(bool busy) {
         g_rt->ShopCharacter(who ? who : hex);
         Ride();
     }
+    if (!busy) Carry(ped);
+    else boardparts::Hand({}, SvBoardPose{});
     const int tier = TierHere(ped);
     if (tier != g_tierShown) {
         g_tierShown = tier;
@@ -428,6 +520,7 @@ void Riding(const char* state, float speed) {
 bool IsOpen() {
     return g_open;
 }
+
 
 bool CrewBoard(unsigned slot, const SvBoardPose& pose) {
     if (!g_rt || slot >= 4) return false;
