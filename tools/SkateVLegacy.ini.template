@@ -72,6 +72,8 @@ Grip=1
 TurnPower=1
 ManualDrag=1
 HoldFakie=0
+; HippieJump: the hippie jump's height, times Skate 3's; 1.6 clears a car.
+HippieJump=1
 ; Stamina: GTA's stamina skill sets push and pop (85 % with none, all with full); skating at speed trains it. 0 turns it off.
 Stamina=1
 ; LipRule: 1 = a rolling board stalls on a ramp lip or coping only when riding up into it slowly; dropping in and

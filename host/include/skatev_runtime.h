@@ -352,6 +352,8 @@ using SvSetEquipmentFn = std::uint32_t(__cdecl*)(void*, float, float);
 // speed, push power, braking, steering, wobble, off-board jump, grip, turn power, manual
 // drag; 1 = Skate 3) and hold-fakie (overlay patch 0049). Optional export.
 using SvSetTrainerFn = std::uint32_t(__cdecl*)(void*, const float*, std::uint32_t);
+// sv_set_hippie_jump(rt, scale): the hippie jump's height, times Skate 3's (overlay patch 0050). Optional.
+using SvSetHippieJumpFn = std::uint32_t(__cdecl*)(void*, float);
 // sv_set_difficulty(rt, index): Skate 3's physics_mode, 0 easy, 1 normal,
 // 2 hardcore, 3 motorized; live and for later sessions. Returns 1 when queued.
 // Export: sv_set_difficulty.

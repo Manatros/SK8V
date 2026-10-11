@@ -1090,6 +1090,19 @@ pub unsafe extern "C" fn sv_set_trainer(rt: *mut c_void, tuning: *const f32, hol
     })
 }
 
+/// The hippie jump's height, times Skate 3's (overlay patch 0050): above 1 it
+/// clears a car. Applied live and to every later session. Returns 1 when queued.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sv_set_hippie_jump(rt: *mut c_void, scale: f32) -> u32 {
+    guard(0, || {
+        let Some(rt) = (unsafe { runtime(rt) }) else { return 0 };
+        if !scale.is_finite() || scale <= 0.0 {
+            return 0;
+        }
+        rt.jobs.send(Job::HippieJump(scale.min(3.0))).is_ok() as u32
+    })
+}
+
 /// Skate 3's difficulty (overlay patch 0043): 0 easy, 1 normal, 2 hardcore,
 /// 3 motorized; applied live and to every later session. Returns 1 when queued.
 #[unsafe(no_mangle)]

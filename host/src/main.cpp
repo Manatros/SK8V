@@ -103,6 +103,7 @@ struct Config {
     // PushPower, Braking, Steering, Wobble, OffboardJump, Grip, TurnPower, ManualDrag.
     float trainer[11] = {1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1};
     bool holdFakie = false;        // HoldFakie: rolling fakie stays fakie
+    float hippieJump = 1.0f;       // HippieJump: the hippie jump's height, times Skate 3's (1.6 clears a car)
     bool stamina = true;           // Stamina: GTA's stamina skill weakens push and pop when low; skating trains it
     int skaterTriangles = 3000;
     bool dynamicWorld = true;
@@ -291,6 +292,7 @@ const Key kKeys[] = {
     {"TurnPower", [](Config& c, const std::string& v) { Parse(v, c.trainer[9]); }},
     {"ManualDrag", [](Config& c, const std::string& v) { Parse(v, c.trainer[10]); }},
     {"HoldFakie", Store<&Config::holdFakie>},
+    {"HippieJump", Store<&Config::hippieJump>},
     {"Stamina", Store<&Config::stamina>},
     {"SkitchStandoff", Store<&Config::skitchStandoff>},
     {"SkaterTriangles", Store<&Config::skaterTriangles>},
@@ -2655,6 +2657,8 @@ std::vector<menu::Page> MenuPages(Session& s) {
         Number("Turn power", "TurnPower", 1, 0.5f, 3, 0.05f, Fixed("%.2fx"), Bound("TurnPower", [] { ApplyTrainer(); })),
         Number("Manual drag", "ManualDrag", 1, 0.1f, 3, 0.05f, Fixed("%.2fx"), Bound("ManualDrag", [] { ApplyTrainer(); })),
         Flag("Hold fakie", "HoldFakie", false, Bound("HoldFakie", [] { ApplyTrainer(); })),
+        Number("Hippie jump height", "HippieJump", 1, 0.8f, 2.5f, 0.05f, Fixed("%.2fx"),
+               Bound("HippieJump", [] { g_runtime.SetHippieJump(g_config.hippieJump); })),
         Flag("Stamina (GTA skill) sets push and pop", "Stamina", true, Bound("Stamina")),
         Flag("Ramp lip rule", "LipRule", D.lipRule, Bound("LipRule", [] { g_runtime.SetLipRule(g_config.lipRule); })),
         Number("Air time limit", "AirTimeLimit", D.airTimeLimit, -1, 120, 5, LimitText,
@@ -2844,6 +2848,8 @@ void ScriptMain() {
         Logf("SkateV Legacy: trainer pop %.2f, grind pop %.2f, push %.2f/%.2f, hold fakie %d (%s)", cfg.trainer[0], cfg.trainer[1],
              cfg.trainer[2], cfg.trainer[3], cfg.holdFakie ? 1 : 0,
              g_runtime.SetTrainer(cfg.trainer, cfg.holdFakie) ? "runtime option present" : "runtime option absent");
+        Logf("SkateV Legacy: hippie jump x%.2f (%s)", cfg.hippieJump,
+             g_runtime.SetHippieJump(cfg.hippieJump) ? "runtime option present" : "runtime option absent");
         g_runtime.SetVerboseLog(cfg.verboseLog);
     }
 
