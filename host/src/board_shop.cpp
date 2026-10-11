@@ -429,4 +429,16 @@ bool IsOpen() {
     return g_open;
 }
 
+bool CrewBoard(unsigned slot, const SvBoardPose& pose) {
+    if (!g_rt || slot >= 4) return false;
+    static std::vector<std::string> s_models[4];
+    static bool s_asked[4] = {};
+    if (!s_asked[slot]) s_models[slot] = Split(g_rt->ShopText(100 + static_cast<int>(slot)), ','), s_asked[slot] = true;
+    return boardparts::Crew(static_cast<int>(slot), s_models[slot], pose);
+}
+
+void ClearCrewBoard(unsigned slot) {
+    if (slot < 4) boardparts::Crew(static_cast<int>(slot), {}, SvBoardPose{});
+}
+
 } // namespace boardshop

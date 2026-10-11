@@ -349,6 +349,25 @@ impl BoardShop {
         }
     }
 
+    /// A complete board from a Suburban's stock for the player's crew (the
+    /// AI skaters' friends), one per `slot`, the same each time: the models to
+    /// show (only those built).
+    pub fn crew_board(&self, slot: u32) -> Vec<String> {
+        let completes: Vec<BoardChoice> = crate::shop::stock(&self.library, Tier::Mid)
+            .into_iter()
+            .flat_map(|section| section.offers)
+            .filter(|offer| self.sells(&offer.goods))
+            .filter_map(|offer| match offer.goods {
+                Goods::Complete(board) => Some(board),
+                _ => None,
+            })
+            .collect();
+        let Some(board) = crate::shop::show_picks(&completes, (slot as i32 * 7919, 4049), 0, 1).into_iter().next() else {
+            return Vec::new();
+        };
+        models_of(&board, None, None, None).into_iter().filter(|m| self.available.contains(m)).collect()
+    }
+
     fn sells(&self, goods: &Goods) -> bool {
         match goods {
             // Stickers are decals the part models cannot draw yet.
@@ -650,7 +669,8 @@ pub unsafe extern "C" fn sv_shop_input(_rt: *mut c_void, input: u32, cash: i64, 
 /// 2 the store preview's models, 3 what starting the shop found, 4 the
 /// ridden painted wheels' hardness ("0.60"; empty for unpainted wheels), 5 the
 /// store preview's models in the part view (only the offer's part), 6 the side
-/// the preview shows ("top" for a griptape, "bottom" else, "" outside offers).
+/// the preview shows ("top" for a griptape, "bottom" else, "" outside offers),
+/// 100 + slot (0..7) a complete board for crew member `slot` (models).
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sv_shop_text(_rt: *mut c_void, which: u32, buf: *mut u8, cap: u32) -> u32 {
     crate::guard(0, || {
@@ -663,6 +683,7 @@ pub unsafe extern "C" fn sv_shop_text(_rt: *mut c_void, which: u32, buf: *mut u8
             2 => s.preview().join(","),
             5 => s.preview_part().join(","),
             6 => s.preview_face().to_string(),
+            100..=107 => s.crew_board(which - 100).join(","),
             4 => s.wheel_hardness().map(|h| format!("{h:.2}")).unwrap_or_default(),
             _ => String::new(),
         });

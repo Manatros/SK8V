@@ -41,6 +41,7 @@ struct Set {
 };
 Set g_ride, g_preview;
 Set g_display[8];
+Set g_crew[4];
 
 bool ShownElsewhere(const std::string& name, const Set& except) {
     auto in = [&](const Set& set) {
@@ -51,6 +52,8 @@ bool ShownElsewhere(const std::string& name, const Set& except) {
     };
     if (in(g_ride) || in(g_preview)) return true;
     for (const Set& set : g_display)
+        if (in(set)) return true;
+    for (const Set& set : g_crew)
         if (in(set)) return true;
     return false;
 }
@@ -285,14 +288,26 @@ void ClearDisplay() {
     }
 }
 
+bool Crew(int slot, const std::vector<std::string>& models, const SvBoardPose& pose) {
+    if (!g_started || slot < 0 || slot >= 4) return false;
+    Set& set = g_crew[slot];
+    if (models != set.models) {
+        RemoveAll(set);
+        set.models = models;
+        set.announced = true;
+    }
+    return !models.empty() && Show(set, pose);
+}
+
 std::vector<int> Entities() {
     std::vector<int> out;
     for (const Set* set : {&g_ride, &g_preview})
         for (const Shown& s : set->shown)
             if (s.object) out.push_back(s.object);
-    for (const Set& set : g_display)
-        for (const Shown& s : set.shown)
-            if (s.object) out.push_back(s.object);
+    for (const Set* group : {g_display, g_crew})
+        for (std::size_t i = 0; i < (group == g_display ? 8u : 4u); ++i)
+            for (const Shown& s : group[i].shown)
+                if (s.object) out.push_back(s.object);
     return out;
 }
 

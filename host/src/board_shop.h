@@ -4,6 +4,7 @@
 // keeps the catalog and each character's garage). Buying takes the
 // character's cash; the bought board is ridden at once (board_parts).
 #include <string>
+#include "skatev_runtime.h"
 
 class RuntimeBridge;
 
@@ -21,6 +22,13 @@ void Tick(bool busy);
 // A frame of skating (Skate's state, speed in m/s): the ridden board wears;
 // a part worn through shows Skate 3's worn finish of it.
 void Riding(const char* state, float speed);
+
+// A crew member's board (AI skater `slot`, 0..3, in `pose`): a complete
+// board from the shop's stock, the same for that slot each time, from the
+// HD part models. False when it cannot show (the caller shows its own);
+// ClearCrewBoard removes it.
+bool CrewBoard(unsigned slot, const SvBoardPose& pose);
+void ClearCrewBoard(unsigned slot);
 
 // The store's menu is open (other menus and Skate's input stay out).
 bool IsOpen();
