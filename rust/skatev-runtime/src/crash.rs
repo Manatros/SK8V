@@ -200,6 +200,10 @@ static P_POINTERS: AtomicUsize = AtomicUsize::new(0);
 /// The faulting thread's return addresses (through the exception dispatch).
 static P_FRAMES: [AtomicUsize; 48] = [const { AtomicUsize::new(0) }; 48];
 static P_FRAME_COUNT: AtomicUsize = AtomicUsize::new(0);
+/// Fault addresses already reported, and how often they came back.
+static SEEN: [AtomicUsize; 16] = [const { AtomicUsize::new(0) }; 16];
+static SEEN_COUNT: AtomicUsize = AtomicUsize::new(0);
+static REPEATS: AtomicUsize = AtomicUsize::new(0);
 static REQUEST: AtomicIsize = AtomicIsize::new(0);
 static DONE: AtomicIsize = AtomicIsize::new(0);
 
@@ -207,8 +211,21 @@ unsafe extern "system" fn on_exception(p: *mut ExceptionPointers) -> i32 {
     let Some(rec) = (unsafe { p.as_ref() }).and_then(|p| unsafe { p.record.as_ref() }) else {
         return EXCEPTION_CONTINUE_SEARCH;
     };
-    if fatal(rec.code).is_none() || LINES.fetch_add(1, Ordering::Relaxed) >= 60 {
+    if fatal(rec.code).is_none() {
         return EXCEPTION_CONTINUE_SEARCH;
+    }
+    // A fault another module catches and hits again every frame (Rampage.asi, 2026-10-11):
+    // reported once, then only counted, so the game thread doesn't wait on the reporter each time.
+    let address = rec.address as usize;
+    if address != 0 && SEEN.iter().any(|a| a.load(Ordering::Relaxed) == address) {
+        REPEATS.fetch_add(1, Ordering::Relaxed);
+        return EXCEPTION_CONTINUE_SEARCH;
+    }
+    if LINES.fetch_add(1, Ordering::Relaxed) >= 60 {
+        return EXCEPTION_CONTINUE_SEARCH;
+    }
+    if let Some(slot) = SEEN.get(SEEN_COUNT.fetch_add(1, Ordering::Relaxed)) {
+        slot.store(address, Ordering::Relaxed);
     }
     let (request, done) = (REQUEST.load(Ordering::Acquire), DONE.load(Ordering::Acquire));
     if request == 0 || done == 0 {
@@ -299,9 +316,15 @@ fn watchdog() {
     let mut stall_dumped = false;
     let base_private = private_bytes();
     let mut next_memory = base_private + (1 << 30);
+    let (mut repeats, mut repeats_at) = (0, 0);
     loop {
         std::thread::sleep(Duration::from_millis(250));
         let now = now_ms();
+        let r = REPEATS.load(Ordering::Relaxed);
+        if r != repeats && now >= repeats_at + 10_000 {
+            write_line(&format!("crash: reported faults came back {} more times ({r} in all)", r - repeats));
+            (repeats, repeats_at) = (r, now);
+        }
         for (k, stage) in [&AUDIO, &WORKER].into_iter().enumerate() {
             let since = stage.since.load(Ordering::Relaxed);
             let busy = if since == 0 { 0 } else { now.saturating_sub(since) };

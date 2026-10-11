@@ -268,13 +268,19 @@ void OnPresent(void* swapChain) { Install(static_cast<IDXGISwapChain*>(swapChain
 
 } // namespace
 
+// ScriptHookV stops the game with a critical error when a callback it never registered is
+// unregistered: GTA closed before ScriptMain reached Start (loading screen, no runtime).
+static bool g_registered = false;
+
 void Start(void (*log)(const char*)) {
     g_log = log;
     presentCallbackRegister(OnPresent);
+    g_registered = true;
 }
 
 void Stop() {
-    presentCallbackUnregister(OnPresent);
+    if (g_registered) presentCallbackUnregister(OnPresent);
+    g_registered = false;
     g_active = false;
     RemoveDetours();
     g_installed = false;

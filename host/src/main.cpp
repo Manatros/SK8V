@@ -470,10 +470,10 @@ SvPad ReadPad() {
 // The skating frame split into parts (VerboseLog): Lap(part) books the time
 // since the previous lap to `part`; LapStart() begins a frame. Only skating
 // frames count (FrameMonitor::Frame folds g_frameMs into g_partMs).
-enum FramePart { kPartLifecycle, kPartInput, kPartWorld, kPartStep, kPartPose, kPartCamera, kPartBoard, kPartAfter,
-                 kPartHud, kPartMenu, kPartRecords, kPartAudio, kPartLevel, kPartCount };
-const char* const kPartNames[kPartCount] = {"lifecycle", "input", "world", "step", "pose", "camera", "board", "after",
-                                            "hud", "menu", "records", "audio", "level"};
+enum FramePart { kPartLifecycle, kPartControlsRead, kPartControls, kPartInput, kPartWorld, kPartStep, kPartPose, kPartCamera, kPartBoard,
+                 kPartAfter, kPartHud, kPartMenu, kPartRecords, kPartAudio, kPartLevel, kPartCount };
+const char* const kPartNames[kPartCount] = {"lifecycle", "controls read", "controls", "input", "world", "step", "pose", "camera",
+                                            "board", "after", "hud", "menu", "records", "audio", "level"};
 double g_partMs[kPartCount]{};
 unsigned g_gtaCamFrames = 0; // skating frames GTA's gameplay camera rendered (GtaCamera)
 double g_frameMs[kPartCount]{};
@@ -670,7 +670,8 @@ struct Session {
     lifecycle::BoardAction board;
     DWORD loadedSince = 0;     // player loaded and stable since (Unprepared)
     DWORD lastTrack = 0;       // last sv_lifecycle_track
-    DWORD stateSince = 0;      // entered the current state
+    DWORD stateSince = 0;      // entered the current state (script-frame time: gaps without frames are skipped)
+    DWORD lastLifecycleFrame = 0;
     DWORD suppressEnterUntil = 0; // GTA's INPUT_ENTER held off after leaving
     std::uint64_t watchTick = 0;  // Skate output tick last seen while skating
     DWORD watchSince = 0;         // ... since (wall time)
@@ -1320,19 +1321,35 @@ void StopAim(Session& s, bool restoreCam) {
 // menu) unless LB is held (LB + d-pad is Skate's session marker), and while
 // aiming the look, aim, attack and reload controls.
 // GTA's weapon wheel is open (BoardControls): its controls stay GTA's.
+// Each control is named, so GTA's related actions (disableRelatedActions) are
+// not walked: that walk cost a player 2.4 ms a frame for the ~310 calls
+// (8 us each against 0.08 on the owner's PC).
 bool g_weaponWheel = false;
+
+// Script frames since each control last read non-zero. Only controls in use (or released within
+// the last frames, for GTA's just-released checks) are disabled: DISABLE_CONTROL_ACTION took
+// 7.6 us a call on a player's PC with no other mods (2.4 ms a frame for ~315), 0.06 us on the owner's.
+std::uint8_t g_controlIdle[360]{};
+constexpr std::uint8_t kControlHoldFrames = 10;
 
 void DisableSkateControls(std::uint16_t buttons, bool aiming) {
     if (menu::IsOpen()) return; // the open menu disables every control but pause
+    bool skip[360]{};
     for (int c = 0; c < 360; ++c) {
         // INPUT_WEAPON_WHEEL_UD/LR/NEXT/PREV, SELECT_NEXT/PREV_WEAPON, SELECT_WEAPON
         // (and the look axes 1, 2: the pad's right stick, in case the wheel reads it there)
-        if (g_weaponWheel && ((c >= 12 && c <= 17) || c == 37 || c == 1 || c == 2)) continue;
-        if (c == 199 || c == 200 || c == 170 || c == 288 || c == 289 || (c >= 296 && c <= 328) || c == 349) continue;
-        if (c == 19 && !(buttons & 0x0100)) continue;
-        if (aiming && (c == 1 || c == 2 || c == 24 || c == 25 || c == 45 || (c >= 270 && c <= 273) || (c >= 290 && c <= 295))) continue;
-        Call<void>(gta::DISABLE_CONTROL_ACTION, 0, c, 1);
+        skip[c] = (g_weaponWheel && ((c >= 12 && c <= 17) || c == 37 || c == 1 || c == 2)) ||
+                  c == 199 || c == 200 || c == 170 || c == 288 || c == 289 || (c >= 296 && c <= 328) || c == 349 ||
+                  (c == 19 && !(buttons & 0x0100)) ||
+                  (aiming && (c == 1 || c == 2 || c == 24 || c == 25 || c == 45 || (c >= 270 && c <= 273) || (c >= 290 && c <= 295)));
+        if (skip[c]) continue;
+        // GTA's value this frame whether or not it is disabled (scripts run after the input update).
+        if (Call<float>(gta::GET_DISABLED_CONTROL_NORMAL, 0, c) != 0.0f) g_controlIdle[c] = 0;
+        else if (g_controlIdle[c] < 255) ++g_controlIdle[c];
     }
+    Lap(kPartControlsRead);
+    for (int c = 0; c < 360; ++c)
+        if (!skip[c] && g_controlIdle[c] <= kControlHoldFrames) Call<void>(gta::DISABLE_CONTROL_ACTION, 0, c, 0);
 }
 
 // Radio while skating (GTA's mobile radio): +1 next station, -1 previous,
@@ -1935,6 +1952,7 @@ void BoardWeather(Session& s, const Config& cfg, const SvBoardPose* pose) {
 void UpdateActive(Session& s, const Config& cfg, const SvPad& pad) {
     Lap(kPartLifecycle);
     DisableSkateControls(pad.buttons, s.aiming);
+    Lap(kPartControls);
     if (s.nativeFire != 1) ReportShootings(s); // GTA reports the crimes of its own shots
     {
         // Riding into another map state's reach (twice a second).
@@ -2212,6 +2230,10 @@ void UpdateActive(Session& s, const Config& cfg, const SvPad& pad) {
 // controller confirmation window; leave immediately, forced).
 void LifecycleFrame(Session& s, const Config& cfg, bool f6) {
     const DWORD now = GetTickCount();
+    // No script frames for a while (Rockstar Editor, a pause that stops scripts): the state's
+    // timeouts don't count that time (a 52 s gap timed out a take-out at once, 2026-10-11).
+    if (s.lastLifecycleFrame && now - s.lastLifecycleFrame > 1000) s.stateSince += now - s.lastLifecycleFrame;
+    s.lastLifecycleFrame = now;
     const Ped player = Call<Ped>(gta::PLAYER_PED_ID);
     if (s.teleportWait && s.state != LifeState::Waiting) {
         // After a teleport: Skate took the ped back (it is held) or the wait ended (GTA's again).

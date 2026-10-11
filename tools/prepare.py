@@ -174,8 +174,25 @@ class Prepare:
         py('build-board-weapon.py', ai / 'weapons.meta', ai / 'weaponanimations.meta', self.clip / 'weapon')
         exe('live_clip.exe', self.peds, self.clip, self.clip / 'live_clip_layout.h')
 
+    def hud_mod(self):
+        """OpenIV's copy of update.rpf when OpenIV.asi loads the mods folder: the
+        hud.gfx GTA runs (a radio or HUD mod's), which SK8V's then replaces."""
+        rpf = self.gta / 'mods/update/update.rpf'
+        return rpf if rpf.is_file() and (self.gta / 'OpenIV.asi').is_file() else None
+
     def stage_icon(self):
-        hud = self.work / 'hud'
+        hud, mod = self.work / 'hud', self.hud_mod()
+        if mod:
+            shutil.rmtree(self.work / 'hud-mods', ignore_errors=True)
+            try:
+                gta_extract.extract(binary(RPF), self.keys, mod, ['*scaleform_generic.rpf/hud.gfx'], self.work / 'hud-mods')
+            except gta_extract.ExtractError as e:  # an unreadable mods copy: GTA's own
+                print(f"mods folder hud.gfx not read, using GTA's: {e}", flush=True)
+            found = next((self.work / 'hud-mods').rglob('hud.gfx'), None)
+            if found:
+                print(f"board icon added to the mods folder's hud.gfx ({mod})", flush=True)
+                py('build-board-icon.py', '--source', found, '--out', self.clip / 'hud.gfx')
+                return
         gta_extract.extract(binary(RPF), self.keys, self.gta / 'update/update.rpf', ['*scaleform_generic.rpf/hud.gfx'], hud)
         py('build-board-icon.py', '--source', next(hud.rglob('hud.gfx')), '--out', self.clip / 'hud.gfx')
 
@@ -215,11 +232,18 @@ class Prepare:
             raise SystemExit('prepared data incomplete:\n  ' + '\n  '.join(missing[:20]))
 
     # Receipts
-    def key(self, scripts):
+    def key(self, scripts, extra=''):
         h = hashlib.sha256(json.dumps([str(self.a.skate), str(self.gta)]).encode())
         for s in scripts:
             h.update(sha256_file(TOOLS / s).encode())
+        h.update(extra.encode())
         return h.hexdigest()
+
+    def input_key(self, name):
+        """What a stage reads beyond the disc and GTA's own archives: a HUD mod
+        installed or changed after setup rebuilds the board's hud.gfx."""
+        mod = self.hud_mod() if name == 'wheel-icon' else None
+        return f'{mod.stat().st_size}:{mod.stat().st_mtime_ns}' if mod else ''
 
     def run(self):
         self.receipts.mkdir(parents=True, exist_ok=True)
@@ -243,7 +267,7 @@ class Prepare:
         --redo), everything after it in the chain reruns. True if any ran."""
         ran = False
         for name, _, scripts, fn in stages:
-            receipt, key = self.receipts / f'{name}.json', self.key(scripts)
+            receipt, key = self.receipts / f'{name}.json', self.key(scripts, self.input_key(name))
             force = force or name == self.a.redo
             if not force and receipt.exists() and json.loads(receipt.read_text())['key'] == key:
                 self.step(name)
