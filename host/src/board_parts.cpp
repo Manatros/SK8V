@@ -41,6 +41,19 @@ struct Set {
 Set g_ride, g_preview;
 Set g_display[8];
 
+bool ShownElsewhere(const std::string& name, const Set& except) {
+    auto in = [&](const Set& set) {
+        if (&set == &except) return false;
+        for (const Shown& s : set.shown)
+            if (s.name == name) return true;
+        return false;
+    };
+    if (in(g_ride) || in(g_preview)) return true;
+    for (const Set& set : g_display)
+        if (in(set)) return true;
+    return false;
+}
+
 void Log(const char* s) {
     if (g_log) g_log(s);
 }
@@ -97,8 +110,14 @@ void Remove(Shown& s) {
     s.object = 0;
 }
 
+bool ShownElsewhere(const std::string& name, const Set& except);
+
+// Removes the set's objects; a model no other set shows is let go, so
+// browsing the store does not keep every part it showed in memory.
 void RemoveAll(Set& set) {
     for (Shown& s : set.shown) Remove(s);
+    for (const Shown& s : set.shown)
+        if (!ShownElsewhere(s.name, set)) Call<void>(SET_MODEL_AS_NO_LONGER_NEEDED, util::Joaat(s.name));
     set.shown.clear();
 }
 
@@ -124,6 +143,11 @@ bool Start(const std::wstring& dataRoot, void (*log)(const char*)) {
     g_root = std::filesystem::path(dataRoot) / L"private" / L"board-parts";
     g_started = std::filesystem::is_directory(g_root);
     if (!g_started) Log("board parts: none built (private\\board-parts missing); the native board shows");
+    // The raw registration is checked against 3889's code, as the native board's.
+    if (g_started && !streaming::Guards()) {
+        Log("board parts: 3889 streaming function guards differ; the native board shows");
+        g_started = false;
+    }
     return g_started;
 }
 
