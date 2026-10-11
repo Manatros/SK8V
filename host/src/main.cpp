@@ -56,6 +56,7 @@ struct Config {
     float pedZOffset = 1.0f;  // ped origin above Skate's ground contact
     float fovScale = 1.0f;
     bool keyboard = true;     // Keyboard: keyboard and mouse as a controller when none is connected (SkateVKeys.txt)
+    bool keyboardHints = true; // KeyboardHints: the keys down the left side while skating on the keyboard
     bool drawBoard = true;    // DrawBoard: the native board object (and its mesh fallback)
     bool showDebug = false;   // ShowDebug=1: old debug text HUD (the original Skate HUD is hud_overlay)
     bool verboseLog = false;  // VerboseLog=1: periodic runtime log lines (perf, skater trace, collision streaming)
@@ -224,6 +225,7 @@ const Key kKeys[] = {
     {"PedZOffset", Store<&Config::pedZOffset>},
     {"CameraFovScale", Store<&Config::fovScale>},
     {"Keyboard", Store<&Config::keyboard>},
+    {"KeyboardHints", Store<&Config::keyboardHints>},
     {"DrawBoard", Store<&Config::drawBoard>},
     {"ShowDebug", Store<&Config::showDebug>},
     {"VerboseLog", Store<&Config::verboseLog>},
@@ -451,6 +453,8 @@ XInputGetStateFn PadGetState() {
 
 // Keyboard and mouse: on when the runtime has them and the INI allows it.
 bool g_keyboard = false;
+bool g_controller = false; // a controller answered this frame (the keyboard rests then)
+std::string g_keyHints[2]; // riding, walking ("key\twhat" lines)
 
 // Whether GTA's window has the keyboard (keys pressed elsewhere are not skating).
 bool GameFocused() {
@@ -458,6 +462,25 @@ bool GameFocused() {
     const HWND window = GetForegroundWindow();
     if (window) GetWindowThreadProcessId(window, &process);
     return window && process == GetCurrentProcessId();
+}
+
+// The keyboard's keys down the left side (x 0.012 from y 0.25), as the
+// controls the player bound in SkateVKeys.txt, plus F back to GTA.
+void DrawKeyboardHints(bool onFoot) {
+    std::string& text = g_keyHints[onFoot ? 1 : 0];
+    if (text.empty()) text = g_runtime.KeyboardHints(onFoot) + "F\tBack to GTA\n";
+    float y = 0.25f;
+    std::size_t at = 0;
+    while (at < text.size()) {
+        const std::size_t end = text.find('\n', at);
+        const std::string line = text.substr(at, end == std::string::npos ? std::string::npos : end - at);
+        at = end == std::string::npos ? text.size() : end + 1;
+        const std::size_t tab = line.find('\t');
+        if (tab == std::string::npos) continue;
+        const std::string shown = "[" + line.substr(0, tab) + "] " + line.substr(tab + 1);
+        gta::Text(shown.c_str(), 0.012f, y, 0.26f, 255, 255, 255, 200);
+        y += 0.021f;
+    }
 }
 
 SvPad ReadPadRaw() {
@@ -503,6 +526,7 @@ SvPad ReadPadRaw() {
         else Logf("SkateV Legacy: no controller connected");
         s_active = active, s_ps = havePs ? ps : nullptr;
     }
+    g_controller = active < XUSER_MAX_COUNT || havePs;
     // No controller at all: the keyboard and mouse as one (SkateVKeys.txt).
     // GTA's look input carries the mouse; the settings menu releases the keys.
     if (active == XUSER_MAX_COUNT && !havePs && g_keyboard) {
@@ -2680,6 +2704,8 @@ std::vector<menu::Page> MenuPages(Session& s) {
         Chord("BackwardsMan", "BackwardsManChord", D.backwardsManChord, false, Bound("BackwardsManChord", ApplyQuirk)),
         Flag("Skate during missions", "BoardActionInMissions", D.life.inMissions, Bound("BoardActionInMissions")),
         Flag("Radio on LB + d-pad", "RadioControls", D.radioControls, Bound("RadioControls")),
+        Flag("Keyboard and mouse", "Keyboard", D.keyboard, {}, true),
+        Flag("Keyboard keys on screen", "KeyboardHints", D.keyboardHints, Bound("KeyboardHints")),
         Flag("Original Skate HUD", "Hud", true, {}, true),
         Flag("Trick Analyzer", "TrickAnalyzer", D.trickAnalyzer,
              Bound("TrickAnalyzer", [] { hudoverlay::SetTrickAnalyzer(g_config.trickAnalyzer); })),
@@ -2763,6 +2789,7 @@ void ScriptMain() {
             std::uint32_t problems = 0;
             const std::string keys = util::Narrow(g_gameDir + L"SkateVKeys.txt");
             g_keyboard = g_runtime.KeyboardConfigure(keys, problems);
+            g_keyHints[0].clear(), g_keyHints[1].clear();
             if (g_keyboard) Logf("SkateV Legacy: keyboard and mouse on (%s, %u unreadable line(s))", keys.c_str(), problems);
         }
         Logf("SkateV Legacy: %zu exact prop and vehicle collision templates", DynamicWorld::LoadPropTemplates(cfg.worldCache));
@@ -2901,6 +2928,8 @@ void ScriptMain() {
         Lap(kPartRecords);
         gtaaudio::Tick(s.state == LifeState::Skating);
         Lap(kPartAudio);
+        if (s.state == LifeState::Skating && g_keyboard && !g_controller && g_config.keyboardHints && !menu::IsOpen())
+            DrawKeyboardHints(std::string_view(s.last.state_utf8).rfind("Biped", 0) == 0);
         physlevel::Tick();
         Lap(kPartLevel);
         monitor.Work(monitor.Now() - workStart);

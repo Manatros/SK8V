@@ -17,6 +17,8 @@ TrickAnalyzer=1
 ;   beside this file, written with the defaults: WASD move, Shift push, Space pop, arrows trick
 ;   stick, E board, Q hippie jump). 0 turns it off.
 Keyboard=1
+; KeyboardHints: while skating on the keyboard, its keys down the left side of the screen. 0 hides them.
+KeyboardHints=1
 DrawBoard=1
 ; Native Skate board: owned skeletal drawable, original texture/normal/specular inputs, GTA lighting and shadows.
 BoardNative=1

@@ -344,6 +344,9 @@ using SvSetLipRuleFn = std::uint32_t(__cdecl*)(void*, std::uint32_t);
 // the keys and the mouse look input; 1 when something is pressed (out filled).
 using SvKeyboardConfigureFn = std::uint32_t(__cdecl*)(void*, const char*);
 using SvKeyboardPadFn = std::uint32_t(__cdecl*)(void*, float, float, float, std::uint32_t, SvPad*);
+// sv_keyboard_hints(rt, on_foot, buf, cap): the keys for the HUD, "key\twhat" lines; returns the
+// bytes needed (optional export).
+using SvKeyboardHintsFn = std::uint32_t(__cdecl*)(void*, std::uint32_t, char*, std::uint32_t);
 
 // sv_set_camera_type(rt, type): Skate 3's camera, 0 Low, 1 High (default). Export: sv_set_camera_type.
 using SvSetCameraTypeFn = std::uint32_t(__cdecl*)(void*, std::uint32_t);

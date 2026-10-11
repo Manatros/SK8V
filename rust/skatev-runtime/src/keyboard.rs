@@ -88,6 +88,18 @@ pub fn pad(mouse: [f32; 2], dt: f32, active: bool) -> Option<skate_input::Pad> {
 }
 
 /// Whether a pad from `pad` does anything (a key held or the stick moved).
+/// The keys' hints for the HUD, one "key	what" line each; empty before
+/// `configure`.
+pub fn hints(on_foot: bool) -> String {
+    let Ok(guard) = KEYBOARD.lock() else { return String::new() };
+    let Some(k) = guard.as_ref() else { return String::new() };
+    skate_input::hints::keyboard(&k.controls, on_foot)
+        .into_iter()
+        .map(|(key, what)| format!("{key}	{what}
+"))
+        .collect()
+}
+
 pub fn is_active(p: &skate_input::Pad) -> bool {
     p.buttons != 0 || p.triggers != [0, 0] || p.left.iter().chain(&p.right).any(|v| v.abs() > 0.01)
 }
@@ -95,6 +107,16 @@ pub fn is_active(p: &skate_input::Pad) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_hints_name_the_default_keys() {
+        configure(std::env::temp_dir().join(format!("skatev-keys-{}.txt", std::process::id())));
+        let riding = hints(false);
+        assert!(riding.contains("Space	Hold: crouch, let go: ollie"), "{riding}");
+        assert!(riding.contains("LShift	Push"), "{riding}");
+        assert!(riding.contains("E	Get off"), "{riding}");
+        assert!(hints(true).contains("E	Get on the board"));
+    }
 
     #[test]
     fn the_default_keys_round_trip_and_use_every_key_once() {

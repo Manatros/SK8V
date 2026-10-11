@@ -1122,6 +1122,24 @@ pub unsafe extern "C" fn sv_keyboard_pad(_rt: *mut c_void, mouse_x: f32, mouse_y
     })
 }
 
+/// The keyboard's controls for the HUD (UTF-8, NUL-terminated, into `buf`
+/// when `cap` is enough; returns the bytes needed): one "key	what" line per
+/// control, walking (`on_foot` nonzero) or riding.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sv_keyboard_hints(_rt: *mut c_void, on_foot: u32, buf: *mut u8, cap: u32) -> u32 {
+    guard(0, || {
+        let text = keyboard::hints(on_foot != 0);
+        let need = text.len() as u32 + 1;
+        if !buf.is_null() && cap >= need {
+            unsafe {
+                std::ptr::copy_nonoverlapping(text.as_ptr(), buf, text.len());
+                *buf.add(text.len()) = 0;
+            }
+        }
+        need
+    })
+}
+
 /// The SkateV ramp-lip rule (overlay patch 0033): nonzero (the default) lets
 /// a rolling board stall on a lip only riding up into it slowly; 0 restores
 /// retail grind admission. Returns 1 when queued.
