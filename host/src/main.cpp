@@ -2521,6 +2521,12 @@ void LifecycleFrame(Session& s, const Config& cfg, bool f6) {
         // Keyboard: F puts the board away in one press, as Y held does: Skate
         // steps off first, then the board goes away. Read from the key itself
         // (GTA's enter/exit is the pad's Y, whose tap mounts and dismounts).
+        // On foot (board in hand) F leaves at once: Y would mount the board first.
+        if (g_fPressed && g_keyboard && !g_controller && !menu::IsOpen() &&
+            std::string_view(s.last.state_utf8).rfind("Biped", 0) == 0) {
+            Leave(s, cfg, "F on foot", true);
+            break;
+        }
         if (g_fPressed && g_keyboard && !g_controller && !menu::IsOpen())
             s.keyLeaveUntil = now + cfg.putAwayHoldMs + 150;
         if (s.keyLeaveUntil && now < s.keyLeaveUntil) pad.buttons |= 0x8000;
