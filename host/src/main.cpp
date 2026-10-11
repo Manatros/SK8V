@@ -2020,6 +2020,9 @@ void BoardWeather(Session& s, const Config& cfg, const SvBoardPose* pose) {
     if (s.firstTrack.decal > 0 && s.firstTrack.checkAt && static_cast<int>(GetTickCount() - s.firstTrack.checkAt) >= 0) {
         Logf("board tracks: first mark alive a second later: %d", Call<BOOL>(gta::IS_DECAL_ALIVE, s.firstTrack.decal));
         s.firstTrack.checkAt = 0;
+    }
+}
+
 // The cinematic camera or the skate filmer (R) on the script camera: the
 // runtime picks the shot from the skater's place and speed, and the eye is
 // kept in front of walls and off the ground.
