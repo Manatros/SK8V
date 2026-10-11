@@ -2645,6 +2645,7 @@ std::vector<menu::Page> MenuPages(Session& s) {
     // The board in hand in GTA (contributed by GTAxSkate, board shop): where it
     // sits on the hidden hammer; read by board_shop.cpp from the INI.
     pages.push_back({"Board in hand", {
+        Flag("Board from the wheel stays in hand (E or F gets on)", "CarryBoard", true, Bound("CarryBoard")),
         Number("Along the handle", "CarryZ", 0.3f, -1.0f, 1.0f, 0.05f, Fixed("%.2f m")),
         Number("Sideways", "CarryX", 0.0f, -0.5f, 0.5f, 0.02f, Fixed("%.2f m")),
         Number("Forward", "CarryY", 0.0f, -0.5f, 0.5f, 0.02f, Fixed("%.2f m")),
