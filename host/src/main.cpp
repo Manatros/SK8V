@@ -38,6 +38,7 @@
 #include "natives.h"
 #include "ped_speech.h"
 #include "runtime_bridge.h"
+#include "skate_buddies.h"
 #include "version_guard.h"
 
 namespace {
@@ -2650,6 +2651,12 @@ std::vector<menu::Page> MenuPages(Session& s) {
              Bound("TrickAnalyzer", [] { hudoverlay::SetTrickAnalyzer(g_config.trickAnalyzer); })),
     }});
 
+    // Skate buddies (contributed by GTAxSkate): a crew without a trainer.
+    pages.push_back({"Skate buddies", {
+        Action("Call a skater friend (up to 3)", [] { skatebuddies::Summon(); }),
+        Action("Send the friends home", [] { skatebuddies::Dismiss(); }),
+    }});
+
     pages.push_back({"Dev", {
         Action("Play showcase line", [] { g_lineRequested.store(true); }),
         Action("Next showcase line", [] { g_lineNext.store(true); }),
@@ -2838,6 +2845,7 @@ void ScriptMain() {
             Text(s.message.c_str(), 0.5f, 0.88f, 0.4f, 255, 255, 255, true);
         }
         hudoverlay::Tick(s.state == LifeState::Skating);
+        skatebuddies::Tick(Log);
         Lap(kPartHud);
         const auto raw = static_cast<std::uint16_t>(RawPadButtons());
         if (s.board.Pressed(raw, cfg.life.menuButton)) g_menuToggle.store(true);
