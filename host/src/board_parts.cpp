@@ -16,7 +16,7 @@ using namespace gta;
 struct Model {
     std::uint32_t ydr = ~0u, ytyp = ~0u;
     std::string ydrPath, ytypPath;
-    bool typed = false, failed = false;
+    bool typed = false, failed = false, loaded = false;
     ULONGLONG requested = 0;
 };
 struct Shown {
@@ -96,7 +96,12 @@ bool Ready(const std::string& name) {
         m.typed = true;
         m.requested = GetTickCount64();
     }
-    if (Call<bool>(HAS_MODEL_LOADED, hash)) return true;
+    if (Call<bool>(HAS_MODEL_LOADED, hash)) {
+        m.loaded = true;
+        return true;
+    }
+    // Let go earlier (RemoveAll) and wanted again: the wait starts now.
+    if (m.loaded) m.loaded = false, m.requested = GetTickCount64();
     if (Call<bool>(IS_MODEL_VALID, hash)) Call<void>(REQUEST_MODEL, hash);
     if (GetTickCount64() - m.requested > 15000) {
         Logf("board parts: %s: model load timed out", name.c_str());
