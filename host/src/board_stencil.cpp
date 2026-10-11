@@ -24,7 +24,7 @@ using DrawIndexedFn = void(STDMETHODCALLTYPE*)(ID3D11DeviceContext*, UINT, UINT,
 using DrawIndexedInstancedFn = void(STDMETHODCALLTYPE*)(ID3D11DeviceContext*, UINT, UINT, UINT, INT, UINT);
 
 std::atomic<bool> g_active{false}, g_installed{false};
-std::atomic<unsigned> g_immediate{0}, g_deferred{0}, g_seen{0}, g_gbuffer{0}, g_marked{0}, g_logged{0};
+std::atomic<unsigned> g_all{0}, g_immediate{0}, g_deferred{0}, g_seen{0}, g_gbuffer{0}, g_marked{0}, g_logged{0};
 void (*g_log)(const char*) = nullptr;
 
 bool Matches(ID3D11ShaderResourceView* srv) {
@@ -75,6 +75,7 @@ bool BoardBound(ID3D11DeviceContext* c) {
 // re-marked for the draw, then the state is put back.
 template <typename Draw>
 void Marked(ID3D11DeviceContext* c, Draw draw) {
+    g_all.fetch_add(1, std::memory_order_relaxed);
     if (!g_active.load(std::memory_order_relaxed)) return draw();
     (c->GetType() == D3D11_DEVICE_CONTEXT_DEFERRED ? g_deferred : g_immediate).fetch_add(1, std::memory_order_relaxed);
     if (!BoardBound(c)) return draw();
@@ -285,5 +286,7 @@ Stats Take() {
     return {g_immediate.exchange(0), g_deferred.exchange(0), g_seen.exchange(0), g_gbuffer.exchange(0),
             g_marked.exchange(0)};
 }
+
+unsigned TakeAllDraws() { return g_all.exchange(0); }
 
 } // namespace boardstencil

@@ -27,6 +27,7 @@
 #include "hud_overlay.h"
 #include "records_ui.h"
 #include "lifecycle.h"
+#include "thread_census.h"
 #include "menu.h"
 #include "ps_pad.h"
 #include "map_states.h"
@@ -76,6 +77,7 @@ struct Config {
     int gunIk = 1;
     float aimTwist = 80.0f; // AimTwist: most the aiming chest turns from the stance (degrees); shots still go to the reticle
     bool gunProbe = false;
+    bool gtaCamera = false; // GtaCamera=1 (Dev): skate with GTA's gameplay camera rendering, to measure the script camera's frame cost
     std::uint16_t aimButton = 0x0100, fireButton = 0x0200, gunButton = 0x0020;
     bool drawSkater = true;        // DrawSkater: the board mesh while the native board is unavailable
     int boardTracks = 1;           // BoardTracks=1: tread marks in sand, mud, dirt, grass and snow
@@ -234,6 +236,7 @@ const Key kKeys[] = {
     {"TrickAnalyzer", Store<&Config::trickAnalyzer>},
     {"GunIK", Store<&Config::gunIk>},
     {"GunProbe", Store<&Config::gunProbe>},
+    {"GtaCamera", Store<&Config::gtaCamera>},
     {"AimTwist", Store<&Config::aimTwist>},
     {"AimButton", Store<&Config::aimButton>},
     {"FireButton", Store<&Config::fireButton>},
@@ -472,6 +475,7 @@ enum FramePart { kPartLifecycle, kPartInput, kPartWorld, kPartStep, kPartPose, k
 const char* const kPartNames[kPartCount] = {"lifecycle", "input", "world", "step", "pose", "camera", "board", "after",
                                             "hud", "menu", "records", "audio", "level"};
 double g_partMs[kPartCount]{};
+unsigned g_gtaCamFrames = 0; // skating frames GTA's gameplay camera rendered (GtaCamera)
 double g_frameMs[kPartCount]{};
 double g_lapAt = 0.0;
 double QpcMs() {
@@ -504,6 +508,8 @@ public:
     }
     // Call once per script frame, right after WAIT(0) returns.
     void Frame(bool active) {
+        static const bool named = (threadcensus::Name(L"gta-script (SkateV tick)"), true);
+        (void)named;
         LARGE_INTEGER now;
         QueryPerformanceCounter(&now);
         const double ms = static_cast<double>(now.QuadPart - last_.QuadPart) * 1000.0 / static_cast<double>(freq_.QuadPart);
@@ -521,9 +527,11 @@ public:
         }
         const double windowMs = static_cast<double>(now.QuadPart - window_.QuadPart) * 1000.0 / static_cast<double>(freq_.QuadPart);
         if (windowMs >= 10000.0) {
-            if (util::g_verbose) Logf("frames %.1fs: %u frames (%.1f fps), worst %.1f ms, %u over 50 ms, SkateV work avg %.3f ms max %.3f ms, skating %u/%u",
+            const unsigned draws = boardstencil::TakeAllDraws();
+            if (util::g_verbose) Logf("frames %.1fs: %u frames (%.1f fps), worst %.1f ms, %u over 50 ms, SkateV work avg %.3f ms max %.3f ms, skating %u/%u (GTA's camera %u), GTA indexed draws %.0f/frame",
                  windowMs / 1000.0, frames_, frames_ * 1000.0 / windowMs, maxFrame_, hitches_,
-                 frames_ ? workTotal_ / frames_ : 0.0, workMax_, activeFrames_, frames_);
+                 frames_ ? workTotal_ / frames_ : 0.0, workMax_, activeFrames_, frames_, std::exchange(g_gtaCamFrames, 0u),
+                 frames_ ? double(draws) / frames_ : 0.0);
             if (util::g_verbose && activeFrames_) {
                 // Per skating frame, the skating path's parts; then the HUD draw on the render thread.
                 std::string parts;
@@ -533,9 +541,14 @@ public:
                     parts += item;
                 }
                 const hudoverlay::PresentStats hud = hudoverlay::TakePresentStats();
-                Logf("frames: skating parts ms/frame: %s; HUD draw (render thread) avg %.3f ms max %.3f ms over %u presents",
-                     parts.c_str(), hud.count ? hud.totalMs / hud.count : 0.0, hud.maxMs, hud.count);
+                const posehook::ApplyTime pose = posehook::TakeApplyTime();
+                Logf("frames: skating parts ms/frame: %s; HUD draw (render thread) avg %.3f ms max %.3f ms over %u presents; "
+                     "pose writes in GTA's anim pass %.3f, on its anim workers %.3f ms/frame (%u writes)",
+                     parts.c_str(), hud.count ? hud.totalMs / hud.count : 0.0, hud.maxMs, hud.count,
+                     pose.mainMs / activeFrames_, pose.workerMs / activeFrames_, pose.calls);
             }
+            // Every thread's CPU in or out of skate mode: what skating makes busier, GTA's threads included.
+            if (util::g_verbose) Logf("threads ms/s: %s", threadcensus::Report(windowMs / 1000.0, 12).c_str());
             for (double& v : g_partMs) v = 0.0;
             frames_ = hitches_ = activeFrames_ = 0;
             maxFrame_ = workTotal_ = workMax_ = 0.0;
@@ -597,6 +610,8 @@ struct Session {
     bool wheelOpen = false;          // GTA's weapon wheel held open from GunButton
     DWORD wheelClosedAt = 0;
     bool aiming = false;
+    bool gtaCam = false; // GtaCamera: GTA's gameplay camera renders instead of ours
+    float dynamicDue = 1.0f; // seconds of game time toward Skate's next 60 Hz step (DynamicWorld gathers on it)
     DWORD nextShot = 0;
     DWORD reloadDone = 0; // board reload in progress until (0 none, direct fire only)
     // GTA's own fire: 0 not seen yet, 1 GTA's shots (INPUT_ATTACK), -1 GTA did
@@ -942,6 +957,7 @@ void Leave(Session& s, const Config& cfg, const char* why, bool voluntary) {
         s.fadingCamUntil = GetTickCount() + kHandOffMs;
     }
     s.cam = 0;
+    s.gtaCam = false;
     if (s.ped && Call<BOOL>(gta::DOES_ENTITY_EXIST, s.ped)) {
         const SvVec3 p = s.last.skater_position;
         const bool finite = std::isfinite(p.x) && std::isfinite(p.y) && std::isfinite(p.z);
@@ -1225,6 +1241,7 @@ void BeginActive(Session& s, const Config& cfg) {
     if (s.fadingCam && Call<BOOL>(gta::DOES_CAM_EXIST, s.fadingCam)) Call<void>(gta::DESTROY_CAM, s.fadingCam, 0);
     s.fadingCam = 0;
     s.cam = Call<Cam>(gta::CREATE_CAM, "DEFAULT_SCRIPTED_CAMERA", 1);
+    s.dynamicDue = 1.0f; // gather on the first skating frame
     {
         const Vector3 at = Call<Vector3>(gta::GET_FINAL_RENDERED_CAM_COORD);
         const Vector3 rot = Call<Vector3>(gta::GET_FINAL_RENDERED_CAM_ROT, 2);
@@ -1956,7 +1973,15 @@ void UpdateActive(Session& s, const Config& cfg, const SvPad& pad) {
     in.pad = pad;
     BoardControls(s, cfg, in.pad);
     Lap(kPartInput);
-    if (cfg.dynamicWorld) {
+    // Skate steps at 60 Hz on the same game time: GTA's moving entities are
+    // gathered on the frames a step falls due, as fresh as before, not on
+    // every rendered frame (at 185 fps the pool scan, its natives and the
+    // runtime's prop triangles ran three times per step).
+    constexpr float kStep = 1.0f / 60.0f;
+    s.dynamicDue = (std::min)(s.dynamicDue + in.dt_seconds, 1.0f);
+    const bool gather = s.dynamicDue >= kStep;
+    if (gather) s.dynamicDue = (std::min)(s.dynamicDue - kStep, kStep);
+    if (cfg.dynamicWorld && gather) {
         // Moving GTA entities near the skater, for Skate's contact code.
         s.world.SetPedParts(cfg.pedHitboxes);
         s.world.SetPedLaunch(cfg.pedLaunch, cfg.pedLaunchScale, cfg.pedLaunchLift, cfg.pedLaunchSpin);
@@ -1966,17 +1991,18 @@ void UpdateActive(Session& s, const Config& cfg, const SvPad& pad) {
         if (const std::string line = s.world.TakePositionLog(); !line.empty()) Log(line.c_str());
         const auto& bodies = s.world.Bodies();
         g_runtime.SetDynamicBodies(bodies.data(), static_cast<std::uint32_t>(bodies.size()));
-        NearMiss(s, cfg, bodies);
         if (cfg.pedHitboxes) {
             const auto& parts = s.world.PedParts();
             g_runtime.SetPedParts(parts.data(), static_cast<std::uint32_t>(parts.size()));
         }
     }
+    if (cfg.dynamicWorld) NearMiss(s, cfg, s.world.Bodies());
     Lap(kPartWorld);
     g_runtime.Step(in);
 
     SvOutput o{};
     if (!g_runtime.Output(o) || o.tick == 0) {
+        s.last.status = o.status; // the lifecycle's error check reads it
         pedcollision::Tick(s.ped, nullptr, 0);
         return;
     }
@@ -2127,6 +2153,16 @@ void UpdateActive(Session& s, const Config& cfg, const SvPad& pad) {
         Call<void>(gta::SET_CAM_ROT, s.cam, -12.0f, 0.0f, o.skater_heading_degrees, 2);
         Call<void>(gta::SET_CAM_FOV, s.cam, 60.0f);
     }
+
+    // Dev A/B (GtaCamera): GTA's gameplay camera renders instead of the script
+    // camera (as while aiming), so the frame report compares the two.
+    const bool gtaCam = cfg.gtaCamera && !s.aiming && !s.wheelOpen;
+    if (gtaCam != s.gtaCam) {
+        s.gtaCam = gtaCam;
+        if (gtaCam) GameplayCam(s);
+        else if (!s.aiming && !s.wheelOpen) Call<void>(gta::RENDER_SCRIPT_CAMS, 1, 1, kAimBlendMs, 1, 0, 0);
+    }
+    g_gtaCamFrames += s.gtaCam;
 
     Lap(kPartCamera);
     if (cfg.dynamicWorld) {
@@ -2317,8 +2353,9 @@ void LifecycleFrame(Session& s, const Config& cfg, bool f6) {
             Leave(s, cfg, "player character changed or removed", false);
             break;
         }
-        SvOutput o{};
-        g_runtime.Output(o);
+        // The output UpdateActive read last frame: sv_get_output blends the
+        // whole pose, and these checks need only its status and tick.
+        const SvOutput& o = s.last;
         const bool dead = Call<BOOL>(gta::IS_ENTITY_DEAD, s.ped, 0);
         if (o.tick != s.watchTick) s.watchTick = o.tick, s.watchSince = now, s.watchFrames = 0;
         const bool stalled = ++s.watchFrames > 120 && now - s.watchSince > 5000;
@@ -2543,6 +2580,7 @@ std::vector<menu::Page> MenuPages(Session& s) {
         Number("Gun IK (0 off, 1 arms, 2 arms+torso+head)", "GunIK", static_cast<float>(D.gunIk), 0, 2, 1, Fixed("%.0f"), Bound("GunIK")),
         Number("Aim twist limit", "AimTwist", D.aimTwist, 20, 180, 10, Fixed("%.0f deg"), Bound("AimTwist")),
         Flag("Log GTA's gun state", "GunProbe", D.gunProbe, Bound("GunProbe")),
+        Flag("Skate with GTA's camera (frame cost A/B)", "GtaCamera", D.gtaCamera, Bound("GtaCamera")),
         Flag("Debug text HUD", "ShowDebug", D.showDebug, Bound("ShowDebug")),
         Flag("Verbose log", "VerboseLog", D.verboseLog, Bound("VerboseLog", [] { util::g_verbose = g_config.verboseLog; g_runtime.SetVerboseLog(g_config.verboseLog); })),
         Number("Ped Z offset", "PedZOffset", D.pedZOffset, 0, 2, 0.05f, Fixed("%.2f m"), Bound("PedZOffset")),

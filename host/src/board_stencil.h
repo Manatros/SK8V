@@ -23,5 +23,8 @@ void SetActive(bool on);
 // into the G-buffer, and those re-marked.
 struct Stats { unsigned immediate, deferred, seen, gbuffer, marked; };
 Stats Take();
+// Every indexed draw GTA made since the last call, active or not: how much
+// scene each camera draws, for the frame report.
+unsigned TakeAllDraws();
 
 } // namespace boardstencil

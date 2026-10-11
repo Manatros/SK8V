@@ -38,6 +38,7 @@ add_library(SkateVLegacy SHARED
   src/ps_pad.cpp
   src/board_stencil.cpp
   src/board_tracks.cpp
+  src/thread_census.cpp
 )
 target_compile_features(SkateVLegacy PRIVATE cxx_std_20)
 target_compile_definitions(SkateVLegacy PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)

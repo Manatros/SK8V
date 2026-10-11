@@ -36,7 +36,7 @@ DATA = 'SK8V'  # the prepared data (tools/prepare.py), a folder in the GTA folde
 # INI keys the in-game menu saves: a reinstall keeps the player's value.
 MENU_KEYS = [
     'Difficulty', 'Camera', 'EmoteUp', 'EmoteDown', 'EmoteLeft', 'EmoteRight', 'Posture', 'RidingStyle', 'TruckTightness', 'WheelHardness', 'LipRule', 'AirTimeLimit', 'BailTimeLimit', 'SkitchStandoff', 'GtaDelegation', 'SwimDepth', 'PutAwayHoldMs',
-    'BoardAim', 'GunIK', 'GunProbe', 'AimTwist', 'CameraFovScale', 'HallOfMeat', 'HallOfMeatMetrics',
+    'BoardAim', 'GunIK', 'GunProbe', 'GtaCamera', 'AimTwist', 'CameraFovScale', 'HallOfMeat', 'HallOfMeatMetrics',
     'HallOfMeatXray', 'BailPain', 'GetUpSpeech', 'NearMissSpeech', 'DynamicWorld', 'DynamicRadius', 'PedHitboxes',
     'PedLaunch', 'PedLaunchScale', 'PedLaunchLift', 'PedLaunchSpin', 'PedGetUpSpeech', 'VehicleDamage',
     'VehicleDamageScale', 'BackwardsMan', 'BackwardsManRemountDelay', 'BackwardsManChord',

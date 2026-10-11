@@ -20,6 +20,7 @@
 #include "xray_renderer.h"
 #include "natives.h"
 #include "skatev_runtime.h"
+#include "thread_census.h"
 
 namespace hudoverlay {
 namespace {
@@ -75,6 +76,8 @@ std::atomic<unsigned> g_presents{0};
 void Present(void* swapChainPtr);
 
 void OnPresent(void* swapChainPtr) {
+    static const bool named = (threadcensus::Name(L"gta-render (presents)"), true);
+    (void)named;
     LARGE_INTEGER a, b;
     QueryPerformanceCounter(&a);
     Present(swapChainPtr);

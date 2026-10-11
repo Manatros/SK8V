@@ -581,7 +581,11 @@ fn set(shared: &Mutex<Shared>, status: u32, message: impl Into<String>) {
     s.message = message.into();
 }
 
-type Built = (Vec3, Result<(PreparedCollision, usize, usize), String>);
+/// Streamed-in or dropped collision within this (plus 32 m and the bound's
+/// own size) of the player rebuilds the area (`live::changed_near`).
+const LIVE_NEAR: f32 = 16.0;
+
+type Built = (Vec3, Result<(PreparedCollision, usize, usize, Vec<crate::live::Seen>), String>);
 
 fn run(
     data_root: PathBuf,
@@ -675,12 +679,19 @@ fn run(
     // GTA's collision in the area changed: rebuild the working set in place.
     let mut rebuild_area = false;
     // GTA's physics level (live collision): the newest report from the host
-    // not yet applied, the level in use, and the fingerprint of the bounds
-    // loaded in the installed area (when it changes, GTA streamed collision
-    // in or out and the area is rebuilt).
+    // not yet applied, the level in use, and the bounds the installed area
+    // was read from (when GTA streams collision in or out near the skater,
+    // the area is rebuilt; empty: not known, the next check rebuilds).
     let mut pending_live: Option<Option<crate::live::Level>> = None;
     let mut live_level: Option<crate::live::Level> = None;
-    let mut live_sig: Option<(Vec3, u64)> = None;
+    let mut installed_bounds: Arc<Vec<crate::live::Seen>> = Arc::default();
+    // The check reads GTA's whole physics table (tens of thousands of
+    // ReadProcessMemory calls): on its own below-normal thread, not this
+    // above-normal one, where its bursts took cores from GTA's threads.
+    let stream_check = start_stream_check()
+        .map_err(|e| log(&format!("live collision streaming check not started: {e}")))
+        .ok();
+    let mut checking = false;
     let mut live_checked = std::time::Instant::now();
     let mut live_rebuilt = std::time::Instant::now();
     let mut prepare_failed_at: Option<Vec3> = None;
@@ -832,9 +843,10 @@ fn run(
                                 "finishing Los Santos collision here",
                             );
                             match built.recv_timeout(std::time::Duration::from_secs(60)) {
-                                Ok((centre, Ok((prepared, n, r)))) => {
+                                Ok((centre, Ok((prepared, n, r, bounds)))) => {
                                     s.install_collision(prepared)?;
                                     built_at = centre;
+                                    installed_bounds = Arc::new(bounds);
                                     life(shared, |l| {
                                         l.collision_builds += 1;
                                         l.collision_centre = centre;
@@ -864,6 +876,7 @@ fn run(
                                         area.rails,
                                     )?)?;
                                     built_at = spawn;
+                                    installed_bounds = Arc::new(area.bounds);
                                     life(shared, |l| {
                                         l.collision_builds += 1;
                                         l.collision_centre = spawn;
@@ -1061,6 +1074,7 @@ fn run(
                         )?)?;
                         s.set_dynamic_surfaces(&latest_dynamic);
                         built_at = line.start;
+                        installed_bounds = Arc::new(area.bounds);
                         life(shared, |l| {
                             l.collision_builds += 1;
                             l.collision_centre = line.start;
@@ -1237,7 +1251,9 @@ fn run(
         // Finished builds wait in the channel until the session exists.
         if let Some(s) = session.as_mut() {
             if let Ok((centre, result)) = built.try_recv() {
-                if pending_centre.take().is_some() {
+                // Only moved areas time the lead: a rebuild in place reuses
+                // most of the last one and runs faster.
+                if pending_centre.take().is_some() && centre.truncate() != built_at.truncate() {
                     let took = requested_at.elapsed().as_secs_f32().clamp(0.2, 15.0);
                     build_secs = build_secs * 0.6 + took * 0.4;
                 }
@@ -1254,13 +1270,14 @@ fn run(
                             centre.x, centre.y
                         ))
                     }
-                    Ok((prepared, n, r)) => {
+                    Ok((prepared, n, r, bounds)) => {
                         let t = std::time::Instant::now();
                         s.install_collision(prepared)?;
                         s.set_dynamic_surfaces(&latest_dynamic);
                         perf.install(t.elapsed());
                         let first = built_at == PRELOAD_AT;
                         built_at = centre;
+                        installed_bounds = Arc::new(bounds);
                         stream_failed_at = None;
                         life(shared, |l| {
                             l.collision_builds += 1;
@@ -1278,10 +1295,11 @@ fn run(
                         }
                         if verbose() {
                             log(&format!(
-                                "collision streamed around ({:.0}, {:.0}){}: {n} triangles, {r} rails",
+                                "collision streamed around ({:.0}, {:.0}){}: {n} triangles, {r} rails, {}ms after the request",
                                 centre.x,
                                 centre.y,
-                                if active { "" } else { " while inactive" }
+                                if active { "" } else { " while inactive" },
+                                requested_at.elapsed().as_millis()
                             ));
                         }
                     }
@@ -1301,7 +1319,6 @@ fn run(
                     w.set_live(level);
                     pending_live = None;
                     live_level = level;
-                    live_sig = None;
                     rebuild_area = true;
                     prepare_failed_at = None;
                     stream_failed_at = None;
@@ -1314,30 +1331,36 @@ fn run(
                 Err(std::sync::TryLockError::Poisoned(_)) => return Err("world cache poisoned".into()),
             }
         }
-        // GTA streams collision in and out: a changed set of static bounds in
-        // the installed area asks for a rebuild (checked twice a second at
-        // most, rebuilt at most every 6 s).
-        if let Some(level) = live_level
-            && pending_centre.is_none()
-            && built_at != PRELOAD_AT
-            && live_checked.elapsed().as_secs_f32() >= 0.5
-        {
-            live_checked = std::time::Instant::now();
-            if let Ok(sig) = level.signature([built_at.x, built_at.y], world::RADIUS) {
-                match live_sig {
-                    Some((at, was)) if at == built_at => {
-                        if was != sig && live_rebuilt.elapsed().as_secs_f32() >= 6.0 {
-                            rebuild_area = true;
-                            live_rebuilt = std::time::Instant::now();
-                            live_sig = None;
-                            if verbose() {
-                                log("live collision: GTA loaded or dropped collision in the area, rebuilding");
-                            }
-                        }
-                    }
-                    _ => live_sig = Some((built_at, sig)),
+        // GTA streams collision in and out: a static bound loaded or dropped
+        // near the skater (or the walking player) since the installed area
+        // was read asks for a rebuild (checked once a second, rebuilt at most
+        // every 6 s). Streaming at the area's edge waits until the player
+        // gets near it, or for the next recentre: the edge streams as the
+        // player moves, and rebuilding on it kept a core busy.
+        if let Some((changed, checked)) = stream_check.as_ref().and_then(|(_, done)| done.try_recv().ok()) {
+            checking = false;
+            // A result for an area since replaced is stale.
+            if changed
+                && Arc::ptr_eq(&checked, &installed_bounds)
+                && pending_centre.is_none()
+                && live_rebuilt.elapsed().as_secs_f32() >= 6.0
+            {
+                rebuild_area = true;
+                live_rebuilt = std::time::Instant::now();
+                if verbose() {
+                    log("live collision: GTA loaded or dropped collision near the player, rebuilding");
                 }
             }
+        }
+        if let (Some(level), Some(t), Some((jobs, _))) = (live_level, target, stream_check.as_ref())
+            && !checking
+            && pending_centre.is_none()
+            && built_at != PRELOAD_AT
+            && live_checked.elapsed().as_secs_f32() >= 1.0
+            && live_rebuilt.elapsed().as_secs_f32() >= 6.0
+        {
+            live_checked = std::time::Instant::now();
+            checking = jobs.send((level, [t.x, t.y], Arc::clone(&installed_bounds))).is_ok();
         }
         // Requests go out before the preloaded session exists, too.
         // Collision GTA streamed in or out rebuilds the working set where the
@@ -1349,7 +1372,14 @@ fn run(
             && (world::needs_recentre_moving(built_at, t, velocity, build_secs) || rebuild_area)
             && stream_failed_at.is_none_or(|f| world::needs_recentre(f, t) || rebuild_area)
         {
-            let centre = world::lead_centre(t, velocity, build_secs);
+            // Streaming alone rebuilds in place while the area still covers
+            // the player: only what GTA streamed changes, and the rest is
+            // reused (`reuse`).
+            let centre = if world::needs_recentre_moving(built_at, t, velocity, build_secs) {
+                world::lead_centre(t, velocity, build_secs)
+            } else {
+                Vec3::new(built_at.x, built_at.y, t.z)
+            };
             if builder_jobs.as_ref().is_some_and(|b| b.send(centre).is_ok()) {
                 pending_centre = Some(centre);
                 requested_at = std::time::Instant::now();
@@ -1951,6 +1981,29 @@ fn log_source(log: &Log, centre: Vec3, note: &str) {
     }
 }
 
+type StreamCheck = (crate::live::Level, [f32; 2], Arc<Vec<crate::live::Seen>>);
+
+/// The live streaming check's thread: for each (level, player, installed
+/// bounds) job, whether GTA streamed collision in or out near the player
+/// (`live::changed_near`), with the bounds it was checked against.
+fn start_stream_check() -> Result<(mpsc::Sender<StreamCheck>, mpsc::Receiver<(bool, Arc<Vec<crate::live::Seen>>)>), String> {
+    let (send, jobs) = mpsc::channel::<StreamCheck>();
+    let (done, results) = mpsc::channel();
+    std::thread::Builder::new()
+        .name("skatev-stream-check".into())
+        .spawn(move || {
+            set_thread_priority(THREAD_PRIORITY_BELOW_NORMAL);
+            while let Ok((level, at, installed)) = jobs.recv() {
+                let changed = level.near(at, LIVE_NEAR).is_ok_and(|now| crate::live::changed_near(&installed, &now, at, LIVE_NEAR));
+                if done.send((changed, installed)).is_err() {
+                    break;
+                }
+            }
+        })
+        .map_err(|e| e.to_string())?;
+    Ok((send, results))
+}
+
 fn start_builder(
     builder: CollisionBuilder,
     static_world: Arc<Mutex<StaticWorld>>,
@@ -1978,6 +2031,7 @@ fn start_builder(
                         builder.build_tagged(area.triangles, area.tags, area.rails)?,
                         n,
                         r,
+                        area.bounds,
                     ))
                 }))
                 .unwrap_or_else(|_| Err("collision builder panicked".into()));

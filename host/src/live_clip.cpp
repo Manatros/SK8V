@@ -3,6 +3,7 @@
 #include "live_clip_layout.h"
 #include "host_util.h"
 #include "natives.h"
+#include "thread_census.h"
 
 #include <windows.h>
 #include <algorithm>
@@ -45,6 +46,7 @@ bool MarkerAt(const float* m) {
 // Committed private read-write memory, read through ReadProcessMemory so a
 // region freed under the scan fails the read instead of faulting.
 void Scan() {
+    threadcensus::Name(L"skatev-clip-scan");
     const HANDLE self = GetCurrentProcess();
     constexpr SIZE_T kChunk = 1 << 20;
     std::vector<std::uint8_t> buf(kChunk + 4 * (kChannels + 3));

@@ -85,6 +85,14 @@ private:
     std::vector<Debris> debris_;
     struct Door { std::uint32_t hash; SvVec3 hinge; SvVec3 forward; };
     std::vector<Door> doors_;
+    // Fixed per model: GTA's model bounds and the bumper_r bone (-1: none),
+    // looked up once rather than every gather.
+    struct ModelInfo { float lo[3], hi[3]; int bumper; };
+    std::unordered_map<std::uint32_t, ModelInfo> models_;
+    // Per object entity: the door system's door at its spot (0: none) and
+    // where it was looked up; a reused handle or a moved entity looks again.
+    struct DoorRef { std::uint32_t model; SvVec3 at; std::uint32_t door; };
+    std::unordered_map<int, DoorRef> doorRefs_;
     std::vector<int> scratch_;
     std::unordered_map<std::uint32_t, unsigned long> cooldown_;
     bool exchange_ = false;

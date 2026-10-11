@@ -6,6 +6,7 @@
 #include "host_util.h"
 #include "natives.h"
 #include "skatev_runtime.h"
+#include "thread_census.h"
 
 #include <windows.h>
 #include <shlobj.h>
@@ -184,6 +185,7 @@ bool FeedGta() {
 }
 
 DWORD WINAPI FeederMain(void*) {
+    threadcensus::Name(L"skatev-audio-feeder");
     HANDLE timer = CreateWaitableTimerExW(nullptr, nullptr, 0x00000002 /*CREATE_WAITABLE_TIMER_HIGH_RESOLUTION*/,
                                           TIMER_ALL_ACCESS);
     bool live = false;

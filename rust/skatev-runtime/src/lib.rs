@@ -24,6 +24,7 @@ pub mod ground;
 pub mod ground_at;
 pub mod grid;
 pub mod plies;
+pub mod reuse;
 #[cfg(windows)]
 mod private_heap;
 /// All runtime allocations use a private heap (no lock shared with GTA).

@@ -1,4 +1,5 @@
 #include "ps_pad.h"
+#include "thread_census.h"
 
 #include <windows.h>
 #include <hidsdi.h>
@@ -119,6 +120,7 @@ SvPad g_pad{};
 const char* g_name = nullptr;
 
 void Run() {
+    threadcensus::Name(L"skatev-ps-pad");
     std::vector<std::uint8_t> report;
     for (;;) {
         const Device d = Find();
