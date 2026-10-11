@@ -96,14 +96,58 @@ fn fnv(text: &str) -> u32 {
     text.bytes().fold(0x811c_9dc5u32, |h, b| (h ^ u32::from(b)).wrapping_mul(0x0100_0193))
 }
 
-/// A part's steady price within the store's range, in $5 steps.
-pub fn price(tier: Tier, key: &str) -> u32 {
-    let h = fnv(key);
-    match tier {
-        Tier::Low => 40 + (h % 17) * 5,
-        Tier::Mid => 90 + (h % 35) * 5,
-        Tier::High => 400 + (h % 33) * 25,
+/// What is priced: each kind of part has its own street price range.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Kind {
+    Deck,
+    Trucks,
+    Wheels,
+    Grip,
+    Sticker,
+    /// A truck's baseplate or hanger painted.
+    Paint,
+}
+
+impl Kind {
+    /// A skate shop's street price range in dollars (a mid-range store): a
+    /// deck 55-80, a pair of trucks 45-70, a set of wheels 30-45, a sheet of
+    /// griptape 10-15, a sticker 5, a truck part painted 20-30. Real prices'
+    /// proportions, in whole $5 steps.
+    fn range(self) -> (u32, u32) {
+        match self {
+            Kind::Deck => (55, 80),
+            Kind::Trucks => (45, 70),
+            Kind::Wheels => (30, 45),
+            Kind::Grip => (10, 15),
+            Kind::Sticker => (5, 5),
+            Kind::Paint => (20, 30),
+        }
     }
+
+    pub fn of(part: Part) -> Kind {
+        match part {
+            Part::Deck => Kind::Deck,
+            Part::Trucks => Kind::Trucks,
+            Part::Wheels => Kind::Wheels,
+        }
+    }
+}
+
+/// A part's steady price (the same each visit) in its kind's range, in $5
+/// steps; the low-end stores (Binco, Discount Store) ask about a fifth less.
+pub fn price_of(tier: Tier, kind: Kind, key: &str) -> u32 {
+    let (lo, hi) = kind.range();
+    let base = lo + (fnv(key) % ((hi - lo) / 5 + 1)) * 5;
+    match tier {
+        Tier::Low => ((base * 4 / 5).div_ceil(5) * 5).max(5),
+        Tier::Mid => base,
+        Tier::High => base * 3,
+    }
+}
+
+/// A deck's price (the old single range's stand-in for tests and callers).
+pub fn price(tier: Tier, key: &str) -> u32 {
+    price_of(tier, Kind::Deck, key)
 }
 
 /// A complete board: its parts' prices, a tenth off, in $5 steps.
@@ -116,7 +160,7 @@ fn part_offer(tier: Tier, item: &Item) -> Offer {
     Offer {
         title: item.title(),
         goods: Goods::Part(item.part, item.part_ref()),
-        price: price(tier, &format!("{}:{}", item.asset, item.material)),
+        price: price_of(tier, Kind::of(item.part), &format!("{}:{}", item.asset, item.material)),
         preview: item.material.clone(),
         group: Some(item.brand.clone()),
     }
@@ -198,7 +242,7 @@ pub fn paint_offers(tier: Tier) -> Vec<Offer> {
             let part = paint.part_ref();
             Offer {
                 title: format!("{} wheels ({}a)", paint.name, paint.finish.durometer()),
-                price: price(tier, &format!("{}:{}", part.asset, part.material)),
+                price: price_of(tier, Kind::Wheels, &format!("{}:{}", part.asset, part.material)),
                 preview: part.material.clone(),
                 goods: Goods::Part(Part::Wheels, part),
                 // Listed by paint type first, then the colours, like GTA's car paint.
@@ -216,7 +260,7 @@ pub fn deck_paint_offers(tier: Tier) -> Vec<Offer> {
             let part = paint.part_ref();
             Offer {
                 title: format!("{} deck", paint.name),
-                price: price(tier, &format!("deck:{}:{}", part.asset, part.material)),
+                price: price_of(tier, Kind::Deck, &format!("deck:{}:{}", part.asset, part.material)),
                 preview: part.material.clone(),
                 goods: Goods::Part(Part::Deck, part),
                 group: Some(paint.finish.label().to_owned()),
@@ -225,13 +269,13 @@ pub fn deck_paint_offers(tier: Tier) -> Vec<Offer> {
         .collect()
 }
 
-/// Truck paint for the baseplate or the hanger: about half a part.
+/// Truck paint for the baseplate or the hanger ($20-30).
 pub fn truck_paint_offers(tier: Tier, side: skate_boards::paints::TruckPart) -> Vec<Offer> {
     skate_boards::paints::catalog()
         .into_iter()
         .map(|paint| Offer {
             title: format!("{} {}", paint.name, side.label()),
-            price: (price(tier, &format!("truck{}:{}", side.label(), paint.id)) / 2).div_ceil(5) * 5,
+            price: price_of(tier, Kind::Paint, &format!("truck{}:{}", side.label(), paint.id)),
             preview: paint.id.clone(),
             group: Some(paint.finish.label().to_owned()),
             goods: Goods::TruckPaint(side, paint.id),
@@ -248,14 +292,14 @@ fn truck_side(word: &str) -> Option<skate_boards::paints::TruckPart> {
     }
 }
 
-/// Skate's logos as stickers: a quarter of a deck's price, by brand or team.
+/// Skate's logos as stickers ($5), by brand or team.
 pub fn sticker_offers(library: &Library, tier: Tier) -> Vec<Offer> {
     library
         .stickers()
         .iter()
         .map(|s| Offer {
             title: format!("{} sticker", s.title),
-            price: (price(tier, &format!("sticker:{}", s.id)) / 4).div_ceil(5) * 5,
+            price: price_of(tier, Kind::Sticker, &format!("sticker:{}", s.id)),
             preview: s.id.clone(),
             // Brand logos by their maker (its black-and-white and colour
             // versions together, B97); team logos as one group.
@@ -274,13 +318,13 @@ fn sticker_group(s: &skate_boards::stickers::Sticker) -> String {
     }
 }
 
-/// The griptapes on sale: about half a deck's price.
+/// The griptapes on sale ($10-15).
 pub fn grip_offers(library: Option<&Library>, tier: Tier) -> Vec<Offer> {
     skate_boards::grips::catalog(library)
         .into_iter()
         .map(|grip| Offer {
             title: format!("{} griptape", grip.name),
-            price: (price(tier, &format!("grip:{}", grip.id)) / 2).div_ceil(5) * 5,
+            price: price_of(tier, Kind::Grip, &format!("grip:{}", grip.id)),
             preview: grip.id.clone(),
             group: None,
             goods: Goods::Grip(grip.id),
@@ -1057,15 +1101,20 @@ mod tests {
             assert_eq!(sections[1].offers.len(), 2, "new decks");
             assert!(sections.iter().flat_map(|s| &s.offers).all(|o| !o.title.ends_with("(Worn)")), "parts wear by riding");
         }
-        for (tier, range) in [(Tier::Low, 40..=120), (Tier::Mid, 90..=260)] {
+        for tier in [Tier::Low, Tier::Mid] {
             for section in stock(&library, tier).into_iter().skip(1) {
-                // Griptapes cost about half a part.
-                let half = section.title == "Build: Griptape" || section.title.starts_with("Build: Truck ");
                 for offer in section.offers {
-                    let range: std::ops::RangeInclusive<u32> = if half { (*range.start() / 2)..=(*range.end() / 2 + 5) } else { range.clone() };
-                    assert!(range.contains(&offer.price) && offer.price % 5 == 0, "{tier:?} {}", offer.price);
+                    // Street prices: nothing over a deck's 80, nothing under a sticker's 5.
+                    assert!((5..=80).contains(&offer.price) && offer.price % 5 == 0, "{tier:?} {} {}", offer.title, offer.price);
+                    if section.title == "Build: Griptape" {
+                        assert!(offer.price <= 15, "griptape {}", offer.price);
+                    }
                 }
             }
+        }
+        // A complete board costs its parts less a tenth, and a deck more than a set of wheels.
+        for (i, deck) in ["a", "b", "c", "d", "e"].iter().enumerate() {
+            assert!(price_of(Tier::Mid, Kind::Deck, deck) > price_of(Tier::Mid, Kind::Wheels, &i.to_string()));
         }
         let low = stock(&library, Tier::Low);
         let mid = stock(&library, Tier::Mid);
