@@ -2875,19 +2875,33 @@ void ScriptMain() {
         gtaaudio::Tick(s.state == LifeState::Skating);
         Lap(kPartAudio);
         skatemap::Tick(SkateOwnsPlayer(s), g_config.gpsWhileSkating, g_config.skateSpots);
-        // M while skating: GTA's interaction menu (its own on foot) does not
-        // open while Skate holds the player, so the menu's Interaction page
-        // does; what the player's state was is logged, to find GTA's reason.
-        if (s.state == LifeState::Skating && Call<BOOL>(gta::IS_USING_KEYBOARD_AND_MOUSE, 0) && !gta::FrontendActive() &&
-            !menu::IsOpen() && Call<BOOL>(gta::IS_DISABLED_CONTROL_JUST_PRESSED, 0, 244)) {
-            const Ped p = s.ped;
-            Logf("SkateV Legacy: M while skating: control_on=%d on_foot=%d in_air=%d falling=%d ragdoll=%d static=%d "
-                 "dead=%d busy_phone=%d control244_enabled=%d",
-                 Call<BOOL>(gta::IS_PLAYER_CONTROL_ON, Call<int>(gta::PLAYER_ID)), Call<BOOL>(gta::IS_PED_ON_FOOT, p),
-                 Call<BOOL>(gta::IS_ENTITY_IN_AIR, p), Call<BOOL>(gta::IS_PED_FALLING, p), Call<BOOL>(gta::IS_PED_RAGDOLL, p),
-                 Call<BOOL>(gta::IS_ENTITY_STATIC, p), Call<BOOL>(gta::IS_ENTITY_DEAD, p, 0),
-                 Call<BOOL>(gta::IS_PED_RUNNING_MOBILE_PHONE_TASK, p), Call<BOOL>(gta::IS_CONTROL_ENABLED, 0, 244));
-            menu::OpenPage("Interaction");
+        // M while skating: GTA's own interaction menu. It did not open because
+        // Skate holds the player frozen (IS_ENTITY_STATIC; control, on foot,
+        // in air all as on foot): while M is down and briefly after, the
+        // player is not frozen (gravity and collision stay off, so nothing
+        // moves). Whether GTA's menu script runs is logged.
+        {
+            static ULONGLONG s_thawUntil = 0, s_checkAt = 0;
+            const ULONGLONG now64 = GetTickCount64();
+            const bool mDown = s.state == LifeState::Skating && Call<BOOL>(gta::IS_USING_KEYBOARD_AND_MOUSE, 0) &&
+                               !gta::FrontendActive() && !menu::IsOpen() && Call<BOOL>(gta::IS_DISABLED_CONTROL_PRESSED, 0, 244);
+            if (mDown) {
+                if (!s_thawUntil || now64 >= s_thawUntil) s_checkAt = now64 + 600;
+                s_thawUntil = now64 + 400;
+            }
+            if (s.state == LifeState::Skating && s_thawUntil) {
+                const bool thaw = now64 < s_thawUntil;
+                Call<void>(gta::FREEZE_ENTITY_POSITION, s.ped, thaw ? 0 : 1);
+                if (thaw) Call<void>(gta::SET_ENTITY_VELOCITY, s.ped, 0.0f, 0.0f, 0.0f);
+                else s_thawUntil = 0;
+            } else {
+                s_thawUntil = 0;
+            }
+            if (s_checkAt && now64 >= s_checkAt) {
+                s_checkAt = 0;
+                Logf("SkateV Legacy: M while skating: GTA's menu script pi_menu threads %d",
+                     Call<int>(gta::GET_NUMBER_OF_THREADS_RUNNING_THE_SCRIPT_WITH_THIS_HASH, util::Joaat("pi_menu")));
+            }
         }
         physlevel::Tick();
         Lap(kPartLevel);

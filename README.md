@@ -50,7 +50,7 @@ python tools/prepare.py --skate "<Skate 3.iso or folder>" --gta "<GTA V folder>"
 | D-pad left/right, gun equipped | Change weapon |
 | Double-tap `X` on foot near a grabbable wall | GTA mantle, then return to Skate |
 
-Swimming switches to GTA automatically and returns to Skate afterward. While skating, GTA's GPS route to your waypoint stays on, and GTA's skate parks are on the map as yellow blips (`GpsWhileSkating=` / `SkateSpots=` in `SkateVLegacy.ini`). On the keyboard, **M** while skating opens the menu's Interaction page (GPS to the nearest clothing store or skate spot, or no waypoint); on foot M stays GTA's own. **Hall of Meat is on by default** and can be disabled in the SK8V menu, alongside other gameplay settings.
+Swimming switches to GTA automatically and returns to Skate afterward. While skating, GTA's GPS route to your waypoint stays on, and GTA's skate parks are on the map as yellow blips (`GpsWhileSkating=` / `SkateSpots=` in `SkateVLegacy.ini`). **M** opens GTA's interaction menu while skating too, and the menu's Interaction page sets the GPS to the nearest clothing store or skate spot. **Hall of Meat is on by default** and can be disabled in the SK8V menu, alongside other gameplay settings.
 
 ### Unable to save settings in the menu?
 
