@@ -2866,6 +2866,11 @@ void ScriptMain() {
         gtaaudio::Tick(s.state == LifeState::Skating);
         Lap(kPartAudio);
         skatemap::Tick(SkateOwnsPlayer(s), g_config.gpsWhileSkating, g_config.skateSpots);
+        // M while skating on the keyboard (GTA's interaction menu does not open
+        // then): the GPS to the nearest board shop, the nearest skate spot, off.
+        if (s.state == LifeState::Skating && !menu::IsOpen() && Call<BOOL>(gta::IS_USING_KEYBOARD_AND_MOUSE, 0) &&
+            Call<BOOL>(gta::IS_DISABLED_CONTROL_JUST_PRESSED, 0, 244))
+            if (const char* what = skatemap::NextDestination(); *what) Notify(s, what, 3000);
         physlevel::Tick();
         Lap(kPartLevel);
         monitor.Work(monitor.Now() - workStart);

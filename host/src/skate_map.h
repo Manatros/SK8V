@@ -9,6 +9,11 @@ namespace skatemap {
 // INI switches (GpsWhileSkating, SkateSpots).
 void Tick(bool skating, bool gps, bool spots);
 
+// The next GPS destination while skating (M on the keyboard): the nearest
+// clothing store (the board shop), then the nearest skate spot, then none.
+// Returns what was set, for a notice.
+const char* NextDestination();
+
 // Removes what this module put on the map (script shutdown).
 void Clear();
 
