@@ -55,6 +55,7 @@ public:
     bool KeyboardPad(float mouseX, float mouseY, float dt, bool active, SvPad& out);
     std::string KeyboardKey(const char* action);     // the key bound, "" when none
     bool KeyboardBind(const char* action, int vk);    // rebinds and saves SkateVKeys.txt
+    bool KeyboardLayout(const char* name);            // "standard" or "skate": every key at once
     std::string KeyboardHints(bool onFoot); // "key\twhat" lines; empty without the export
     bool SetDifficulty(int index);
     bool SetCameraType(int type);  // 0 Low, 1 High
@@ -105,6 +106,7 @@ private:
     SvKeyboardPadFn keyboardPad_ = nullptr;
     SvKeyboardHintsFn keyboardHints_ = nullptr;
     SvKeyboardKeyFn keyboardKey_ = nullptr;
+    SvKeyboardLayoutFn keyboardLayout_ = nullptr;
     SvKeyboardBindFn keyboardBind_ = nullptr;
     SvSetDifficultyFn setDifficulty_ = nullptr;
     SvSetCameraTypeFn setCameraType_ = nullptr;

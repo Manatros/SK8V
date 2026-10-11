@@ -2788,6 +2788,13 @@ std::vector<menu::Page> MenuPages(Session& s) {
     // Keyboard keys (contributed by GTAxSkate): Enter, then the new key; saved to SkateVKeys.txt.
     {
         menu::Page keys{"Keyboard keys", {}};
+        // Whole layouts first: GTAxSkate's (GTA-like) or like a controller in Skate 3.
+        keys.items.push_back(menu::Action("Layout: GTAxSkate standard (GTA-like)", [] {
+            if (g_runtime.KeyboardLayout("standard")) g_keyHints[0].clear(), g_keyHints[1].clear();
+        }));
+        keys.items.push_back(menu::Action("Layout: Skate (I J K L trick stick, Space push)", [] {
+            if (g_runtime.KeyboardLayout("skate")) g_keyHints[0].clear(), g_keyHints[1].clear();
+        }));
         const std::pair<const char*, const char*> actions[] = {
             {"lean_forward", "Lean forward / walk"}, {"lean_back", "Lean back"}, {"steer_left", "Steer left"},
             {"steer_right", "Steer right"}, {"a", "Push"}, {"pop", "Ollie (hold, let go)"}, {"trick_up", "Trick stick up"},

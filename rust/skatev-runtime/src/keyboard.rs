@@ -57,6 +57,38 @@ pub fn default_controls() -> Controls {
     controls
 }
 
+/// The keys laid out like a controller in Skate 3: the left hand on W A S D
+/// as the left stick, the right hand on I J K L as the trick stick (no numpad
+/// needed), Space the A button (push), Shift X, Ctrl B, E Y.
+pub fn skate_controls() -> Controls {
+    let mut controls = default_controls();
+    let index = |id: &str| Controls::action_index(id).expect("a Skate action");
+    for (id, key) in [("trick_up", "I"), ("trick_left", "J"), ("trick_down", "K"), ("trick_right", "L"), ("a", "Space"),
+                      ("x", "LShift"), ("b", "LCtrl"), ("y", "E"), ("marker_return", "H")] {
+        controls.bind(index(id), key).expect("a key");
+    }
+    // The ollie comes from the trick stick (K, then I), as on a controller;
+    // J went to the stick, so the marker's return is H.
+    controls.unbind(index("pop"));
+    controls
+}
+
+/// Replaces every key with a whole layout ("standard": GTAxSkate's, GTA-like;
+/// "skate": like a controller) and saves the key file.
+pub fn layout(name: &str) -> Result<(), String> {
+    let controls = match name {
+        "standard" => default_controls(),
+        "skate" => skate_controls(),
+        _ => return Err(format!("no layout {name}")),
+    };
+    let mut guard = KEYBOARD.lock().map_err(|_| "keyboard state poisoned".to_string())?;
+    let k = guard.as_mut().ok_or("the keyboard is not configured")?;
+    std::fs::write(&k.path, controls.to_text()).map_err(|e| e.to_string())?;
+    k.controls = controls;
+    k.translator = Translator::new();
+    Ok(())
+}
+
 /// Loads the keys from `path`, writing the defaults there when it does not
 /// exist. Returns problems found in the file (unknown keys or actions).
 pub fn configure(path: PathBuf) -> Vec<String> {
@@ -158,6 +190,21 @@ mod tests {
         let text = std::fs::read_to_string(&path).unwrap();
         assert!(text.contains("bind object_dropper = Period") && text.contains("bind marker_return = J"), "{text}");
         assert!(hints(false).contains("Comma, Period\tRadio"), "{}", hints(false));
+    }
+
+    #[test]
+    fn the_skate_layout_puts_the_trick_stick_on_ijkl_and_uses_each_key_once() {
+        let c = skate_controls();
+        let key = |id: &str| c.keys[Controls::action_index(id).unwrap()].clone();
+        assert_eq!((key("trick_up"), key("trick_left"), key("trick_down"), key("trick_right")), (vec!["I"], vec!["J"], vec!["K"], vec!["L"]));
+        assert_eq!(key("a"), vec!["Space"]);
+        assert!(key("pop").is_empty());
+        let mut seen = std::collections::HashSet::new();
+        for keys in &c.keys {
+            for k in keys {
+                assert!(seen.insert(*k), "{k} bound twice");
+            }
+        }
     }
 
     #[test]

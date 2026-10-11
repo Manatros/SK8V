@@ -1157,6 +1157,13 @@ pub unsafe extern "C" fn sv_keyboard_key(_rt: *mut c_void, id: *const c_char, bu
     })
 }
 
+/// Replaces every key with a layout ("standard" or "skate") and saves
+/// SkateVKeys.txt. Returns 1 when done.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sv_keyboard_layout(_rt: *mut c_void, name: *const c_char) -> u32 {
+    guard(0, || keyboard::layout(&unsafe { str_arg(name) }).is_ok() as u32)
+}
+
 /// Binds Windows virtual key `vk` to Skate action `id` alone and saves
 /// SkateVKeys.txt. Returns 1 when bound.
 #[unsafe(no_mangle)]
