@@ -245,7 +245,10 @@ void ShowPreview() {
     // Mouse wheel (or the triggers): nearer or farther.
     if (Call<BOOL>(IS_DISABLED_CONTROL_JUST_PRESSED, 0, 241)) g_zoom -= 0.15f;  // INPUT_CURSOR_SCROLL_UP
     if (Call<BOOL>(IS_DISABLED_CONTROL_JUST_PRESSED, 0, 242)) g_zoom += 0.15f;  // INPUT_CURSOR_SCROLL_DOWN
-    g_zoom += (Call<float>(GET_DISABLED_CONTROL_NORMAL, 0, 229) - Call<float>(GET_DISABLED_CONTROL_NORMAL, 0, 228)) * dt; // RT / LT
+    // The triggers only on a controller: on the keyboard INPUT_SCRIPT_RT is the
+    // left mouse button, which turns the board (it zoomed out while held).
+    if (!Call<BOOL>(IS_USING_KEYBOARD_AND_MOUSE, 0))
+        g_zoom += (Call<float>(GET_DISABLED_CONTROL_NORMAL, 0, 229) - Call<float>(GET_DISABLED_CONTROL_NORMAL, 0, 228)) * dt; // RT / LT
     g_zoom = g_zoom < 0.7f ? 0.7f : g_zoom > 3.0f ? 3.0f : g_zoom;
     const Vector3 cam = Call<Vector3>(GET_GAMEPLAY_CAM_COORD);
     const Vector3 rot = Call<Vector3>(GET_GAMEPLAY_CAM_ROT, 2);
