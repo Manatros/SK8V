@@ -2020,10 +2020,6 @@ void BoardWeather(Session& s, const Config& cfg, const SvBoardPose* pose) {
     if (s.firstTrack.decal > 0 && s.firstTrack.checkAt && static_cast<int>(GetTickCount() - s.firstTrack.checkAt) >= 0) {
         Logf("board tracks: first mark alive a second later: %d", Call<BOOL>(gta::IS_DECAL_ALIVE, s.firstTrack.decal));
         s.firstTrack.checkAt = 0;
-// The camera view while skating: Skate 3's camera (SK8V's script camera) or
-// GTA's own follow camera (near, middle, far, first person), which the mouse
-// turns. V (INPUT_NEXT_CAMERA) cycles them. In a GTA view the on-foot stick
-// is turned from Skate's camera into GTA's, so walking follows what is seen.
 // The cinematic camera or the skate filmer (R) on the script camera: the
 // runtime picks the shot from the skater's place and speed, and the eye is
 // kept in front of walls and off the ground.
@@ -2059,6 +2055,10 @@ void ActionCamera(Session& s, const SvOutput& o) {
     Call<void>(gta::SET_CAM_FOV, s.cam, std::clamp(shot[6], 10.0f, 120.0f));
 }
 
+// The camera view while skating: Skate 3's camera (SK8V's script camera) or
+// GTA's own follow camera (near, middle, far, first person), which the mouse
+// turns. V (INPUT_NEXT_CAMERA) cycles them. In a GTA view the on-foot stick
+// is turned from Skate's camera into GTA's, so walking follows what is seen.
 void UpdateCameraView(Session& s, const Config& cfg, SvPad& pad) {
     if (s.view < 0) s.view = std::clamp(cfg.cameraView, 0, 4);
     if (!menu::IsOpen() && Call<BOOL>(gta::IS_DISABLED_CONTROL_JUST_PRESSED, 0, 0)) {
