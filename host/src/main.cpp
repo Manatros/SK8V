@@ -453,7 +453,9 @@ XInputGetStateFn PadGetState() {
 
 // Keyboard and mouse: on when the runtime has them and the INI allows it.
 bool g_keyboard = false;
-bool g_controller = false; // a controller answered this frame (the keyboard rests then)
+// The controller is what the player uses now (the keyboard and mouse were not
+// touched since it was): the keys on screen hide, M and F stay the pad's.
+bool g_controller = false;
 std::string g_keyHints[2]; // riding, walking ("key\twhat" lines)
 
 // Whether GTA's window has the keyboard (keys pressed elsewhere are not skating).
@@ -526,10 +528,27 @@ SvPad ReadPadRaw() {
         else Logf("SkateV Legacy: no controller connected");
         s_active = active, s_ps = havePs ? ps : nullptr;
     }
-    g_controller = active < XUSER_MAX_COUNT || havePs;
-    // No controller at all: the keyboard and mouse as one (SkateVKeys.txt).
-    // GTA's look input carries the mouse; the settings menu releases the keys.
-    if (active == XUSER_MAX_COUNT && !havePs && g_keyboard) {
+    if (active < XUSER_MAX_COUNT) {
+        const XINPUT_GAMEPAD& g = st[active].Gamepad;
+        pad.connected = 1;
+        pad.packet = st[active].dwPacketNumber;
+        pad.buttons = g.wButtons;
+        pad.left_trigger = g.bLeftTrigger;
+        pad.right_trigger = g.bRightTrigger;
+        pad.left_x = g.sThumbLX;
+        pad.left_y = g.sThumbLY;
+        pad.right_x = g.sThumbRX;
+        pad.right_y = g.sThumbRY;
+    }
+    // The keyboard and mouse (SkateVKeys.txt) play alongside: whichever was
+    // used last wins, so an idle or virtual controller (Steam Input,
+    // DS4Windows, a wheel) never shuts the keyboard out. GTA's look input
+    // carries the mouse; the settings menu releases the keys.
+    static bool s_keyboardInUse = true;
+    const auto moved = [](int v) { return v > 7849 || v < -7849; };  // XInput's thumb dead zone
+    const bool padUsed = pad.connected && (pad.buttons || pad.left_trigger > 30 || pad.right_trigger > 30 ||
+                                           moved(pad.left_x) || moved(pad.left_y) || moved(pad.right_x) || moved(pad.right_y));
+    if (g_keyboard) {
         static DWORD s_last = now;
         const float dt = static_cast<float>(now - s_last) / 1000.0f;
         s_last = now;
@@ -537,22 +556,18 @@ SvPad ReadPadRaw() {
         SvPad keys{};
         const float mx = Call<float>(gta::GET_DISABLED_CONTROL_NORMAL, 0, 1);
         const float my = Call<float>(gta::GET_DISABLED_CONTROL_NORMAL, 0, 2);
-        if (g_runtime.KeyboardPad(mx, my, dt, GameFocused() && !menu::IsOpen(), keys)) {
+        const bool typed = g_runtime.KeyboardPad(mx, my, dt, GameFocused() && !menu::IsOpen(), keys);
+        const bool was = s_keyboardInUse;
+        if (padUsed) s_keyboardInUse = false;
+        else if (typed) s_keyboardInUse = true;
+        if (was != s_keyboardInUse) Logf("SkateV Legacy: input: %s", s_keyboardInUse ? "keyboard and mouse" : "controller");
+        if (typed && !padUsed) {
+            g_controller = false;
             keys.packet = ++s_packet;
             return keys;
         }
     }
-    if (active == XUSER_MAX_COUNT) return pad;
-    const XINPUT_GAMEPAD& g = st[active].Gamepad;
-    pad.connected = 1;
-    pad.packet = st[active].dwPacketNumber;
-    pad.buttons = g.wButtons;
-    pad.left_trigger = g.bLeftTrigger;
-    pad.right_trigger = g.bRightTrigger;
-    pad.left_x = g.sThumbLX;
-    pad.left_y = g.sThumbLY;
-    pad.right_x = g.sThumbRX;
-    pad.right_y = g.sThumbRY;
+    g_controller = pad.connected && !(g_keyboard && s_keyboardInUse);
     return pad;
 }
 
@@ -2472,10 +2487,14 @@ void LifecycleFrame(Session& s, const Config& cfg, bool f6) {
     }
     case LifeState::Skating: {
         SvPad pad = ReadPad(); // once per frame
-        // Keyboard: F (GTA's enter/exit) puts the board away in one press, as
-        // Y held does: Skate steps off first, then the board goes away.
-        if (g_keyboard && !menu::IsOpen() && Call<BOOL>(gta::IS_DISABLED_CONTROL_JUST_PRESSED, 0, 23))
+        // Keyboard: F puts the board away in one press, as Y held does: Skate
+        // steps off first, then the board goes away. Read from the key itself
+        // (GTA's enter/exit is the pad's Y, whose tap mounts and dismounts).
+        static bool s_fWas = false;
+        const bool f = (GetAsyncKeyState('F') & 0x8000) != 0;
+        if (f && !s_fWas && g_keyboard && !g_controller && GameFocused() && !menu::IsOpen())
             s.keyLeaveUntil = now + cfg.putAwayHoldMs + 150;
+        s_fWas = f;
         if (s.keyLeaveUntil && now < s.keyLeaveUntil) pad.buttons |= 0x8000;
         else s.keyLeaveUntil = 0;
         // Hold Y to put the board away. The press still reaches Skate, so
