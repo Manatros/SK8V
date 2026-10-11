@@ -38,6 +38,8 @@
 #include "natives.h"
 #include "ped_speech.h"
 #include "runtime_bridge.h"
+#include "shoulder_cat.h"
+#include "ai_followers.h"
 #include "version_guard.h"
 
 namespace {
@@ -90,6 +92,16 @@ struct Config {
     float bailTimeLimit = 0.0f;    // BailTimeLimit: seconds before a moving bail auto-resets; 0 none, -1 Skate's own
     float airTimeLimit = 30.0f;    // AirTimeLimit: seconds airborne before Skate returns you to a checkpoint; 0 none, -1 Skate's own
     float skitchStandoff = 0.3f;   // SkitchStandoff: metres behind a car's rear the skitch grab line sits (0 on the bodywork)
+    bool skitchTrafficAssist = true;
+    bool skitchTowWaypoint = false;
+    float skitchClosingSpeed = 3.0f; // maximum approach closing speed, m/s
+    float skitchTowSpeed = 10.0f;  // m/s once attached
+    bool shoulderCat = true, catLeft = false;
+    bool aiFollowers = false, aiFollowerGroups = true, aiFollowerMissions = true, aiFollowerTricks = true;
+    int aiFollowerMax = 2;
+    float aiFollowerDistance = 6.0f;
+    int catPose = 0;
+    float catSideways = 0.12f, catForward = -0.14f, catHeight = 0.04f, catYaw = 0.0f;
     bool lipRule = true;           // LipRule=1: stall on a ramp lip only riding up slowly; 0 retail grind admission
     int difficulty = 0;            // Difficulty=Easy|Normal|Hardcore|Motorized: Skate 3's physics_mode (index)
     int cameraType = 1;            // Camera=Low|High: Skate 3's stock camera graph branch (0 Low, 1 High)
@@ -274,6 +286,23 @@ const Key kKeys[] = {
     {"TruckTightness", Store<&Config::truckTightness>},
     {"WheelHardness", Store<&Config::wheelHardness>},
     {"SkitchStandoff", Store<&Config::skitchStandoff>},
+    {"SkitchTrafficAssist", Store<&Config::skitchTrafficAssist>},
+    {"SkitchTowWaypoint", Store<&Config::skitchTowWaypoint>},
+    {"SkitchClosingSpeed", Store<&Config::skitchClosingSpeed>},
+    {"SkitchTowSpeed", Store<&Config::skitchTowSpeed>},
+    {"ShoulderCat", Store<&Config::shoulderCat>},
+    {"AiFollowers", Store<&Config::aiFollowers>},
+    {"AiFollowerGroups", Store<&Config::aiFollowerGroups>},
+    {"AiFollowerMissions", Store<&Config::aiFollowerMissions>},
+    {"AiFollowerTricks", Store<&Config::aiFollowerTricks>},
+    {"AiFollowerMax", Store<&Config::aiFollowerMax>},
+    {"AiFollowerDistance", Store<&Config::aiFollowerDistance>},
+    {"CatLeftShoulder", Store<&Config::catLeft>},
+    {"CatPose", Store<&Config::catPose>},
+    {"CatSideways", Store<&Config::catSideways>},
+    {"CatForward", Store<&Config::catForward>},
+    {"CatHeight", Store<&Config::catHeight>},
+    {"CatYaw", Store<&Config::catYaw>},
     {"SkaterTriangles", Store<&Config::skaterTriangles>},
     {"DynamicWorld", Store<&Config::dynamicWorld>},
     {"DynamicRadius", Store<&Config::dynamicRadius>},
@@ -626,8 +655,27 @@ constexpr int kHandOffMs = 500;
 // WEAPON_SKATEBOARD (skatev DLC, tools/build-board-weapon.py): the board in
 // GTA's weapon wheel, a hammer clone whose hammer model is hidden.
 constexpr Hash kBoardWeapon = 0x38A8F85C;
+// Tow on road links, overtake traffic (including opposing lanes), and steer
+// around vehicles/peds/objects. No light stops, off-road avoidance, shortcuts,
+// or navmesh routing: those can send a towing vehicle across sidewalks.
+constexpr int kTowDrivingStyle = 4 | 8 | 16 | 32 | 512 | 524288;
+static_assert((kTowDrivingStyle & (1 | 128 | 256 | 262144 | 4194304)) == 0);
 
 struct Session {
+    Ped exitPed = 0;
+    Vehicle exitVehicle = 0;
+    DWORD exitArmedAt = 0;
+    bool exitYWas = false;
+    bool exitSuppressY = false;
+    SvVec3 exitVelocity{};
+    Vehicle assistVehicle = 0;
+    Ped assistDriver = 0;
+    float assistResumeSpeed = 10.0f;
+    DWORD assistTick = 0;
+    DWORD assistLog = 0;
+    float assistSpeedCap = 0.0f;
+    bool assistRouting = false;
+    SvVec3 assistWaypoint{};
     LifeState state = LifeState::Unprepared;
     boardtracks::Tracks tracks;
     unsigned trackMarks = 0;
@@ -974,8 +1022,155 @@ void NearMiss(Session& s, const Config& cfg, const std::vector<SvDynamicBody>& b
 // ped takes Skate's current place and facing, whether riding or on foot.
 // Otherwise (menu, death, runtime error, network) the ped is put where the
 // skater last was.
+void ReleaseSkitchTraffic(Session& s) {
+    if (s.assistVehicle && Call<BOOL>(gta::DOES_ENTITY_EXIST, s.assistVehicle))
+        Call<void>(0xBAA045B4E42F3C06ULL, s.assistVehicle, 0.0f); // restore unrestricted speed
+    if (s.assistDriver && Call<BOOL>(gta::DOES_ENTITY_EXIST, s.assistDriver) &&
+        Call<BOOL>(gta::DOES_ENTITY_EXIST, s.assistVehicle) &&
+        Call<Ped>(gta::GET_PED_IN_VEHICLE_SEAT, s.assistVehicle, -1, 0) == s.assistDriver) {
+        Call<void>(0xDACE1BE37D88AF67ULL, s.assistDriver, 786603); // normal traffic, obey lights
+        Call<void>(0x5C9B84BD7D31D908ULL, s.assistDriver, s.assistResumeSpeed);
+        Call<void>(0x480142959D337D00ULL, s.assistDriver, s.assistVehicle, s.assistResumeSpeed, 786603);
+    }
+    s.assistDriver = 0;
+    s.assistVehicle = 0;
+    s.assistSpeedCap = 0.0f;
+    s.assistRouting = false;
+}
+
+void SkitchTrafficTick(Session& s, const Config& cfg, const SvPad& pad) {
+    if (!cfg.skitchTrafficAssist || s.armed) {
+        ReleaseSkitchTraffic(s);
+        return;
+    }
+    if (menu::IsOpen()) return; // keep the existing cap/task while adjusting menu settings
+    const DWORD now = GetTickCount();
+    if (now - s.assistTick < 100) return;
+    const float assistDt = s.assistTick ? (std::min)((now - s.assistTick) * 0.001f, 0.25f) : 0.1f;
+    s.assistTick = now;
+    const Vehicle held = g_runtime.SkitchVehicle();
+    const bool reaching = pad.connected && ((pad.buttons & 0x0200) || pad.left_trigger > 30 || pad.right_trigger > 30);
+    Vehicle target = held ? held : (reaching && s.assistVehicle && Call<BOOL>(gta::DOES_ENTITY_EXIST, s.assistVehicle) ? s.assistVehicle : 0);
+    float closest = 625.0f;
+    float approachGap = 3.0f;
+    SvVec3 vehicleForward{};
+    // Skate's RB/skitch input (or a grab trigger) assists a car ahead of the board,
+    // within 25 m of its rear bumper; never affect the whole traffic pool.
+    if (!target && reaching) {
+        for (const auto& body : s.world.Bodies()) {
+            if ((body.fallback.tag >> 28) != 0) continue;
+            SvVec3 bumper = body.grab_point;
+            if (!(body.grab_flags & 1)) {
+                bumper = {body.fallback.center.x - body.forward.x * body.fallback.half_extents.y,
+                          body.fallback.center.y - body.forward.y * body.fallback.half_extents.y,
+                          body.fallback.center.z - body.forward.z * body.fallback.half_extents.y};
+            }
+            const float dx = s.last.board_position.x - bumper.x;
+            const float dy = s.last.board_position.y - bumper.y;
+            const float dz = s.last.board_position.z - bumper.z;
+            const float behind = dx * body.forward.x + dy * body.forward.y;
+            const float side = dx * body.right.x + dy * body.right.y;
+            const float d2 = dx * dx + dy * dy + dz * dz;
+            if (behind > 0.5f || behind < -25.0f || std::abs(side) > 3.0f || std::abs(dz) > 2.5f || !std::isfinite(d2) || d2 >= closest) continue;
+            const Vehicle vehicle = static_cast<Vehicle>(body.fallback.tag & 0x0FFFFFFFu);
+            const Ped driver = Call<Ped>(gta::GET_PED_IN_VEHICLE_SEAT, vehicle, -1, 0);
+            if (!driver || Call<BOOL>(0x12534C348C6CB68BULL, driver) ||
+                (Call<BOOL>(gta::GET_MISSION_FLAG) && Call<BOOL>(0x0A7B270912999B3CULL, vehicle))) continue;
+            closest = d2;
+            target = vehicle;
+            approachGap = -behind;
+            vehicleForward = body.forward;
+        }
+    }
+    if (!target || !Call<BOOL>(gta::DOES_ENTITY_EXIST, target)) {
+        if (pad.connected && (pad.buttons & 0x0200) && now - s.assistLog > 2000) {
+            Logf("Skitch assist: RB held, no eligible car behind bumper; bodies=%zu", s.world.Bodies().size());
+            s.assistLog = now;
+        }
+        ReleaseSkitchTraffic(s);
+        return;
+    }
+    const Ped driver = Call<Ped>(gta::GET_PED_IN_VEHICLE_SEAT, target, -1, 0);
+    if (!driver || Call<BOOL>(0x12534C348C6CB68BULL, driver) ||
+        (Call<BOOL>(gta::GET_MISSION_FLAG) && Call<BOOL>(0x0A7B270912999B3CULL, target))) {
+        ReleaseSkitchTraffic(s);
+        return;
+    }
+    {
+        const float heading = Call<float>(gta::GET_ENTITY_HEADING, target) * 3.14159265f / 180.0f;
+        vehicleForward = {-std::sin(heading), std::cos(heading), 0.0f};
+        const Vector3 p = Call<Vector3>(gta::GET_ENTITY_COORDS, target, 1);
+        Vector3 lo{}, hi{};
+        Call<void>(gta::GET_MODEL_DIMENSIONS, Call<Hash>(gta::GET_ENTITY_MODEL, target), &lo, &hi);
+        const float dx = s.last.board_position.x - p.x - vehicleForward.x * lo.y;
+        const float dy = s.last.board_position.y - p.y - vehicleForward.y * lo.y;
+        approachGap = -(dx * vehicleForward.x + dy * vehicleForward.y);
+        const float lateral = dx * vehicleForward.y - dy * vehicleForward.x;
+        // Keep a selected car while it brakes: reacquiring at 25 m every
+        // frame let a faster car escape before its AI could finish slowing.
+        if (!held && (approachGap > 100.0f || approachGap < -2.0f || std::abs(lateral) > 10.0f)) {
+            ReleaseSkitchTraffic(s);
+            return;
+        }
+    }
+    const float riderSpeed = (std::max)(0.0f, s.last.velocity.x * vehicleForward.x + s.last.velocity.y * vehicleForward.y);
+    const float closing = std::isfinite(cfg.skitchClosingSpeed) ? (std::clamp)(cfg.skitchClosingSpeed, 0.1f, 5.0f) : 3.0f;
+    const float tow = std::isfinite(cfg.skitchTowSpeed) ? (std::clamp)(cfg.skitchTowSpeed, 1.0f, 30.0f) : 10.0f;
+    // Far away: let the rider gain gently. Near grab reach: match speed, then
+    // pull slightly ahead as the gap shrinks rather than braking into them.
+    const float relative = (std::clamp)(1.0f - approachGap, -closing, 1.0f);
+    const float desired = held ? tow : riderSpeed + relative;
+    const float speed = std::isfinite(desired) ? (std::clamp)(desired, 0.5f, 40.0f) : 4.0f;
+    const int drivingStyle = held ? kTowDrivingStyle : 786475;
+    if (target != s.assistVehicle || driver != s.assistDriver) {
+        ReleaseSkitchTraffic(s);
+        const Vector3 v = Call<Vector3>(gta::GET_ENTITY_VELOCITY, target);
+        s.assistResumeSpeed = (std::clamp)(std::sqrt(v.x * v.x + v.y * v.y), 8.0f, 25.0f);
+        s.assistVehicle = target;
+        s.assistDriver = driver;
+        s.assistSpeedCap = (std::max)(speed, std::sqrt(v.x * v.x + v.y * v.y));
+        Call<void>(0x480142959D337D00ULL, driver, target, speed, drivingStyle);
+    }
+    Call<void>(0xDACE1BE37D88AF67ULL, driver, drivingStyle);
+    Call<void>(0x5C9B84BD7D31D908ULL, driver, speed);
+    // A persistent limit prevents the AI from accelerating back between updates.
+    // Lower it smoothly; keep approach and towing velocity continuous.
+    const float braking = !held && approachGap > 4.0f ? 6.0f : 3.0f;
+    const float change = (std::clamp)(speed - s.assistSpeedCap, -braking * assistDt, 1.5f * assistDt);
+    s.assistSpeedCap += change;
+    Call<void>(0xBAA045B4E42F3C06ULL, target, s.assistSpeedCap);
+
+    Vector3 destination{};
+    const int waypoint = held && cfg.skitchTowWaypoint ? Call<int>(0x1BEDE233E6CD2A1FULL, 8) : 0;
+    const bool route = waypoint && Call<BOOL>(0xA6DB27D19ECBB7DAULL, waypoint);
+    if (route) destination = Call<Vector3>(0xFA7C7F0AADF25D09ULL, waypoint);
+    const float routeDx = destination.x - s.assistWaypoint.x;
+    const float routeDy = destination.y - s.assistWaypoint.y;
+    if (route && (!s.assistRouting || routeDx * routeDx + routeDy * routeDy > 100.0f)) {
+        Call<void>(0x158BB33F920D360CULL, driver, target, destination.x, destination.y, destination.z, speed, drivingStyle, 20.0f);
+        s.assistRouting = true;
+        s.assistWaypoint = {destination.x, destination.y, destination.z};
+        Notify(s, "Skitch: towing to your waypoint", 2500);
+        Logf("Skitch route: vehicle=%d waypoint=(%.1f,%.1f,%.1f)", target, destination.x, destination.y, destination.z);
+    } else if (!route && s.assistRouting) {
+        Call<void>(0x480142959D337D00ULL, driver, target, speed, drivingStyle);
+        s.assistRouting = false;
+        Logf("Skitch route: vehicle=%d route cancelled; wandering", target);
+    }
+    const Vector3 v = Call<Vector3>(gta::GET_ENTITY_VELOCITY, target);
+    const float actual = std::sqrt(v.x * v.x + v.y * v.y);
+    if (now - s.assistLog > 1000) {
+        Logf("Skitch assist: vehicle=%d %s gap=%.1f rider=%.1f actual=%.1f requested=%.1f cap=%.1f route=%d m/s",
+             target, held ? "towing" : "approach", approachGap, riderSpeed, actual, speed, s.assistSpeedCap, s.assistRouting);
+        s.assistLog = now;
+    }
+}
+
 void Leave(Session& s, const Config& cfg, const char* why, bool voluntary) {
     if (!SkateOwnsPlayer(s)) return;
+    shouldercat::Release(Log);
+    aifollowers::Stop(g_runtime);
+    ReleaseSkitchTraffic(s);
     const bool wasSkating = s.state == LifeState::Skating;
     SetState(s, LifeState::Leaving, why);
     s.wipingOut = false, s.lineAt = 0; // no get-up line on the next entry
@@ -1043,7 +1238,7 @@ void Leave(Session& s, const Config& cfg, const char* why, bool voluntary) {
 }
 
 void SendCharacter(const Session& s, const Config& cfg);
-void TryEnter(Session& s, const Config& cfg, bool strict);
+void TryEnter(Session& s, const Config& cfg, bool strict, const SvVec3* exitVelocity = nullptr);
 
 // ---- GTA delegation ----------------------------------------------------------
 // Skate keeps every movement it has (riding, walking, jumps, BackwardsMan).
@@ -1170,7 +1365,7 @@ bool AreaReady(const char*& why) {
 
 // Board action (or the menu): start Skate here. `strict` = controller (all GTA
 // guards); the menu skips the transient ones.
-void TryEnter(Session& s, const Config& cfg, bool strict) {
+void TryEnter(Session& s, const Config& cfg, bool strict, const SvVec3* exitVelocity) {
     const Ped ped = Call<Ped>(gta::PLAYER_PED_ID);
     {
         SvOutput o{};
@@ -1217,8 +1412,14 @@ void TryEnter(Session& s, const Config& cfg, bool strict) {
     SvSpawn spawn{};
     spawn.size = sizeof(spawn);
     spawn.position = GroundUnder(ped);
+    if (exitVelocity) {
+        const Vector3 p = Call<Vector3>(gta::GET_ENTITY_COORDS, ped, 1);
+        spawn.position = {p.x, p.y, p.z - 1.0f};
+    }
     spawn.position.z += 0.05f;
     spawn.heading_degrees = Call<float>(gta::GET_ENTITY_HEADING, ped);
+    if (exitVelocity && exitVelocity->x * exitVelocity->x + exitVelocity->y * exitVelocity->y > 0.25f)
+        spawn.heading_degrees = std::atan2(-exitVelocity->x, exitVelocity->y) * 180.0f / 3.14159265f;
     s.facing = spawn.heading_degrees;
     s.poseHeading = NAN;
     s.boardBackward = false;
@@ -1230,7 +1431,9 @@ void TryEnter(Session& s, const Config& cfg, bool strict) {
     // them back there).
     s.last = SvOutput{};
     s.last.skater_position = s.last.board_position = spawn.position;
-    if (!g_runtime.LifecycleEnter(spawn)) {
+    SvVehicleExitSpawn moving{spawn, exitVelocity ? *exitVelocity : SvVec3{}};
+    moving.spawn.size = sizeof(moving);
+    if (!(exitVelocity ? g_runtime.VehicleExitEnter(moving) : g_runtime.LifecycleEnter(spawn))) {
         Notify(s, "activation rejected: " + g_runtime.StatusText());
         SetState(s, LifeState::Ready, "activation rejected");
         return;
@@ -1240,11 +1443,12 @@ void TryEnter(Session& s, const Config& cfg, bool strict) {
     if (Call<Hash>(gta::GET_SELECTED_PED_WEAPON, ped) == kBoardWeapon)
         Call<void>(gta::SET_CURRENT_PED_WEAPON, ped, 0xA2719263, 1);
     s.ped = ped;
+    s.exitSuppressY = exitVelocity != nullptr;
     HoldPed(s, true);
     // The runtime solves Skate's pose on the character's skeleton.
     SendCharacter(s, g_config);
-    SetState(s, LifeState::Entering, strict ? "board action" : "menu");
-    Logf("SkateV Legacy: entering off the board at %.2f %.2f %.2f heading %.1f", spawn.position.x, spawn.position.y, spawn.position.z, spawn.heading_degrees);
+    SetState(s, LifeState::Entering, exitVelocity ? "LB vehicle exit" : (strict ? "board action" : "menu"));
+    Logf("SkateV Legacy: entering %s at %.2f %.2f %.2f heading %.1f", exitVelocity ? "on board from vehicle" : "off the board", spawn.position.x, spawn.position.y, spawn.position.z, spawn.heading_degrees);
 }
 
 // Tells the runtime which GTA character wears Skate's pose: the player's own
@@ -2006,6 +2210,7 @@ void BoardWeather(Session& s, const Config& cfg, const SvBoardPose* pose) {
 
 void UpdateActive(Session& s, const Config& cfg, const SvPad& pad) {
     Lap(kPartLifecycle);
+    if (!cfg.dynamicWorld) ReleaseSkitchTraffic(s);
     DisableSkateControls(pad.buttons, s.aiming);
     Lap(kPartControls);
     if (s.nativeFire != 1) ReportShootings(s); // GTA reports the crimes of its own shots
@@ -2064,6 +2269,7 @@ void UpdateActive(Session& s, const Config& cfg, const SvPad& pad) {
         if (const std::string line = s.world.TakePositionLog(); !line.empty()) Log(line.c_str());
         const auto& bodies = s.world.Bodies();
         g_runtime.SetDynamicBodies(bodies.data(), static_cast<std::uint32_t>(bodies.size()));
+        SkitchTrafficTick(s, cfg, in.pad);
         if (cfg.pedHitboxes) {
             const auto& parts = s.world.PedParts();
             g_runtime.SetPedParts(parts.data(), static_cast<std::uint32_t>(parts.size()));
@@ -2209,9 +2415,19 @@ void UpdateActive(Session& s, const Config& cfg, const SvPad& pad) {
             if (PoseFacing(s_pose.data(), s_feet, h)) s.poseHeading = h;
         }
         pedcollision::Tick(s.ped, posed ? s_pose.data() : nullptr, n, g_runtime.SkitchVehicle());
+        shouldercat::Tick(s.ped, true, {cfg.shoulderCat, cfg.catLeft, cfg.catPose,
+            cfg.catSideways, cfg.catForward, cfg.catHeight, cfg.catYaw},
+            posed ? s_pose.data() : nullptr, posed ? n : 0, Log);
         if (cfg.liveClip && s_skeleton) liveclip::Tick(s.ped, s_skeleton, Log);
     }
+    if (!cfg.posePed) shouldercat::Tick(s.ped, true,
+        {cfg.shoulderCat, cfg.catLeft, cfg.catPose, cfg.catSideways, cfg.catForward, cfg.catHeight, cfg.catYaw},
+        nullptr, 0, Log);
 
+    if (cfg.posePed && cfg.drawBoard) aifollowers::Tick(s.ped,
+        {cfg.aiFollowers, cfg.aiFollowerGroups, cfg.aiFollowerMissions, cfg.aiFollowerTricks,
+         cfg.aiFollowerMax, cfg.aiFollowerDistance}, g_runtime, cfg.pedCache, Log);
+    else aifollowers::Stop(g_runtime);
     Lap(kPartPose);
     if (o.camera_valid) {
         Call<void>(gta::SET_CAM_COORD, s.cam, o.camera_position.x, o.camera_position.y, o.camera_position.z);
@@ -2342,6 +2558,37 @@ void LifecycleFrame(Session& s, const Config& cfg, bool f6) {
             }
         }
         const SvPad pad = ReadPad();
+        // LB + GTA's normal Y exit arms one transfer. Releasing LB cancels it.
+        // Wait until GTA has detached the ped; never remove an occupied driver.
+        const bool lb = pad.connected && (pad.buttons & 0x0100) != 0;
+        const bool y = (pad.buttons & 0x8000) != 0;
+        const bool inVehicle = Call<BOOL>(gta::IS_PED_IN_ANY_VEHICLE, player, 0) != 0;
+        if (!lb || player != s.exitPed || (s.exitArmedAt && now - s.exitArmedAt > 5000))
+            s.exitArmedAt = 0;
+        if (inVehicle) {
+            s.exitPed = player;
+            s.exitVehicle = Call<Vehicle>(0x9A9112A0FE9A4713ULL, player, 0); // GET_VEHICLE_PED_IS_IN
+            if (lb && y && !s.exitYWas) s.exitArmedAt = now;
+            if (s.exitArmedAt) {
+                const Vector3 v = Call<Vector3>(gta::GET_ENTITY_VELOCITY, s.exitVehicle);
+                s.exitVelocity = {v.x, v.y, v.z};
+            }
+        }
+        s.exitYWas = y;
+        if (s.exitArmedAt && !inVehicle && !lifecycle::Blocked(player, false, cfg.life)) {
+            const char* why = nullptr;
+            if (AreaReady(why)) {
+                // Consume even a rejected entry so it cannot fire later on foot.
+                s.exitArmedAt = 0;
+                const Vector3 jumpVelocity = Call<Vector3>(gta::GET_ENTITY_VELOCITY, player);
+                if (std::isfinite(jumpVelocity.z)) s.exitVelocity.z = jumpVelocity.z;
+                TryEnter(s, cfg, false, &s.exitVelocity);
+                if (s.state == LifeState::Entering) break;
+            } else {
+                s.exitArmedAt = 0;
+                Notify(s, "Car exit: Skate area still loading; try again once ready", 3000);
+            }
+        }
         // After leaving, the Y that dismounted must not become GTA's
         // INPUT_ENTER (vehicle entry) while it is still held.
         if (now < s.suppressEnterUntil) {
@@ -2417,7 +2664,11 @@ void LifecycleFrame(Session& s, const Config& cfg, bool f6) {
         break;
     }
     case LifeState::Skating: {
-        const SvPad pad = ReadPad(); // once per frame
+        SvPad pad = ReadPad(); // once per frame
+        if (s.exitSuppressY) {
+            if (!(pad.buttons & 0x8000)) s.exitSuppressY = false;
+            pad.buttons &= ~0x8000; // the car-exit press must not dismount Skate
+        }
         // Hold Y to put the board away. The press still reaches Skate, so
         // it steps off first, then puts the board away while Y stays down.
         // Only a press made while skating counts; a Y held at entry does not.
@@ -2579,6 +2830,10 @@ std::vector<menu::Page> MenuPages(Session& s) {
                Bound("BailTimeLimit", [] { g_runtime.SetBailLimit(g_config.bailTimeLimit); })),
         Number("Skitch standoff", "SkitchStandoff", D.skitchStandoff, 0, 1, 0.05f, Fixed("%.2f m"),
                Bound("SkitchStandoff", [] { g_runtime.SetSkitchStandoff(g_config.skitchStandoff); })),
+        Flag("Skitch traffic assist", "SkitchTrafficAssist", D.skitchTrafficAssist, Bound("SkitchTrafficAssist")),
+        Number("Skitch catch-up speed", "SkitchClosingSpeed", D.skitchClosingSpeed, 0.5f, 5, 0.5f, Fixed("%.1f m/s"), Bound("SkitchClosingSpeed")),
+        Flag("Tow to waypoint", "SkitchTowWaypoint", D.skitchTowWaypoint, Bound("SkitchTowWaypoint")),
+        Number("Towing speed", "SkitchTowSpeed", D.skitchTowSpeed, 1, 30, 1, Fixed("%.0f m/s"), Bound("SkitchTowSpeed")),
         Flag("Swim and climb with GTA", "GtaDelegation", D.delegation, Bound("GtaDelegation")),
         Number("Swim depth", "SwimDepth", D.swimDepth, 0.3f, 2, 0.1f, Fixed("%.1f m"), Bound("SwimDepth")),
         Number("Hold Y to put the board away", "PutAwayHoldMs", static_cast<float>(D.putAwayHoldMs), 0, 2000, 100,
@@ -2588,6 +2843,25 @@ std::vector<menu::Page> MenuPages(Session& s) {
         Choice("Board tracks", "BoardTracks", {"1", "0"}, {"On", "Off"}, Bound("BoardTracks")),
         Choice("Snow", "Snow", {"0", "1", "2"}, {"Auto (GTA's snow and weather)", "Always (a trainer's snow)", "Never"},
                Bound("Snow")),
+    }});
+
+    pages.push_back({"AI skater followers", {
+        Flag("Enable AI skater followers", "AiFollowers", D.aiFollowers, Bound("AiFollowers")),
+        Flag("Bodyguards and group followers", "AiFollowerGroups", D.aiFollowerGroups, Bound("AiFollowerGroups")),
+        Flag("Mission followers", "AiFollowerMissions", D.aiFollowerMissions, Bound("AiFollowerMissions")),
+        Flag("Independent geometry tricks", "AiFollowerTricks", D.aiFollowerTricks, Bound("AiFollowerTricks")),
+        Number("Maximum skaters", "AiFollowerMax", static_cast<float>(D.aiFollowerMax), 1, 4, 1, Fixed("%.0f"), Bound("AiFollowerMax")),
+        Number("Following distance", "AiFollowerDistance", D.aiFollowerDistance, 3, 20, 1, Fixed("%.0f m"), Bound("AiFollowerDistance")),
+    }});
+    pages.push_back({"Shoulder cat", {
+        Flag("Carry follower cat", "ShoulderCat", D.shoulderCat, Bound("ShoulderCat")),
+        Flag("Left shoulder", "CatLeftShoulder", D.catLeft, Bound("CatLeftShoulder")),
+        Choice("Cat pose", "CatPose", {"0", "1", "2"},
+               {"Resting on ledge", "Sleeping", "Standing"}, Bound("CatPose")),
+        Number("Cat sideways offset", "CatSideways", D.catSideways, -0.5f, 0.5f, 0.01f, Fixed("%.2f m"), Bound("CatSideways")),
+        Number("Cat forward offset", "CatForward", D.catForward, -0.5f, 0.5f, 0.01f, Fixed("%.2f m"), Bound("CatForward")),
+        Number("Cat height offset", "CatHeight", D.catHeight, -0.5f, 0.5f, 0.01f, Fixed("%.2f m"), Bound("CatHeight")),
+        Number("Cat facing", "CatYaw", D.catYaw, -180, 180, 5, Fixed("%.0f degrees"), Bound("CatYaw")),
     }});
 
     pages.push_back({"Hall of Meat and records", {
@@ -2683,6 +2957,9 @@ std::vector<menu::Page> MenuPages(Session& s) {
 
 void ScriptMain() {
     Log("SkateV Legacy: ScriptMain start");
+    shouldercat::Release(Log); // clean up a carried cat after a script reload
+    aifollowers::Stop(g_runtime);
+    aifollowers::InitDiagnostics(g_logDir);
     {
         // Other script mods loaded alongside, for attributing hitches.
         std::string asis;
@@ -2724,6 +3001,7 @@ void ScriptMain() {
     } else {
         Logf("SkateV Legacy: runtime ABI %u loaded (host ABI %u); data '%s' cache '%s'", g_runtime.ApiVersion(),
              SKATEV_ABI_VERSION, cfg.dataRoot.c_str(), cfg.worldCache.c_str());
+        Log("Skitch revision 7: stronger approach slowdown, bumper speed matching, unchanged attached towing");
         Logf("SkateV Legacy: %zu exact prop and vehicle collision templates", DynamicWorld::LoadPropTemplates(cfg.worldCache));
         Logf("SkateV Legacy: %zu script-toggled map states with collision", mapstates::Load(cfg.worldCache));
         ApplyQuirk();
@@ -2830,6 +3108,8 @@ void ScriptMain() {
             }
             EnforceHeldPed(s);
             Lap(kPartAfter);
+            if (s.state != LifeState::Skating && shouldercat::state.cat) shouldercat::Release(Log);
+            if (s.state != LifeState::Skating) aifollowers::Stop(g_runtime);
         } else if (f6) {
             Notify(s, "runtime unavailable: " + error);
         }

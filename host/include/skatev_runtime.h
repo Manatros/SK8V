@@ -130,6 +130,12 @@ struct SvSpawn {
     float aspect_ratio;
 };
 
+struct SvVehicleExitSpawn {
+    SvSpawn spawn;
+    SvVec3 velocity; // GTA world m/s; spawn.position is the airborne foot point.
+};
+static_assert(sizeof(SvVehicleExitSpawn) == 36);
+
 struct SvOutput {
     std::uint32_t size;
     std::uint32_t status;
@@ -682,3 +688,25 @@ static_assert(sizeof(SvBoardPose) == 528);
 static_assert(offsetof(SvBoardPose, entity) == 16);
 static_assert(offsetof(SvBoardPose, world) == 80);
 using SvGetBoardPoseFn = std::uint32_t(__cdecl*)(const void*, SvBoardPose*);
+
+// Optional AI companions. IDs distinguish stale publications after slot reuse.
+struct SvFollowerStart {
+    std::uint32_t size, id, entity, reserved;
+    SvVec3 spawn; float heading;
+    SvCharacter character;
+};
+struct SvFollowerGoal {
+    std::uint32_t size, id; SvVec3 point; float speed;
+    std::uint32_t tricks, reserved;
+    SvVec3 current; std::uint32_t padding;
+};
+struct SvFollowerOutput {
+    std::uint32_t size, id; std::uint64_t tick;
+    SvVec3 root; float heading;
+    SvVec3 velocity; std::uint32_t bone_count;
+    SvBoardPose board;
+    float bones[512*16];
+};
+static_assert(sizeof(SvFollowerStart)==96);
+static_assert(sizeof(SvFollowerGoal)==48);
+static_assert(sizeof(SvFollowerOutput)==33344);

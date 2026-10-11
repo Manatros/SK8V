@@ -31,6 +31,8 @@ pub struct Pad {
 }
 
 pub enum Job {
+    Follower(usize, Option<crate::followers::Request>),
+    FollowerGoal(usize, crate::followers::Goal),
     /// The host found GTA's physics level (None: it is gone): the static map
     /// is read from it (`live.rs`).
     PhysicsLevel(Option<crate::live::Level>),
@@ -41,6 +43,7 @@ pub enum Job {
         /// Lifecycle entry: off the board, board in hand, awaiting player Y
         /// (patch 0007). False: the original on-board teleport.
         offboard: bool,
+        velocity: Option<Vec3>,
     },
     /// Lifecycle: where the GTA player is while Skate is inactive (GTA
     /// space, ground contact). The first one prepares the session there; later
@@ -247,7 +250,7 @@ pub struct Quirk {
 }
 
 /// Skinned presentation of Skate's own skater + board model.
-struct Presenter {
+pub(crate) struct Presenter {
     mesh: skin::SkinMesh,
     map: Option<Vec<Option<usize>>>,
     /// GTA character wearing Skate's pose (fitted to Skate's bind skeleton).
@@ -261,7 +264,7 @@ struct Presenter {
 }
 
 impl Presenter {
-    fn load(
+    pub(crate) fn load(
         data_root: &std::path::Path,
         budget: usize,
         board_only: bool,
@@ -295,7 +298,7 @@ impl Presenter {
         }
     }
 
-    fn draw(&mut self, p: &Pose, log: &Log) -> Vec<skin::ShadedTri> {
+    fn skater_world(&mut self, p: &Pose, log: &Log) -> Vec<Option<Mat4>> {
         if self.map.is_none() {
             let map: Vec<Option<usize>> = self
                 .mesh
@@ -350,6 +353,11 @@ impl Presenter {
             .iter()
             .map(|i| i.and_then(|i| p.bones.get(i).map(|b| p.root * *b * blender)))
             .collect();
+        world
+    }
+
+    fn draw(&mut self, p: &Pose, log: &Log) -> Vec<skin::ShadedTri> {
+        let world=self.skater_world(p,log);
         let light = coords::to_skate(Vec3::new(0.35, 0.25, 0.9));
         let board_only = self.board_only || self.character.is_some();
         let mut tris: Vec<skin::ShadedTri> = self
@@ -376,7 +384,7 @@ impl Presenter {
         tris
     }
 
-    fn set_character(&mut self, request: Option<CharacterRequest>, log: &Log) {
+    pub(crate) fn set_character(&mut self, request: Option<CharacterRequest>, log: &Log) {
         self.character = None;
         self.textures = Arc::default();
         self.pose = Arc::default();
@@ -433,7 +441,24 @@ impl Presenter {
     }
 }
 
+impl Presenter {
+    pub(crate) fn has_character(&self) -> bool { self.character.is_some() }
+    pub(crate) fn follower_pose(&mut self, p: &Pose, log: &Log) -> Option<(Arc<Vec<Mat4>>, [Mat4;7], Mat4)> {
+        // GTA renders both the follower and its native board. Only fit bones;
+        // CPU skinning of presentation triangles was immediately discarded.
+        let world=self.skater_world(p,log);
+        let model=self.character.as_ref()?;
+        let skate=model.skate_pose(&self.mesh,&world);
+        self.pose=Arc::new(model.pose_with_foot_support(&skate)?);
+        let board=crate::board_pose::world(&p.names,&p.bones,p.root)?;
+        let c=Mat4::from_mat3(coords::basis());
+        let entity=board[0]*c*self.mesh.inverse_bind_for("SKATEBOARD_ROOT")?*c.transpose();
+        Some((self.pose.clone(),board,entity))
+    }
+}
+
 pub struct Shared {
+    pub followers: [Option<crate::followers::Snapshot>; crate::followers::MAX],
     pub status: u32,
     pub message: String,
     pub snapshot: Snapshot,
@@ -492,7 +517,7 @@ fn verbose() -> bool {
 /// Thread priority inside GTA's busy process: the Skate tick must not be
 /// starved by game threads; collision rebuilds must not compete with them.
 #[cfg(windows)]
-fn set_thread_priority(priority: i32) {
+pub(crate) fn set_thread_priority(priority: i32) {
     unsafe extern "system" {
         fn GetCurrentThread() -> isize;
         fn SetThreadPriority(thread: isize, priority: i32) -> i32;
@@ -500,7 +525,7 @@ fn set_thread_priority(priority: i32) {
     unsafe { SetThreadPriority(GetCurrentThread(), priority) };
 }
 #[cfg(not(windows))]
-fn set_thread_priority(_: i32) {}
+pub(crate) fn set_thread_priority(_: i32) {}
 const THREAD_PRIORITY_ABOVE_NORMAL: i32 = 1;
 const THREAD_PRIORITY_BELOW_NORMAL: i32 = -1;
 
@@ -514,6 +539,7 @@ pub fn spawn(
     log: Log,
 ) -> (mpsc::Sender<Job>, Arc<Mutex<Shared>>) {
     let shared = Arc::new(Mutex::new(Shared {
+        followers: std::array::from_fn(|_|None),
         status: STATUS_LOADING,
         message: "loading Skate data".into(),
         snapshot: Snapshot::default(),
@@ -624,6 +650,11 @@ fn run(
     set(shared, STATUS_READY, "ready");
 
     let mut session: Option<Session> = None;
+    let mut followers: [Option<crate::followers::Agent>; crate::followers::MAX] = std::array::from_fn(|_|None);
+    let mut follower_loads: [Option<mpsc::Receiver<Result<crate::followers::Agent,String>>>; crate::followers::MAX] = std::array::from_fn(|_|None);
+    let mut follower_ids=[0u32;crate::followers::MAX];
+    let mut follower_goals=[None;crate::followers::MAX];
+    let mut ai_perf=AiPerf::default();
     let mut audio_state = crate::audio::map::State::default();
     let mut built_at = Vec3::ZERO;
     let mut builder_jobs: Option<mpsc::Sender<Vec3>> = None;
@@ -665,6 +696,10 @@ fn run(
     let mut stream_failed_at: Option<Vec3> = None;
     // Centre of the collision build in flight off the simulation thread.
     let mut pending_centre: Option<Vec3> = None;
+    let mut pinned_marker: Option<Vec3> = None;
+    let mut discard_marker_build = false;
+    let mut marker_return_guard = false;
+    let mut marker_edge_wait = false;
     let mut active = false;
     let mut accumulated = 0.0f32;
     let mut steps_done = 0u64;
@@ -802,12 +837,40 @@ fn run(
         let mut track: Option<(Vec3, f32)> = None;
         for job in batch {
             match job {
+                Job::Follower(slot, request) => {
+                    if slot >= crate::followers::MAX { continue; }
+                    followers[slot]=None;
+                    follower_loads[slot]=None;follower_ids[slot]=0;follower_goals[slot]=None;
+                    shared.lock().unwrap().followers[slot]=None;
+                    if active && let Some(request)=request {
+                        let area=static_world.lock().unwrap().follower_area();
+                        if let Some(area)=area {
+                            let id=request.id;
+                            let root=data_root.clone();let log=log.clone();let (send,receive)=mpsc::channel();
+                            let spawned=std::thread::Builder::new().name(format!("skatev-ai-load-{slot}"))
+                                .stack_size(32*1024*1024).spawn(move|| {
+                                    set_thread_priority(THREAD_PRIORITY_BELOW_NORMAL);
+                                    let result=catch_unwind(AssertUnwindSafe(||crate::followers::Agent::new(&root,area,request,&log)))
+                                        .unwrap_or_else(|_|Err("follower loading panicked".into()));
+                                    let _=send.send(result);
+                                });
+                            if spawned.is_ok() {
+                                follower_ids[slot]=id;follower_loads[slot]=Some(receive);
+                            }
+                        }
+                    }
+                }
+                Job::FollowerGoal(slot, goal) => {
+                    if slot<crate::followers::MAX&&follower_ids[slot]==goal.id {follower_goals[slot]=Some(goal);}
+                    if let Some(Some(agent))=followers.get_mut(slot) && agent.id==goal.id {agent.goal=goal;}
+                }
                 Job::Track { at, heading } => track = Some((at, heading)),
                 Job::Activate {
                     spawn,
                     heading,
                     aspect,
                     offboard,
+                    velocity,
                 } => {
                     set(shared, STATUS_ACTIVATING, "building Los Santos collision");
                     let t = std::time::Instant::now();
@@ -900,6 +963,9 @@ fn run(
                     } else {
                         s.activate(skate_spawn, skate_heading)?;
                         monitor.begin_onboard();
+                    }
+                    if let Some(v) = velocity {
+                        s.set_entry_velocity(coords::to_skate(v).to_array());
                     }
                     for line in monitor.log.drain(..) {
                         log(&line);
@@ -1117,6 +1183,10 @@ fn run(
                     }
                 }
                 Job::Suspend => {
+                    for agent in &mut followers {*agent=None;}
+                    for loading in &mut follower_loads {*loading=None;}
+                    follower_ids.fill(0);follower_goals.fill(None);
+                    shared.lock().unwrap().followers=std::array::from_fn(|_|None);
                     if line_player.stop().is_some() {
                         log("line stopped: Skate deactivated");
                     }
@@ -1232,6 +1302,24 @@ fn run(
                 }
             }
         }
+        for slot in 0..crate::followers::MAX {
+            let finished=follower_loads[slot].as_ref().and_then(|receive|match receive.try_recv() {
+                Ok(result)=>Some(result),Err(mpsc::TryRecvError::Empty)=>None,
+                Err(_)=>Some(Err("follower loader disconnected".into())),
+            });
+            if let Some(result)=finished {
+                follower_loads[slot]=None;
+                match result {
+                    Ok(mut agent) if active&&agent.id==follower_ids[slot]=>{
+                        if let Some(goal)=follower_goals[slot] {agent.goal=goal;}
+                        log(&format!("AI skater {}: independent session ready",agent.entity));
+                        followers[slot]=Some(agent);
+                    }
+                    Err(e)=>{log(&format!("AI skater setup failed: {e}"));follower_ids[slot]=0;}
+                    _=>{}
+                }
+            }
+        }
         if let (Some(s), Some(triangles)) = (session.as_mut(), dynamic) {
             latest_dynamic = triangles;
             s.set_dynamic_surfaces(&latest_dynamic);
@@ -1251,6 +1339,7 @@ fn run(
         // Finished builds wait in the channel until the session exists.
         if let Some(s) = session.as_mut() {
             if let Ok((centre, result)) = built.try_recv() {
+                let obsolete_marker = std::mem::take(&mut discard_marker_build);
                 // Only moved areas time the lead: a rebuild in place reuses
                 // most of the last one and runs faster.
                 if pending_centre.take().is_some() && centre.truncate() != built_at.truncate() {
@@ -1258,6 +1347,9 @@ fn run(
                     build_secs = build_secs * 0.6 + took * 0.4;
                 }
                 match result {
+                    Ok(_) if obsolete_marker => {
+                        log("collision build superseded by newly pinned session marker");
+                    }
                     // A build the player has already left (driving on, or
                     // an activation elsewhere) is dropped; the next request
                     // replaces it. Within three quarters of its half-size it
@@ -1370,7 +1462,9 @@ fn run(
         if let Some(t) = target
             && pending_centre.is_none()
             && (world::needs_recentre_moving(built_at, t, velocity, build_secs) || rebuild_area)
-            && stream_failed_at.is_none_or(|f| world::needs_recentre(f, t) || rebuild_area)
+            && stream_failed_at.is_none_or(|f| world::needs_recentre(f, t) || rebuild_area
+                || (pinned_marker.is_some_and(|m| (m - f).truncate().length() < world::MARKER_RADIUS)
+                    && requested_at.elapsed().as_secs_f32() >= 0.5))
         {
             // Streaming alone rebuilds in place while the area still covers
             // the player: only what GTA streamed changes, and the rest is
@@ -1398,6 +1492,17 @@ fn run(
         // The pose after the last tick advanced (published below).
         let mut advanced: Option<Pose> = None;
         while accumulated >= period {
+            let before_position = coords::from_skate(s.pose().root.w_axis.truncate());
+            let edge_wait = marker_return_guard && pinned_marker.is_some_and(|m|
+                world::marker_edge_wait(before_position, m, built_at));
+            if edge_wait {
+                if !marker_edge_wait { log("session marker: holding at retained collision boundary until surrounding ground loads"); }
+                marker_edge_wait = true;
+                accumulated = period;
+                break;
+            }
+            if marker_edge_wait { log("session marker: surrounding collision ready, movement resumed"); }
+            marker_edge_wait = false;
             accumulated -= period;
             if monitor.phase() != Phase::Inactive {
                 let v = s.lifecycle_view();
@@ -1475,6 +1580,18 @@ fn run(
             }
             s.advance()?;
             perf.tick(t.elapsed());
+            if let Some(marker) = s.session_marker_position().map(coords::from_skate)
+                && pinned_marker != Some(marker)
+                && let Ok(mut world) = static_world.try_lock()
+            {
+                if let Ok(n) = world.pin_marker(marker) {
+                    pinned_marker = Some(marker);
+                    rebuild_area = true;
+                    stream_failed_at = None;
+                    discard_marker_build = pending_centre.is_some();
+                    log(&format!("session marker collision pinned at ({:.1}, {:.1}, {:.1}): {n} triangles, 64 m half-size; retained until marker replacement", marker.x, marker.y, marker.z));
+                }
+            }
             skitch_held = s.skitch_held_tag();
             if s.air_teleport_requested() {
                 log(&format!(
@@ -1485,6 +1602,13 @@ fn run(
                 ));
             }
             let pose = s.pose();
+            let after_position = coords::from_skate(pose.root.w_axis.truncate());
+            if (after_position - before_position).truncate().length() > 32.0
+                && pinned_marker.is_some_and(|m| (after_position - m).truncate().length() < 8.0)
+            {
+                marker_return_guard = true;
+                log("session marker: return protected by retained collision and boundary guard");
+            }
             let struck: Vec<(u32, u32)> = exchange_impulses(s, &pose, shared, log, &ped_proxies, &mut impulse_log)
                 .into_iter()
                 .filter_map(|tag| host_groups.get(&tag).map(|g| (tag, *g)))
@@ -1534,6 +1658,25 @@ fn run(
             }
             skater_at = snap.root;
             skater_velocity = snap.velocity;
+            let ai_started=std::time::Instant::now();
+            let mut ai_count=0;
+            let area=static_world.try_lock().ok().and_then(|world|world.follower_area());
+            for slot in 0..crate::followers::MAX {
+                if let Some(agent)=followers[slot].as_mut() {
+                    ai_count+=1;
+                    agent.set_bodies(entity_proxies.iter().chain(&ped_proxies));
+                    agent.set_dynamic(&latest_dynamic);
+                    match catch_unwind(AssertUnwindSafe(||agent.step(area.as_ref(),log))) {
+                        Ok(Ok(Some(snapshot)))=>shared.lock().unwrap().followers[slot]=Some(snapshot),
+                        result=>{
+                            log(&format!("AI skater {}: released ({})",agent.entity,
+                                match result {Ok(Err(e))=>e,Ok(Ok(None))=>"outside loaded collision".into(),_=>"simulation failure".into()}));
+                            followers[slot]=None;shared.lock().unwrap().followers[slot]=None;
+                        }
+                    }
+                }
+            }
+            ai_perf.record(ai_started.elapsed(),ai_count,period,log);
             if snap.state != last_state {
                 if snap.state.starts_with("Grind") && !last_state.starts_with("Grind") {
                     log(&format!(
@@ -1910,6 +2053,27 @@ fn preload_session(data_root: &std::path::Path, natural_stance: u32, log: &Log) 
 }
 
 /// Worker timing over a 2 s window: Skate tick cost against its fixed period.
+// Record the complete AI batch, including proxy updates and presentation.
+// Low-frequency summaries remain available without verbose player logging.
+#[derive(Default)]
+struct AiPerf { elapsed: f32, total_ms: f64, peak_ms: f64, batches: u32, count: usize }
+impl AiPerf {
+    fn record(&mut self, cost: std::time::Duration, count: usize, dt: f32, log: &Log) {
+        self.elapsed+=dt;
+        if count>0 {
+            let ms=cost.as_secs_f64()*1000.;
+            self.total_ms+=ms;self.peak_ms=self.peak_ms.max(ms);self.batches+=1;
+        }
+        if self.count!=count||self.elapsed>=5. {
+            if self.count!=count||self.batches>0 {
+                log(&format!("AI performance: active={count} batches={} mean_ms={:.3} peak_ms={:.3}",
+                    self.batches,self.total_ms/(self.batches.max(1) as f64),self.peak_ms));
+            }
+            *self=Self{count,..Self::default()};
+        }
+    }
+}
+
 struct Perf {
     window: std::time::Instant,
     ticks: u32,
@@ -2341,6 +2505,7 @@ mod shown_tests {
 
     fn shared(prev: Snapshot, latest: Snapshot, blend: f32) -> Shared {
         Shared {
+            followers: std::array::from_fn(|_|None),
             status: 0,
             message: String::new(),
             snapshot: latest,

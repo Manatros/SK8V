@@ -15,6 +15,7 @@ pub mod line;
 pub mod rails;
 pub mod skin;
 mod worker;
+mod followers;
 mod crash;
 pub mod world;
 pub mod live;
@@ -1414,6 +1415,95 @@ pub unsafe extern "C" fn sv_lifecycle_get_state(
 }
 
 unsafe fn request_activate(rt: *mut c_void, spawn: *const SvSpawn, offboard: bool) -> u32 {
+    unsafe { request_activate_moving(rt, spawn, offboard, None) }
+}
+
+#[repr(C)]
+pub struct SvVehicleExitSpawn {
+    pub spawn: SvSpawn,
+    pub velocity: SvVec3,
+}
+
+#[repr(C)]
+pub struct SvFollowerStart {
+    size: u32, id: u32, entity: u32, reserved: u32,
+    spawn: SvVec3, heading: f32, character: SvCharacter,
+}
+#[repr(C)]
+pub struct SvFollowerGoal {
+    size: u32, id: u32, point: SvVec3, speed: f32, tricks: u32, reserved: u32,
+    current: SvVec3, padding: u32,
+}
+#[repr(C)]
+pub struct SvFollowerOutput {
+    size: u32, id: u32, tick: u64, root: SvVec3, heading: f32,
+    velocity: SvVec3, bone_count: u32, board: SvBoardPose, bones: [f32;512*16],
+}
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sv_follower_start(rt: *mut c_void, slot: u32, start: *const SvFollowerStart) -> u32 {
+    guard(0,|| {
+        let Some(rt)=(unsafe {runtime(rt)}) else {return 0};
+        if slot as usize>=followers::MAX {return 0;}
+        let request=if let Some(s)=unsafe {start.as_ref()} {
+            if s.size as usize!=size_of::<SvFollowerStart>() || s.id==0 || s.entity==0 || !s.heading.is_finite() {return 0;}
+            let spawn=Vec3::new(s.spawn.x,s.spawn.y,s.spawn.z);
+            if !spawn.is_finite() {return 0;}
+            let c=&s.character;
+            if c.size as usize!=size_of::<SvCharacter>() {return 0;}
+            let Some(cache_root)=(unsafe {path_arg(c.cache_root_utf8)}) else {return 0};
+            Some(followers::Request{id:s.id,entity:s.entity,spawn,heading:s.heading,
+                character:worker::CharacterRequest {cache_root,model_hash:c.model_hash,
+                    variation:ped::Variation{drawable:c.drawable,texture:c.texture},budget:0,
+                    live_skeleton:unsafe {path_arg(c.live_skeleton_utf8)}}})
+        } else {None};
+        rt.shared.lock().unwrap().followers[slot as usize]=None;
+        rt.jobs.send(Job::Follower(slot as usize,request)).is_ok() as u32
+    })
+}
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sv_follower_goal(rt: *mut c_void, slot: u32, goal: *const SvFollowerGoal) -> u32 {
+    guard(0,|| {
+        let (Some(rt),Some(g))=(unsafe {runtime(rt)},unsafe {goal.as_ref()}) else {return 0};
+        if slot as usize>=followers::MAX || g.size as usize!=size_of::<SvFollowerGoal>() || g.id==0 || !g.speed.is_finite() {return 0;}
+        let at=Vec3::new(g.point.x,g.point.y,g.point.z);
+        let current=Vec3::new(g.current.x,g.current.y,g.current.z);
+        if !at.is_finite() || !current.is_finite() {return 0;}
+        rt.jobs.send(Job::FollowerGoal(slot as usize,followers::Goal{id:g.id,at,current,speed:g.speed.clamp(0.,15.),tricks:g.tricks!=0})).is_ok() as u32
+    })
+}
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sv_follower_output(rt: *const c_void, slot: u32, out: *mut SvFollowerOutput) -> u32 {
+    guard(0,|| {
+        let Some(rt)=(unsafe {runtime(rt)}) else {return 0};
+        if out.is_null() || slot as usize>=followers::MAX || unsafe {(*out).size as usize}!=size_of::<SvFollowerOutput>() {return 0;}
+        let shared=rt.shared.lock().unwrap();
+        let Some(s)=shared.followers[slot as usize].as_ref() else {return 0};
+        if s.bones.is_empty() || s.bones.len()>512 {return 0;}
+        unsafe {
+            ptr::write_bytes(out,0,1);
+            (*out).size=size_of::<SvFollowerOutput>() as u32; (*out).id=s.id; (*out).tick=s.tick;
+            (*out).root=v3(s.root);(*out).heading=s.heading;(*out).velocity=v3(s.velocity);
+            (*out).bone_count=s.bones.len() as u32;
+            (*out).board=SvBoardPose {size:size_of::<SvBoardPose>() as u32,bone_count:7,tick:s.tick,
+                entity:s.board_entity.to_cols_array(),world:s.board.map(|m|m.to_cols_array())};
+            for (i,m) in s.bones.iter().enumerate() {(&mut (*out).bones)[i*16..i*16+16].copy_from_slice(&m.to_cols_array());}
+        }
+        1
+    })
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sv_vehicle_exit_enter(rt: *mut c_void, spawn: *const SvVehicleExitSpawn) -> u32 {
+    guard(0, || {
+        let Some(s) = (unsafe { spawn.as_ref() }) else { return 0; };
+        if (s.spawn.size as usize) < size_of::<SvVehicleExitSpawn>() { return 0; }
+        let v = Vec3::new(s.velocity.x, s.velocity.y, s.velocity.z);
+        if !v.is_finite() { return 0; }
+        unsafe { request_activate_moving(rt, &s.spawn, false, Some(v)) }
+    })
+}
+
+unsafe fn request_activate_moving(rt: *mut c_void, spawn: *const SvSpawn, offboard: bool, velocity: Option<Vec3>) -> u32 {
     let (Some(rt), Some(s)) = (unsafe { runtime(rt) }, unsafe { spawn.as_ref() }) else {
         return 0;
     };
@@ -1437,6 +1527,7 @@ unsafe fn request_activate(rt: *mut c_void, spawn: *const SvSpawn, offboard: boo
             heading: s.heading_degrees,
             aspect: s.aspect_ratio,
             offboard,
+            velocity,
         })
         .is_ok() as u32
 }
@@ -1445,6 +1536,37 @@ unsafe fn request_activate(rt: *mut c_void, spawn: *const SvSpawn, offboard: boo
 mod lifecycle_abi_tests {
     use super::*;
     use std::mem::offset_of;
+    #[test]
+    fn follower_abi_layout_and_null_boundaries() {
+        assert_eq!(size_of::<SvFollowerStart>(),96);
+        assert_eq!(offset_of!(SvFollowerStart,character),32);
+        assert_eq!(size_of::<SvFollowerGoal>(),48);
+        assert_eq!(size_of::<SvFollowerOutput>(),33344);
+        assert_eq!(offset_of!(SvFollowerOutput,bones),576);
+        assert_eq!(unsafe {sv_follower_start(ptr::null_mut(),0,ptr::null())},0);
+        assert_eq!(unsafe {sv_follower_goal(ptr::null_mut(),4,ptr::null())},0);
+        assert_eq!(unsafe {sv_follower_output(ptr::null(),0,ptr::null_mut())},0);
+    }
+
+    #[test]
+    fn vehicle_exit_abi_and_validation() {
+        assert_eq!(size_of::<SvVehicleExitSpawn>(), 36);
+        assert_eq!(offset_of!(SvVehicleExitSpawn, velocity), 24);
+        assert_eq!(unsafe { sv_vehicle_exit_enter(ptr::null_mut(), ptr::null()) }, 0);
+        let mut spawn = SvVehicleExitSpawn {
+            spawn: SvSpawn {
+                size: 24,
+                position: SvVec3::default(),
+                heading_degrees: 0.0,
+                aspect_ratio: 1.0,
+            },
+            velocity: SvVec3::default(),
+        };
+        assert_eq!(unsafe { sv_vehicle_exit_enter(ptr::null_mut(), &spawn) }, 0);
+        spawn.spawn.size = size_of::<SvVehicleExitSpawn>() as u32;
+        spawn.velocity.x = f32::NAN;
+        assert_eq!(unsafe { sv_vehicle_exit_enter(ptr::null_mut(), &spawn) }, 0);
+    }
 
     /// Must match the static_asserts in the header's lifecycle block.
     #[test]

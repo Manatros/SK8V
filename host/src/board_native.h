@@ -10,4 +10,7 @@ bool Tick(bool skating,const SvBoardPose& pose);
 // registered resources and loaded archetype/model for the next invocation.
 void Stop();
 int Entity(); // Exclude this presentation-only entity from ExternalQueries.
+bool TickFollower(unsigned slot, const SvBoardPose& pose);
+void StopFollower(unsigned slot);
+bool IsPresentation(int entity);
 }

@@ -21,8 +21,10 @@ std::uint32_t g_ydrId=~0u,g_ytypId=~0u;
 ULONGLONG g_begin=0;
 // Bone indices of the seven board tags, for the skeleton they were read from.
 std::uintptr_t g_indexedSkeleton=0; int g_indices[7];
+struct FollowerBoard { int object=0, indices[7]{}; std::uintptr_t skeleton=0; bool reported=false; };
+FollowerBoard g_followers[4];
 void Log(const char* s){if(g_log)g_log(s);}
-bool Pose(const SvBoardPose& pose) {
+bool PoseFor(int g_object, const SvBoardPose& pose, std::uintptr_t& g_indexedSkeleton, int (&g_indices)[7], bool& g_poseReported) {
     probe::SkeletonInfo s; const char* why=nullptr;
     if(!probe::ResolvePedSkeleton(g_object,s,why)||s.count!=7){if(!g_poseReported){char line[256];std::snprintf(line,sizeof(line),"native board: skeleton unavailable (%s, bones=%d); object hidden",why?why:"expected seven bones",s.count);Log(line);g_poseReported=true;}return false;}
     if(s.skeleton!=g_indexedSkeleton) {
@@ -101,10 +103,45 @@ bool Tick(bool skating,const SvBoardPose& pose) {
     if(!gta::Call<bool>(gta::DOES_ENTITY_EXIST,g_object)){g_object=0;return false;}
     gta::Call<void>(gta::SET_ENTITY_COORDS_NO_OFFSET,g_object,pose.entity[12],pose.entity[13],pose.entity[14],false,false,false);
     gta::Call<void>(gta::SET_ENTITY_QUATERNION,g_object,quaternion.x,quaternion.y,quaternion.z,quaternion.w);
-    const bool posed=Pose(pose);
+    const bool posed=PoseFor(g_object, pose, g_indexedSkeleton, g_indices, g_poseReported);
     if(!posed&&!g_poseReported){Log("native board: invalid bone tags, parents, or matrices; object hidden");g_poseReported=true;}
     gta::Call<void>(gta::SET_ENTITY_VISIBLE,g_object,posed,false);return posed;
 }
-void Stop(){Remove();g_started=false;}
+void Stop(){for(unsigned i=0;i<4;++i)StopFollower(i);Remove();g_started=false;}
 int Entity(){return g_object;}
+void StopFollower(unsigned slot) {
+    if(slot>=4)return;
+    auto& b=g_followers[slot];
+    if(b.object&&gta::Call<bool>(gta::DOES_ENTITY_EXIST,b.object))gta::Call<void>(gta::DELETE_OBJECT,&b.object);
+    b={};
+}
+bool IsPresentation(int entity) {
+    if(entity&&entity==g_object)return true;
+    for(const auto& b:g_followers)if(entity&&entity==b.object)return true;
+    return false;
+}
+bool TickFollower(unsigned slot,const SvBoardPose& pose) {
+    if(slot>=4||!g_started||g_failed||!g_type||!gta::Call<bool>(gta::HAS_MODEL_LOADED,Model))return false;
+    if(pose.size!=sizeof(pose)||pose.bone_count!=7)return false;
+    for(const auto& bone:pose.world)for(float v:bone)if(!std::isfinite(v))return false;
+    M entity;std::memcpy(&entity,pose.entity,sizeof(entity));posemath::Q q;
+    if(!posemath::RigidQuaternion(entity,q))return false;
+    auto& b=g_followers[slot];
+    if(b.object&&!gta::Call<bool>(gta::DOES_ENTITY_EXIST,b.object))b={};
+    if(!b.object) {
+        b.object=gta::Call<int>(gta::CREATE_OBJECT_NO_OFFSET,Model,pose.entity[12],pose.entity[13],pose.entity[14],false,false,false,0);
+        if(!b.object)return false;
+        gta::Call<void>(gta::SET_ENTITY_AS_MISSION_ENTITY,b.object,true,false);
+        gta::Call<void>(gta::FREEZE_ENTITY_POSITION,b.object,true);
+        gta::Call<void>(gta::SET_ENTITY_HAS_GRAVITY,b.object,false);
+        gta::Call<void>(gta::SET_ENTITY_DYNAMIC,b.object,false);
+        gta::Call<void>(gta::SET_ENTITY_COLLISION,b.object,false,false);
+        gta::Call<void>(gta::SET_ENTITY_COMPLETELY_DISABLE_COLLISION,b.object,false,false);
+    }
+    gta::Call<void>(gta::SET_ENTITY_COORDS_NO_OFFSET,b.object,pose.entity[12],pose.entity[13],pose.entity[14],false,false,false);
+    gta::Call<void>(gta::SET_ENTITY_QUATERNION,b.object,q.x,q.y,q.z,q.w);
+    const bool shown=PoseFor(b.object,pose,b.skeleton,b.indices,b.reported);
+    gta::Call<void>(gta::SET_ENTITY_VISIBLE,b.object,shown,false);
+    return shown;
+}
 }

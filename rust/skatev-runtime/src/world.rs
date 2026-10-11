@@ -12,7 +12,26 @@ use std::path::Path;
 pub const RADIUS: f32 = 128.0;
 /// Horizontal drift from the built centre that triggers a rebuild.
 pub const RECENTRE: f32 = 64.0;
+/// Ground retained for the current marker, even after GTA unloads the area.
+pub const MARKER_RADIUS: f32 = 64.0;
+type TaggedTriangle = ([[f32; 3]; 3], u32);
 
+/// Leave an 8 m margin for the next tick, the board and the rider's body.
+/// Once the normal area covers the rider, the retained patch imposes no limit.
+pub fn marker_edge_wait(position: Vec3, marker: Vec3, loaded: Vec3) -> bool {
+    let from_marker = (position - marker).truncate().abs().max_element();
+    let from_loaded = (position - loaded).truncate().abs().max_element();
+    from_marker >= MARKER_RADIUS - 8.0 && from_loaded >= RADIUS - 16.0
+}
+
+fn include_marker(triangles: &mut Vec<TaggedTriangle>, marker: &[TaggedTriangle]) {
+    let mut seen: std::collections::HashSet<_> = triangles.iter()
+        .map(|(t, _)| t.map(|v| v.map(f32::to_bits))).collect();
+    triangles.extend(marker.iter().copied().filter(|(t, _)|
+        seen.insert(t.map(|v| v.map(f32::to_bits)))));
+}
+
+#[derive(Clone)]
 pub struct Area {
     pub center: Vec3,
     /// Skate space (Y up), counterclockwise.
@@ -47,6 +66,9 @@ pub struct StaticWorld {
     /// centre only: kept for rebuilds in place.
     sidecars_at: Option<[f32; 2]>,
     recovered_area: std::collections::HashMap<u64, svwc::surfaces::Surface>,
+    marker: Vec<TaggedTriangle>,
+    marker_center: Option<Vec3>,
+    follower_area: Option<std::sync::Arc<Area>>,
 }
 
 impl StaticWorld {
@@ -57,15 +79,38 @@ impl StaticWorld {
             recovered: crate::surfaces::Recovered::open(path),
             ground: crate::ground::GroundSource::open(path),
             live: None,
+            marker: Vec::new(),
+            marker_center: None,
+            follower_area: None,
             reuse: Default::default(),
             sidecars_at: None,
             recovered_area: Default::default(),
         }
     }
 
+    /// Copy geometry while standing at the marker. Own the data rather than
+    /// retaining GTA pointers: streamed-out bounds may be freed by the game.
+    pub fn pin_marker(&mut self, center: Vec3) -> Result<usize, String> {
+        let level = self.live.ok_or("live collision unavailable")?;
+        let (tris, _, _) = level.walk([center.x, center.y], MARKER_RADIUS)?;
+        if !tris.iter().any(|t| svwc::clean::floor_at(t, [center.x, center.y])
+            .is_some_and(|z| (z - center.z).abs() < 4.0)) {
+            return Err("marker ground not loaded yet".into());
+        }
+        let recovered = self.recovered.around([center.x, center.y], MARKER_RADIUS)?;
+        self.marker = tris.iter().map(|t| (t.v,
+            crate::surfaces::tag(t.material, recovered.get(&svwc::surfaces::key(&t.v)))))
+            .collect();
+        self.marker_center = Some(center);
+        Ok(self.marker.len())
+    }
+
     /// Where GTA's loaded collision is (None: it is not available).
     pub fn set_live(&mut self, level: Option<crate::live::Level>) {
         self.live = level;
+    }
+    pub fn follower_area(&self) -> Option<std::sync::Arc<Area>> {
+        self.follower_area.clone()
     }
 
     /// The recovered-surface sidecar's load state, for the log.
@@ -87,7 +132,16 @@ impl StaticWorld {
         let walked = read.elapsed();
         let mut note = census.to_string();
         let p = [center.x, center.y];
-        if !tris.iter().any(|t| svwc::clean::floor_at(t, p).is_some_and(|z| (z - center.z).abs() < 4.0)) {
+        let live_floor = tris.iter().any(|t| svwc::clean::floor_at(t, p).is_some_and(|z| (z - center.z).abs() < 4.0));
+        // The saved floor protects the return itself. Do not call an area
+        // ready for walking out until GTA has loaded the surrounding map.
+        if self.marker_center.is_some_and(|m|
+            (m - center).truncate().length() < MARKER_RADIUS
+            && !tris.iter().any(|t| svwc::clean::floor_at(t, [m.x, m.y])
+                .is_some_and(|z| (z - m.z).abs() < 4.0))) {
+            return Err("waiting for live ground around the session marker".into());
+        }
+        if !live_floor {
             note.push_str(&format!("; NO FLOOR under ({:.1}, {:.1}, {:.1}): {}", p[0], p[1], center.z, level.under(p).unwrap_or_else(|e| e)));
         }
         let in_place = self.sidecars_at == Some(p);
@@ -109,9 +163,11 @@ impl StaticWorld {
         }
         crate::ground_at::publish(crate::ground_at::GroundIndex::build(tris.iter().map(|t| (t.v, t.material))));
         let (read, build) = (read.elapsed(), std::time::Instant::now());
+        let mut triangles: Vec<_> = tris.iter().map(|t| (t.v, crate::surfaces::tag(t.material, recovered.get(&svwc::surfaces::key(&t.v))))).collect();
+        include_marker(&mut triangles, &self.marker);
         let mut area = build_area_reusing(
             center,
-            tris.iter().map(|t| (t.v, crate::surfaces::tag(t.material, recovered.get(&svwc::surfaces::key(&t.v))))),
+            triangles.into_iter(),
             &mut self.reuse,
         );
         if let Some(n) = area.changed {
@@ -126,6 +182,7 @@ impl StaticWorld {
         ));
         area.note = note;
         area.bounds = bounds;
+        self.follower_area = Some(std::sync::Arc::new(area.clone()));
         Ok(area)
     }
 }
@@ -363,6 +420,61 @@ pub fn worth_installing(built: Vec3, installed: Vec3, skater: Vec3) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn marker_boundary_waits_for_the_surrounding_area_then_releases() {
+        let marker = Vec3::ZERO;
+        let old_area = Vec3::new(2000., 0., 0.);
+        assert!(!marker_edge_wait(Vec3::new(55., 0., 0.), marker, old_area));
+        assert!(marker_edge_wait(Vec3::new(56., 0., 0.), marker, old_area));
+        assert!(marker_edge_wait(Vec3::new(-56., 0., 0.), marker, old_area));
+        assert!(marker_edge_wait(Vec3::new(0., 56., 0.), marker, old_area));
+        assert!(!marker_edge_wait(Vec3::new(56., 0., 0.), marker, marker));
+        assert!(!marker_edge_wait(Vec3::new(100., 0., 0.), marker, marker));
+    }
+
+    #[test]
+    fn marker_retention_matches_fresh_collision_with_upstream_build_reuse() {
+        let floor = [[-32., -32., 5.], [32., -32., 5.], [-32., 32., 5.]];
+        let far_floor = floor.map(|v| [v[0] + 2000., v[1], v[2]]);
+        let mut cache = crate::reuse::AreaCache::default();
+        for (loaded, retained) in [
+            (vec![(floor, 0)], vec![(floor, 0)]),
+            (vec![(far_floor, 0)], vec![(floor, 0)]),
+            (vec![(far_floor, 0)], vec![(floor, 0)]),
+            (vec![(floor, 7)], vec![(floor, 0)]),
+            (Vec::new(), vec![(far_floor, 0)]),
+        ] {
+            let mut triangles = loaded;
+            include_marker(&mut triangles, &retained);
+            let reused = build_area_reusing(Vec3::ZERO, triangles.iter().copied(), &mut cache);
+            let fresh = build_area_tagged(Vec3::ZERO, triangles.into_iter());
+            assert_eq!(reused.triangles, fresh.triangles);
+            assert_eq!(reused.tags, fresh.tags);
+            assert_eq!(reused.rails, fresh.rails);
+            assert!(audit(&reused).ok());
+        }
+    }
+
+    #[test]
+    fn marker_ground_survives_unloading_and_merges_without_duplicate_contacts() {
+        let floor = [[-32., -32., 5.], [32., -32., 5.], [-32., 32., 5.]];
+        let marker = vec![(floor, 0)];
+        let far_floor = floor.map(|v| [v[0] + 2000., v[1], v[2]]);
+        let mut live = vec![(far_floor, 0)];
+        include_marker(&mut live, &marker);
+        let area = build_area_tagged(Vec3::new(2000., 0., 5.), live.into_iter());
+        assert!(audit(&area).ok());
+        assert!(area.triangles.iter().any(|t| t.iter().all(|v| v[0].abs() <= 32. && v[1] == 5.)),
+            "marker floor remains in Skate collision after the live area moves 2 km away");
+        let mut reloaded = vec![(floor, 7)];
+        include_marker(&mut reloaded, &marker);
+        assert_eq!(reloaded, vec![(floor, 7)], "live material wins, with only one contact surface");
+        let replacement = vec![(far_floor, 0)];
+        let mut empty = Vec::new();
+        include_marker(&mut empty, &replacement);
+        assert_eq!(empty, replacement, "replacing the marker releases the previous patch");
+    }
 
     #[test]
     fn fast_skaters_get_their_next_area_ahead_and_in_time() {

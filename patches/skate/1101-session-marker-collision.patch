@@ -1,0 +1,27 @@
+diff --git a/crates/skate-host/src/session_marker/mod.rs b/crates/skate-host/src/session_marker/mod.rs
+--- a/crates/skate-host/src/session_marker/mod.rs
++++ b/crates/skate-host/src/session_marker/mod.rs
+@@ -32,6 +32,9 @@ pub(crate) struct SessionMarker {
+ 
+ pub(crate) struct Runtime { session: SessionMarker, validation: validation::Validation }
+ impl Runtime {
++    pub fn position(&self) -> Option<Vec3> {
++        self.session.marker.map(|m| Vec3::from_slice(&m.transform[3][..3]))
++    }
+     pub fn load(root: &std::path::Path) -> Result<Self,String> { Ok(Self{session:SessionMarker::default(),validation:validation::Validation::load(root)?}) }
+     pub fn suspend(&mut self) { self.session.hold.cancel(); self.session.blocked_until_release=true; self.session.ui_time=0.; }
+     pub fn collect_time(&mut self,dt:f64) { self.session.ui_time+=dt; }
+diff --git a/crates/skate-host/src/physics/bridge.rs b/crates/skate-host/src/physics/bridge.rs
+--- a/crates/skate-host/src/physics/bridge.rs
++++ b/crates/skate-host/src/physics/bridge.rs
+@@ -163,6 +163,10 @@ impl Session {
+         self.input = ControllerInput::default();
+         self.markers.suspend();
+     }
++    /// Saved session marker in Skate coordinates, retained while travelling.
++    pub fn session_marker_position(&self) -> Option<Vec3> {
++        self.markers.position()
++    }
+     pub fn advance(&mut self) -> Result<(), String> {
+         self.input.publish_actions();
+         self.advance_published()

@@ -63,6 +63,7 @@ struct Shared {
     Published pub;
     std::atomic<UINT> backbufferWidth{0}, backbufferHeight{0};
     std::atomic<bool> stopping{false};
+    std::atomic<unsigned> sessionEpoch{0};
 } g;
 
 template <class... A>
@@ -99,6 +100,13 @@ void Present(void* swapChainPtr) {
     g.backbufferHeight.store(scd.BufferDesc.Height);
     static hudrender::Frame frame; // render thread's copy of the publication
     static xrayrender::Frame xray;
+    static unsigned seenEpoch = 0;
+    const unsigned epoch = g.sessionEpoch.load();
+    if (epoch != seenEpoch) {
+        frame = {};
+        xray = {};
+        seenEpoch = epoch;
+    }
     {
         std::lock_guard<std::mutex> lock(g.mutex);
         Published& p = g.pub;
@@ -187,6 +195,17 @@ void Start(const std::wstring& iniPath, void* runtime, LogFn log) {
         return;
     }
     g.runtime = runtime;
+    // ScriptHookV can restart ScriptMain without unloading the ASI. The
+    // new runtime needs the viewport even if the window size did not change.
+    g.sent = {};
+    g.fetchedGeneration = 0;
+    g.wasShown = false;
+    g.xrayShown = false;
+    {
+        std::lock_guard<std::mutex> lock(g.mutex);
+        g.pub = {};
+    }
+    g.sessionEpoch.fetch_add(1);
     g.showRadio = reinterpret_cast<decltype(g.showRadio)>(GetProcAddress(module, "sv_show_radio"));
     g.getXray = IniFloat(iniPath, L"HallOfMeatXray", 1.0f) != 0.0f
                     ? reinterpret_cast<SvGetXrayFn>(GetProcAddress(module, "sv_get_xray"))

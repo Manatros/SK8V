@@ -1,0 +1,20 @@
+diff --git a/crates/skate-host/src/physics/bridge/lifecycle.rs b/crates/skate-host/src/physics/bridge/lifecycle.rs
+--- a/crates/skate-host/src/physics/bridge/lifecycle.rs
++++ b/crates/skate-host/src/physics/bridge/lifecycle.rs
+@@ -87,0 +88,16 @@
++
++impl Session {
++    /// Transfer the GTA exit velocity to every connected rider body.
++    /// Called after onboard activation, before the first visible pose.
++    pub fn set_entry_velocity(&mut self, velocity: [f32; 3]) {
++        let v = skate_core::math::Vector3::new(velocity[0], velocity[1], velocity[2]);
++        for body in self.physics.board.bodies_mut().iter_mut()
++            .chain(self.skater.skeleton.bodies_mut().iter_mut())
++        {
++            body.rates.linear_velocity = v;
++        }
++        for body in &mut self.skater.skeleton_drives.targets.bodies {
++            body.rates.linear_velocity = v;
++        }
++    }
++}

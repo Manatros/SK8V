@@ -44,6 +44,7 @@ public:
     void* Handle() const { return runtime_; } // sv_create handle (ABI 8 audio/HUD lookups)
     bool LifecycleTrack(const SvLifecycleTrack& track);
     bool LifecycleEnter(const SvSpawn& spawn);
+    bool VehicleExitEnter(const SvVehicleExitSpawn& spawn);
     bool LifecycleState(SvLifecycleState& out) const;
     bool MapStatesSet(const std::uint32_t* hashes, std::uint32_t count);
     bool SetHallOfMeat(bool enabled);
@@ -62,6 +63,9 @@ public:
     bool GroundAt(const SvVec3& point, float depth, SvGround& out) const;
     bool SetPhysicsLevel(std::uintptr_t table, std::uintptr_t imageLo, std::uintptr_t imageHi);
     bool PlayLine(const std::string& utf8Path);
+    bool FollowerStart(unsigned slot, const SvFollowerStart* start);
+    bool FollowerGoal(unsigned slot, const SvFollowerGoal& goal);
+    bool FollowerOutput(unsigned slot, SvFollowerOutput& output) const;
     std::uint32_t ApiVersion() const { return apiVersion_; }
 
 private:
@@ -89,6 +93,7 @@ private:
     SvGetBoardPoseFn getBoardPose_ = nullptr;
     SvLifecycleTrackFn lifecycleTrack_ = nullptr;
     SvLifecycleEnterFn lifecycleEnter_ = nullptr;
+    std::uint32_t(__cdecl* vehicleExitEnter_)(void*, const SvVehicleExitSpawn*) = nullptr;
     SvLifecycleGetStateFn lifecycleGetState_ = nullptr;
     SvMapStatesSetFn mapStatesSet_ = nullptr;
     SvSetHallOfMeatFn setHallOfMeat_ = nullptr;

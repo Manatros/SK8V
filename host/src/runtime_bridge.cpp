@@ -1,4 +1,21 @@
 #include "runtime_bridge.h"
+
+bool RuntimeBridge::FollowerStart(unsigned slot, const SvFollowerStart* start) {
+    using Fn=std::uint32_t(__cdecl*)(void*,unsigned,const SvFollowerStart*);
+    auto fn=module_?reinterpret_cast<Fn>(GetProcAddress(module_,"sv_follower_start")):nullptr;
+    return runtime_&&fn&&fn(runtime_,slot,start)!=0;
+}
+bool RuntimeBridge::FollowerGoal(unsigned slot, const SvFollowerGoal& goal) {
+    using Fn=std::uint32_t(__cdecl*)(void*,unsigned,const SvFollowerGoal*);
+    auto fn=module_?reinterpret_cast<Fn>(GetProcAddress(module_,"sv_follower_goal")):nullptr;
+    return runtime_&&fn&&fn(runtime_,slot,&goal)!=0;
+}
+bool RuntimeBridge::FollowerOutput(unsigned slot, SvFollowerOutput& output) const {
+    using Fn=std::uint32_t(__cdecl*)(const void*,unsigned,SvFollowerOutput*);
+    auto fn=module_?reinterpret_cast<Fn>(GetProcAddress(module_,"sv_follower_output")):nullptr;
+    output.size=sizeof(output);
+    return runtime_&&fn&&fn(runtime_,slot,&output)!=0;
+}
 #include <type_traits>
 
 bool RuntimeBridge::Load(const wchar_t* dllPath, const std::string& dataRoot, const std::string& worldCache,
@@ -38,6 +55,7 @@ bool RuntimeBridge::Load(const wchar_t* dllPath, const std::string& dataRoot, co
     sym(getBoardPose_, "sv_get_board_pose");
     sym(lifecycleTrack_, "sv_lifecycle_track");
     sym(lifecycleEnter_, "sv_lifecycle_enter");
+    sym(vehicleExitEnter_, "sv_vehicle_exit_enter");
     sym(lifecycleGetState_, "sv_lifecycle_get_state");
     sym(mapStatesSet_, "sv_map_states_set");
     sym(setHallOfMeat_, "sv_set_hall_of_meat");
@@ -85,6 +103,10 @@ bool RuntimeBridge::Load(const wchar_t* dllPath, const std::string& dataRoot, co
 void RuntimeBridge::Release() {
     if (runtime_) destroy_(runtime_);
     runtime_ = nullptr;
+}
+
+bool RuntimeBridge::VehicleExitEnter(const SvVehicleExitSpawn& spawn) {
+    return runtime_ && vehicleExitEnter_(runtime_, &spawn) != 0;
 }
 
 bool RuntimeBridge::BoardPose(SvBoardPose& out) const {

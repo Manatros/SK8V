@@ -31,6 +31,10 @@ void PublishPose(const float* bones, int count);
 void FadeOut(int ms);
 void FadeIn(int ms);
 bool FadeOutDone();
+// Independent follower skeletons; they never touch the player's pose/clip.
+bool InstallFollower(unsigned slot, std::uintptr_t entity, const probe::SkeletonInfo& skeleton);
+void PublishFollower(unsigned slot, const float* bones, int count);
+void RemoveFollower(unsigned slot);
 // Gun out on the board (gun_pose.h): over `ms` the written pose takes GTA's
 // own animated upper body (Spine1 and everything above it: the aim, the
 // weapon grip, the head) while the hips and legs stay Skate's. GTA only

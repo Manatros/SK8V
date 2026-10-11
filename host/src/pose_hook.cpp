@@ -66,6 +66,48 @@ struct PoseBuffer {
     float bones[kMaxBones * 16];
     int count = 0;
 };
+struct FollowerPose {
+    std::mutex mutex;
+    std::atomic<std::uintptr_t> entity{0}, skeleton{0};
+    std::uintptr_t originalTable = 0;
+    std::uintptr_t* copy = nullptr;
+    PoseBuffer pose{};
+};
+FollowerPose g_followers[4];
+void RawApplyFollower(FollowerPose& follower, std::uintptr_t s) {
+    if (follower.skeleton.load() != s || !s) return;
+    const auto data = *reinterpret_cast<const std::uintptr_t*>(s);
+    const auto locals = *reinterpret_cast<const std::uintptr_t*>(s + 0x10);
+    const auto objects = *reinterpret_cast<const std::uintptr_t*>(s + 0x18);
+    const int count = *reinterpret_cast<const int*>(s + 0x20);
+    if (!data || !locals || !objects || count <= 0 || count > kMaxBones || count != follower.pose.count) return;
+    const auto parents = *reinterpret_cast<const std::int16_t* const*>(data + 0x38);
+    if (!parents) return;
+    const auto object = reinterpret_cast<const posemath::M*>(follower.pose.bones);
+    for (int i = 0; i < count; ++i) {
+        posemath::M local = object[i], inverse;
+        if (i > 0 && parents[i] >= 0 && parents[i] < count && posemath::Inverse(object[parents[i]], inverse))
+            local = posemath::Compose(object[i], inverse);
+        posemath::StoreXyz(objects + 64 * i, object[i]);
+        posemath::StoreXyz(locals + 64 * i, local);
+    }
+}
+void SafeApplyFollower(FollowerPose& follower, std::uintptr_t s) {
+    __try { RawApplyFollower(follower, s); } __except(EXCEPTION_EXECUTE_HANDLER) { follower.skeleton = 0; }
+}
+void ApplyFollower(FollowerPose& follower, std::uintptr_t s) {
+    std::lock_guard<std::mutex> lock(follower.mutex);
+    SafeApplyFollower(follower,s);
+}
+bool __fastcall FollowerSlot(std::uintptr_t self, bool flag) {
+    const auto base = reinterpret_cast<std::uintptr_t>(GetModuleHandleW(nullptr));
+    const bool result = reinterpret_cast<SlotFn>(base + kSlotRva)(self, flag);
+    for (auto& follower : g_followers) if (follower.entity.load() == self) {
+        ApplyFollower(follower, follower.skeleton.load());
+        break;
+    }
+    return result;
+}
 PoseBuffer g_buffers[3];
 std::atomic<int> g_latest{-1};
 
@@ -239,6 +281,14 @@ std::uintptr_t __fastcall JobWrap(std::uintptr_t params, std::uintptr_t b, std::
         const std::uintptr_t locals = *reinterpret_cast<const std::uintptr_t*>(s + 0x10);
         if (locals && *reinterpret_cast<const std::uintptr_t*>(params + job.localsOffset) == locals) TimedApply(s, Index == 0, 1);
     }
+    if (params) for (auto& follower : g_followers) {
+        const auto sk = follower.skeleton.load();
+        if (!sk) continue;
+        std::uintptr_t locals = 0, jobLocals = 0;
+        if (probe::ReadLive(sk + 0x10, &locals, sizeof(locals)) && locals &&
+            probe::ReadLive(params + job.localsOffset, &jobLocals, sizeof(jobLocals)) && locals == jobLocals)
+            ApplyFollower(follower, sk);
+    }
     return result;
 }
 
@@ -400,6 +450,7 @@ bool Install(std::uintptr_t entity, const probe::SkeletonInfo& skeleton, void (*
 }
 
 void Uninstall(void (*log)(const char*)) {
+    for (unsigned i = 0; i < 4; ++i) RemoveFollower(i);
     g_skeleton = 0;
     g_fadeDir = 0;
     g_gunDir = -1, g_gunStart = 0, g_gunMs = 1; // no gun share left for the next session
@@ -411,6 +462,45 @@ void Uninstall(void (*log)(const char*)) {
     // The copied table stays allocated: a game thread may still be using it.
     g_entity = 0;
     log("pose hook: original ped virtual table restored");
+}
+
+bool InstallFollower(unsigned slot, std::uintptr_t entity, const probe::SkeletonInfo& sk) {
+    if (slot >= 4 || !entity || !sk.skeleton || sk.count <= 0 || sk.count > kMaxBones || !g_jobs[0].target) return false;
+    auto& f = g_followers[slot];
+    if (f.entity.load() == entity && f.skeleton.load() == sk.skeleton) return true;
+    RemoveFollower(slot);
+    std::uintptr_t table = 0, method = 0;
+    if (!probe::ReadLive(entity, &table, sizeof(table)) ||
+        !probe::ReadLive(table + kSlot * sizeof(method), &method, sizeof(method)) ||
+        method != reinterpret_cast<std::uintptr_t>(GetModuleHandleW(nullptr)) + kSlotRva) return false;
+    // Retained allocation: GTA can still be using the old table after release.
+    auto* copy = static_cast<std::uintptr_t*>(VirtualAlloc(nullptr, (kCopiedSlots + 1)*sizeof(std::uintptr_t), MEM_COMMIT|MEM_RESERVE, PAGE_READWRITE));
+    if (!copy) return false;
+    if (!probe::ReadLive(table - sizeof(std::uintptr_t), copy, (kCopiedSlots + 1)*sizeof(std::uintptr_t))) return false;
+    copy[1+kSlot] = reinterpret_cast<std::uintptr_t>(&FollowerSlot);
+    { std::lock_guard<std::mutex> lock(f.mutex); f.copy=copy; f.originalTable=table; f.pose.count=0; f.entity=entity; f.skeleton=sk.skeleton; }
+    reinterpret_cast<std::atomic<std::uintptr_t>*>(entity)->store(reinterpret_cast<std::uintptr_t>(copy+1));
+    return true;
+}
+void RemoveFollower(unsigned slot) {
+    if (slot >= 4) return;
+    auto& f = g_followers[slot];
+    const auto entity = f.entity.exchange(0);
+    f.skeleton = 0;
+    std::lock_guard<std::mutex> lock(f.mutex);
+    std::uintptr_t table = 0;
+    if (entity && probe::ReadLive(entity, &table, sizeof(table)) && f.copy && table == reinterpret_cast<std::uintptr_t>(f.copy+1))
+        reinterpret_cast<std::atomic<std::uintptr_t>*>(entity)->store(f.originalTable);
+    f.pose.count=0;
+}
+void PublishFollower(unsigned slot, const float* bones, int count) {
+    if (slot >= 4 || !bones || count <= 0 || count > kMaxBones) return;
+    auto& f = g_followers[slot];
+    std::lock_guard<std::mutex> lock(f.mutex);
+    const auto s=f.skeleton.load();
+    std::uintptr_t parent=0;
+    if (!s || !probe::ReadLive(s+0x08, &parent, sizeof(parent)) || !parent) return;
+    if (ToObjects(bones, count, parent, reinterpret_cast<posemath::M*>(f.pose.bones))) f.pose.count=count;
 }
 
 // LiveClip, script thread: this pose into the clip before GTA evaluates it

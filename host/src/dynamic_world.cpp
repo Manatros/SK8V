@@ -13,6 +13,9 @@
 #include "ped_bodies.h"
 #include "ped_speech.h"
 #include "pose_math.h"
+#include "shoulder_cat.h"
+#include "ai_followers.h"
+#include "board_native.h"
 
 namespace {
 using gta::Call;
@@ -206,6 +209,8 @@ void DynamicWorld::Gather(int self, SvVec3 center, float radius, int presentatio
         for (int i = 0; i < n; ++i) {
             const int e = scratch_[i];
             if (e == self || e == presentationEntity) continue;
+            if (aifollowers::OwnsPed(e) || boardnative::IsPresentation(e)) continue;
+            if (kind == EntityKind::Ped && e == shouldercat::state.cat) continue;
             const Vector3 p = Position(e, positionCheck_, positionLog_);
             const float d2 = Dist2(p, center);
             if (d2 <= kindRadius2) nearby.push_back({d2, e, kind});
