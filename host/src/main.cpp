@@ -453,8 +453,10 @@ SvPad ReadPadRaw() {
     // others are scanned at most once a second. The pad used is the one that
     // last pressed something, so an idle or virtual pad on a lower slot can't
     // take over the player's controller; else the lowest connected slot.
-    static DWORD s_connected = 0, s_nextScan = 0, s_active = XUSER_MAX_COUNT;
+    // s_nextScan starts at the first call's tick: from 0, a tick count past 2^31 ms (24.8 days up,
+    // Fast Startup keeps counting) never came due, so no pad was ever found (a player, 2026-10-11).
     const DWORD now = GetTickCount();
+    static DWORD s_connected = 0, s_nextScan = now, s_active = XUSER_MAX_COUNT;
     const bool scan = static_cast<LONG>(now - s_nextScan) >= 0;
     if (scan) s_nextScan = now + 1000;
     XINPUT_STATE st[XUSER_MAX_COUNT]{};
@@ -1831,7 +1833,7 @@ void BoardControls(Session& s, const Config& cfg, SvPad& pad) {
             Call<BOOL>(gta::GET_AMMO_IN_CLIP, s.ped, w, &clip);
             if (clip < clipMax) Call<BOOL>(gta::SET_AMMO_IN_CLIP, s.ped, w, std::min(clipMax, total));
         }
-        if (!s.reloadDone && clip > 0 && fireHeld && static_cast<int>(now - s.nextShot) >= 0) {
+        if (!s.reloadDone && clip > 0 && fireHeld && (!s.nextShot || static_cast<int>(now - s.nextShot) >= 0)) {
             // Target: what the reticle (screen centre) covers, from past the rider.
             const Vector3 cam = Call<Vector3>(gta::GET_GAMEPLAY_CAM_COORD);
             const Vector3 rot = Call<Vector3>(gta::GET_GAMEPLAY_CAM_ROT, 2);
@@ -1889,9 +1891,9 @@ void ReportShootings(Session& s) {
 // snowy weather (XMAS, SNOW, SNOWLIGHT, BLIZZARD), looked up once a second.
 bool Snowing(const Config& cfg) {
     if (cfg.snow != 0) return cfg.snow == 1;
-    static DWORD next = 0;
-    static bool snowing = false;
     const DWORD now = GetTickCount();
+    static DWORD next = now; // not 0: see ReadPadRaw
+    static bool snowing = false;
     if (static_cast<int>(now - next) >= 0) {
         next = now + 1000;
         auto snowy = [](Hash h) { return h == 0xAAC9C895u || h == 0xEFB6EFF6u || h == 0x23FB812Bu || h == 0x27EA2814u; };
