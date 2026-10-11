@@ -52,6 +52,9 @@ std::wstring g_logDir; // %LOCALAPPDATA%\SkateV: the game folder is usually not 
 // Every default lives here; LoadConfig (kKeys) and the menu (MenuPages) read it.
 struct Config {
     std::string dataRoot;
+    // SkateRadio: the radio station skate mode tunes to (RADIO_19_USER: Self Radio, e.g. the Skate 3
+    // soundtrack in User Music); empty leaves the radio as it is.
+    std::string skateRadio;
     std::string worldCache;
     float pedZOffset = 1.0f;  // ped origin above Skate's ground contact
     float fovScale = 1.0f;
@@ -219,6 +222,7 @@ int GestureIndex(const std::string& v) {
 
 const Key kKeys[] = {
     {"DataRoot", Store<&Config::dataRoot>},
+    {"SkateRadio", Store<&Config::skateRadio>},
     {"WorldCache", Store<&Config::worldCache>},
     {"PedZOffset", Store<&Config::pedZOffset>},
     {"CameraFovScale", Store<&Config::fovScale>},
@@ -694,6 +698,8 @@ struct Session {
     int radioTrack = 0;
     DWORD backBlockUntil = 0;  // GTA's interaction menu blocked until (main loop)
     DWORD radioDue = 0;
+    bool radioTuned = false;      // SkateRadio tried this skate mode
+    DWORD radioCheck = 0;         // when to see whether GTA took the station
     DWORD radioPoll = 0;
     DynamicWorld world;
     DWORD messageUntil = 0;
@@ -975,6 +981,7 @@ void NearMiss(Session& s, const Config& cfg, const std::vector<SvDynamicBody>& b
 // Otherwise (menu, death, runtime error, network) the ped is put where the
 // skater last was.
 void Leave(Session& s, const Config& cfg, const char* why, bool voluntary) {
+    s.radioTuned = false, s.radioCheck = 0;
     if (!SkateOwnsPlayer(s)) return;
     const bool wasSkating = s.state == LifeState::Skating;
     SetState(s, LifeState::Leaving, why);
@@ -1409,6 +1416,36 @@ void DisableSkateControls(std::uint16_t buttons, bool aiming) {
 
 // Radio while skating (GTA's mobile radio): +1 next station, -1 previous,
 // with "off" between the last and the first.
+// SkateRadio (contributed by GTAxSkate): skate mode tunes the mobile radio
+// to that station once (unless the radio is already on), and says once if
+// GTA did not take it (Self Radio plays nothing until GTA scanned User Music).
+void SkateRadio(Session& s, const Config& cfg) {
+    if (cfg.skateRadio.empty()) return;
+    const DWORD now = GetTickCount();
+    if (!s.radioTuned) {
+        s.radioTuned = true;
+        if (Call<BOOL>(gta::IS_MOBILE_PHONE_RADIO_ACTIVE)) return;
+        Call<void>(gta::SET_AUDIO_FLAG, "MobileRadioInGame", 1);
+        Call<void>(gta::SET_MOBILE_RADIO_ENABLED_DURING_GAMEPLAY, 1);
+        Call<void>(gta::SET_MOBILE_PHONE_RADIO_STATE, 1);
+        Call<void>(gta::SET_RADIO_TO_STATION_NAME, cfg.skateRadio.c_str());
+        s.radioTrack = -1;
+        s.radioDue = now + 1200;
+        s.radioCheck = now + 2500;
+        Logf("SkateV Legacy: skate radio %s", cfg.skateRadio.c_str());
+        return;
+    }
+    if (!s.radioCheck || static_cast<int>(now - s.radioCheck) < 0) return;
+    s.radioCheck = 0;
+    const char* id = Call<const char*>(gta::GET_PLAYER_RADIO_STATION_NAME);
+    if (id && cfg.skateRadio == id) return;
+    static bool told = false;
+    Logf("SkateV Legacy: GTA did not tune to %s (now %s)", cfg.skateRadio.c_str(), id ? id : "none");
+    if (!told && cfg.skateRadio == "RADIO_19_USER")
+        Notify(s, "Self Radio is empty: Settings > Audio > Self Radio Mode: Radio, then Perform Full Scan.", 8000);
+    told = true;
+}
+
 void StepRadio(Session& s, int dir) {
     const int n = Call<int>(gta::GET_NUM_UNLOCKED_RADIO_STATIONS);
     if (n <= 0) return;
@@ -2451,6 +2488,7 @@ void LifecycleFrame(Session& s, const Config& cfg, bool f6) {
             Leave(s, cfg, heldAway ? "board put away (Y held)" : "menu", true);
         } else if (!CheckDelegation(s, cfg, pad)) {
             UpdateActive(s, cfg, pad);
+            SkateRadio(s, cfg);
             // Y mounts/dismounts inside Skate. Holding Y or the menu puts the
             // board away and returns input/camera authority to GTA.
         }
@@ -2584,6 +2622,7 @@ std::vector<menu::Page> MenuPages(Session& s) {
         Number("Hold Y to put the board away", "PutAwayHoldMs", static_cast<float>(D.putAwayHoldMs), 0, 2000, 100,
                [](float v) { return v == 0.0f ? std::string("Off") : Fixed("%.0f ms")(v); }, Bound("PutAwayHoldMs")),
         Flag("Shooting on the board", "BoardAim", D.boardAim, Bound("BoardAim")),
+        Choice("Radio when skating", "SkateRadio", {"", "RADIO_19_USER"}, {"As it is", "Self Radio"}, Bound("SkateRadio")),
         Number("Camera FOV scale", "CameraFovScale", D.fovScale, 0.5f, 1.5f, 0.05f, Fixed("x%.2f"), Bound("CameraFovScale")),
         Choice("Board tracks", "BoardTracks", {"1", "0"}, {"On", "Off"}, Bound("BoardTracks")),
         Choice("Snow", "Snow", {"0", "1", "2"}, {"Auto (GTA's snow and weather)", "Always (a trainer's snow)", "Never"},
