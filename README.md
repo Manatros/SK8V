@@ -69,7 +69,7 @@ Without a controller, the keyboard and mouse play Skate. The keys are in `SkateV
 | `N` / hold `J` | Set a session marker / back to it |
 | `M` | GTA's interaction menu, also while skating |
 
-Every key can be changed in SK8V's menu (F10), page Keyboard keys: Enter, then the new key. While you skate on the keyboard, your keys are listed down the left side of the screen (`KeyboardHints=0` or the menu's Controller and HUD page hides them).
+Every key can be changed in SK8V's menu (F10), page Keyboard keys: Enter, then the new key. The page also switches the whole layout: GTAxSkate's standard (above) or Skate's controller positions (I J K L as the trick stick, Space push; no numpad needed). While you skate on the keyboard, your keys are listed down the left side of the screen (`KeyboardHints=0` or the menu's Controller and HUD page hides them).
 | `Q` | Hippie jump |
 | `T` / `Ctrl` | X / B |
 
