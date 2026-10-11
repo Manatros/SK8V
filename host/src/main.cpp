@@ -3146,7 +3146,11 @@ void ScriptMain() {
         if (!s.message.empty() && GetTickCount() < s.messageUntil) {
             Text(s.message.c_str(), 0.5f, 0.88f, 0.4f, 255, 255, 255, true);
         }
-        hudoverlay::Tick(s.state == LifeState::Skating);
+        // The cinematic camera and the filmer shoot a clean picture: no GTA HUD,
+        // radar or Skate trick display while they run.
+        const bool filming = s.state == LifeState::Skating && s.action != 0;
+        if (filming) Call<void>(gta::HIDE_HUD_AND_RADAR_THIS_FRAME);
+        hudoverlay::Tick(s.state == LifeState::Skating && !filming);
         Lap(kPartHud);
         const auto raw = static_cast<std::uint16_t>(RawPadButtons());
         if (s.board.Pressed(raw, cfg.life.menuButton)) g_menuToggle.store(true);
