@@ -64,6 +64,7 @@ struct Config {
     bool posePed = true;      // PosePed: Skate's pose on the real ped (ped vtable slot 65 wrapper)
     bool liveClip = false;    // LiveClip=1: live_clip.h (Skate's pose also through GTA's anim, the owned clip)
     bool stallSampler = false; // StallSampler=1: stall_sampler.h (stack samples of stalled script frames)
+    bool showInputs = false;   // ShowInputs=1: the keys held and the controller Skate gets, at the bottom (testing)
     // Shooting on the board, GTA drive-by layout: GunButton (XInput mask,
     // default Back, on release without LB) takes a gun out or puts it away.
     // Gun out: hold AimButton (LB) to aim, FireButton (RB) fires, right stick
@@ -235,6 +236,7 @@ const Key kKeys[] = {
     {"SwimDepth", Store<&Config::swimDepth>},
     {"LiveClip", Store<&Config::liveClip>},
     {"StallSampler", Store<&Config::stallSampler>},
+    {"ShowInputs", Store<&Config::showInputs>},
     {"BoardAim", Store<&Config::boardAim>},
     {"RadioControls", Store<&Config::radioControls>},
     {"TrickAnalyzer", Store<&Config::trickAnalyzer>},
@@ -588,6 +590,38 @@ SvPad ReadPadRaw() {
     }
     g_controller = pad.connected && !(g_keyboard && s_keyboardInUse);
     return pad;
+}
+
+// ShowInputs: the keys held on the keyboard and the controller frame Skate
+// gets this frame, at the bottom of the screen, so a recording shows what
+// was pressed and how the game answered.
+void DrawInputs(const SvPad& pad) {
+    std::string keys;
+    char name[32];
+    for (int vk = 0x08; vk <= 0xFE; ++vk) {
+        if (vk == VK_SHIFT || vk == VK_CONTROL || vk == VK_MENU) continue; // their left/right keys say it
+        if (!(GetAsyncKeyState(vk) & 0x8000)) continue;
+        const char* n = vk == VK_LBUTTON ? "LMB" : vk == VK_RBUTTON ? "RMB" : vk == VK_MBUTTON ? "MMB" : nullptr;
+        if (!n) {
+            LONG scan = static_cast<LONG>(MapVirtualKeyA(static_cast<UINT>(vk), MAPVK_VK_TO_VSC)) << 16;
+            if (vk == VK_LEFT || vk == VK_RIGHT || vk == VK_UP || vk == VK_DOWN || vk == VK_RCONTROL || vk == VK_RMENU)
+                scan |= 1 << 24; // extended keys (arrows, right Ctrl/Alt) named as such
+            if (!GetKeyNameTextA(scan, name, sizeof(name))) std::snprintf(name, sizeof(name), "0x%02X", vk);
+            n = name;
+        }
+        keys += keys.empty() ? "" : " ";
+        keys += n;
+    }
+    static const char* const kButtons[16] = {"Up", "Down", "Left", "Right", "Start", "Back", "LS", "RS",
+                                              "LB", "RB", "", "", "A", "B", "X", "Y"};
+    std::string buttons;
+    for (int b = 0; b < 16; ++b)
+        if ((pad.buttons >> b & 1) && *kButtons[b]) buttons += std::string(buttons.empty() ? "" : " ") + kButtons[b];
+    char line[512];
+    std::snprintf(line, sizeof(line), "keys: %s   |   pad: L %+.2f %+.2f  R %+.2f %+.2f  LT %d RT %d  %s",
+                  keys.empty() ? "-" : keys.c_str(), pad.left_x / 32767.0f, pad.left_y / 32767.0f, pad.right_x / 32767.0f,
+                  pad.right_y / 32767.0f, pad.left_trigger, pad.right_trigger, buttons.c_str());
+    Text(line, 0.5f, 0.955f, 0.32f, 255, 255, 255, true);
 }
 
 // Skate and the lifecycle see a neutral pad while the settings menu is open.
@@ -2518,6 +2552,7 @@ void LifecycleFrame(Session& s, const Config& cfg, bool f6) {
     }
     case LifeState::Skating: {
         SvPad pad = ReadPad(); // once per frame
+        if (cfg.showInputs) DrawInputs(pad);
         // Keyboard: F puts the board away in one press, as Y held does: Skate
         // steps off first, then the board goes away. Read from the key itself
         // (GTA's enter/exit is the pad's Y, whose tap mounts and dismounts).
@@ -2788,6 +2823,7 @@ std::vector<menu::Page> MenuPages(Session& s) {
     }});
 
     pages.push_back({"Dev", {
+        Choice("Show inputs on screen (keys and pad)", "ShowInputs", {"0", "1"}, {"Off", "On"}, Bound("ShowInputs")),
         Action("Play showcase line", [] { g_lineRequested.store(true); }),
         Action("Next showcase line", [] { g_lineNext.store(true); }),
         Action("Sound list overlay", [] { g_soundListToggle.store(true); }),
