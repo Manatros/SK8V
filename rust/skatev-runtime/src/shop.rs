@@ -109,16 +109,16 @@ pub enum Kind {
 }
 
 impl Kind {
-    /// A skate shop's street price range in dollars (a mid-range store): a
-    /// deck 55-80, a pair of trucks 45-70, a set of wheels 30-45, a sheet of
-    /// griptape 10-15, a sticker 5, a truck part painted 20-30. Real prices'
-    /// proportions, in whole $5 steps.
+    /// A skate shop's street price range in dollars (a mid-range store),
+    /// cheap brand to pro model: a deck 45-95, a pair of trucks 40-90, a set
+    /// of wheels 25-60, a sheet of griptape 10-20, a sticker 5, a truck part
+    /// painted 20-30. Real prices' proportions, in whole $5 steps.
     fn range(self) -> (u32, u32) {
         match self {
-            Kind::Deck => (55, 80),
-            Kind::Trucks => (45, 70),
-            Kind::Wheels => (30, 45),
-            Kind::Grip => (10, 15),
+            Kind::Deck => (45, 95),
+            Kind::Trucks => (40, 90),
+            Kind::Wheels => (25, 60),
+            Kind::Grip => (10, 20),
             Kind::Sticker => (5, 5),
             Kind::Paint => (20, 30),
         }
@@ -1104,10 +1104,10 @@ mod tests {
         for tier in [Tier::Low, Tier::Mid] {
             for section in stock(&library, tier).into_iter().skip(1) {
                 for offer in section.offers {
-                    // Street prices: nothing over a deck's 80, nothing under a sticker's 5.
-                    assert!((5..=80).contains(&offer.price) && offer.price % 5 == 0, "{tier:?} {} {}", offer.title, offer.price);
+                    // Street prices: nothing over a deck's 95, nothing under a sticker's 5.
+                    assert!((5..=95).contains(&offer.price) && offer.price % 5 == 0, "{tier:?} {} {}", offer.title, offer.price);
                     if section.title == "Build: Griptape" {
-                        assert!(offer.price <= 15, "griptape {}", offer.price);
+                        assert!(offer.price <= 20, "griptape {}", offer.price);
                     }
                 }
             }
