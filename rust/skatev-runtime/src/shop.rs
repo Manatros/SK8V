@@ -729,18 +729,24 @@ pub fn wall_behind(clerk: bevy_math::Vec3, forward: bevy_math::Vec3, mut probe: 
     Some((hit, normal))
 }
 
-/// Boards hung behind the till: two on either side of the clerk (the
-/// middle left free for them), their tails at `floor` + 1 m (above the
-/// counter), graphic out, in the board models' frame.
+/// Boards hung behind the till like a skate shop's wall rack: lying
+/// level, length along the wall, graphic out, two rows of two either side
+/// of the clerk (the middle left free for them), high enough (2.0 and 2.4 m
+/// over the floor) to hang above the shelves on that wall. In the board
+/// models' frame (length along Z from the grip, the deck facing -X).
 pub fn till_places(at: bevy_math::Vec3, normal: bevy_math::Vec3, floor: f32) -> Vec<bevy_math::Mat4> {
     use bevy_math::{Mat3, Mat4, Vec3};
     let along = Vec3::Z.cross(normal).normalize();
-    let turn = Mat3::from_cols(normal, Vec3::Z.cross(normal), Vec3::Z);
-    [-1.0f32, -0.62, 0.62, 1.0]
+    // X (the graphic's side) out of the wall, Z along it, Y down: a rotation.
+    let turn = Mat3::from_cols(normal, along.cross(normal), along);
+    // The model runs from 0.1 m behind the grip to about 0.7 m ahead of it:
+    // its middle 0.3 m from the origin.
+    const MIDDLE: f32 = 0.3;
+    [(-0.8f32, 2.0f32), (0.8, 2.0), (-0.8, 2.4), (0.8, 2.4)]
         .iter()
-        .map(|offset| {
-            let base = Vec3::new(at.x, at.y, floor + 1.1) + along * *offset + normal * 0.08;
-            Mat4::from_translation(base) * Mat4::from_mat3(turn)
+        .map(|(offset, height)| {
+            let middle = Vec3::new(at.x, at.y, floor + height) + along * *offset + normal * 0.1;
+            Mat4::from_translation(middle - along * MIDDLE) * Mat4::from_mat3(turn)
         })
         .collect()
 }
@@ -920,8 +926,11 @@ mod tests {
         assert!((at.y + 0.8).abs() < 1e-4 && normal.y > 0.99, "{at} {normal}");
         let places = super::till_places(at, normal, 0.);
         assert_eq!(places.len(), 4);
-        assert!(places.iter().all(|m| m.w_axis.x.abs() > 0.5), "the middle stays free for the clerk");
-        assert!(places.iter().all(|m| (m.w_axis.z - 1.1).abs() < 1e-4 && m.x_axis.y > 0.99), "above the counter, graphic out");
+        // Each board's middle (0.3 m along it from the origin) clear of the clerk.
+        assert!(places.iter().all(|m| (m.w_axis.x + m.z_axis.x * 0.3).abs() > 0.5), "the middle stays free for the clerk");
+        assert!(places.iter().all(|m| m.w_axis.z >= 1.99 && m.x_axis.y > 0.99), "high on the wall, graphic out");
+        assert!(places.iter().all(|m| m.z_axis.z.abs() < 1e-4), "lying level along the wall");
+        assert!(places.iter().all(|m| (m.determinant() - 1.).abs() < 1e-4), "a rotation, not a mirror");
         // No wall behind: none.
         assert!(super::wall_behind(Vec3::new(0., 0., 1.), Vec3::Y, |_, _| None).is_none());
     }
