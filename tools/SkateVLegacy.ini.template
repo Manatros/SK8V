@@ -19,6 +19,8 @@ TrickAnalyzer=1
 CameraView=Skate
 ; CameraRemember: 1 = skating starts in the view last used (walking and skating keep the same distance), 0 = always CameraView.
 CameraRemember=1
+; CameraFocus: what near, middle and far follow: Skater or Board.
+CameraFocus=Skater
 ; The cinematic camera's and the skate filmer's look (R): a GTA timecycle modifier each ("none" for none) and its strength.
 CinemaFilter=NG_filmic01
 FilmerFilter=NG_filmic06

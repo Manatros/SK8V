@@ -99,7 +99,8 @@ struct Config {
     std::string cinemaFilter = "NG_filmic01"; // CinemaFilter: GTA timecycle look of the cinematic camera ("" = none)
     std::string filmerFilter = "NG_filmic06"; // FilmerFilter: the skate filmer's look
     float filmFilterStrength = 0.85f;         // FilmFilterStrength
-    bool cameraRemember = true; // CameraRemember: skating starts in the view last used (walking or skating)
+    bool cameraRemember = true;
+    bool cameraOnBoard = false; // CameraFocus=Board: near/middle/far follow the board, else the skater // CameraRemember: skating starts in the view last used (walking or skating)
     int gestures[4] = {23, 7, 24, 22}; // EmoteUp/Down/Left/Right: d-pad gesture per direction (kGestures index, -1 None)
     int posture = 0;               // Posture=Normal|Stiff|Slouch|Buff: Skate 3's riding posture (kPostures index)
     int ridingStyle = 0;           // RidingStyle=Default|Loose|Gonzo|Aggressive: Skate 3's riding animations (kRidingStyles index)
@@ -265,6 +266,7 @@ const Key kKeys[] = {
      }},
     {"Camera", [](Config& c, const std::string& v) { c.cameraType = menu::SameText(v, "Low") ? 0 : 1; }},
     {"CameraRemember", Store<&Config::cameraRemember>},
+    {"CameraFocus", [](Config& c, const std::string& v) { c.cameraOnBoard = menu::SameText(v, "Board"); }},
     {"CinemaFilter", [](Config& c, const std::string& v) { c.cinemaFilter = menu::SameText(v, "none") ? "" : v; }},
     {"FilmerFilter", [](Config& c, const std::string& v) { c.filmerFilter = menu::SameText(v, "none") ? "" : v; }},
     {"FilmFilterStrength", Store<&Config::filmFilterStrength>},
@@ -2080,7 +2082,11 @@ void OrbitCamera(Session& s, const SvOutput& o, const Config& cfg) {
     static ULONGLONG lastLook = 0, lastFrame = 0;
     const ULONGLONG now = GetTickCount64();
     const float dt = std::clamp(Call<float>(gta::GET_FRAME_TIME), 0.001f, 0.1f);
-    const float board[3] = {o.board_position.x, o.board_position.y, o.board_position.z + 1.15f};
+    // The skater (their body, smoothed) or the board (CameraFocus): either way
+    // the smoothing below keeps flips and grabs from swinging the camera.
+    const SvVec3 f = cfg.cameraOnBoard ? o.board_position : o.skater_position;
+    const float lift = cfg.cameraOnBoard ? 1.15f : 0.45f; // to chest height above the board / the skater's middle
+    const float board[3] = {f.x, f.y, f.z + lift};
     auto ease = [&](float rate) { return 1.0f - std::exp(-rate * dt); };
     auto wrap = [](float a) { return std::fmod(a + 540.0f, 360.0f) - 180.0f; };
     const float speed = std::hypot(o.velocity.x, o.velocity.y);
@@ -2925,6 +2931,7 @@ std::vector<menu::Page> MenuPages(Session& s) {
     // in (V cycles them while skating; R on the keyboard: cinematic camera,
     // skate filmer), Skate 3's camera height, the field of view.
     pages.push_back({"Camera", {
+        Choice("Camera follows", "CameraFocus", {"Skater", "Board"}, {"The skater", "The board"}, Bound("CameraFocus")),
         Choice("Keep the view (walking and skating)", "CameraRemember", {"1", "0"},
                {"On: the view last used", "Off: always the standard view"}, Bound("CameraRemember")),
         Choice("Standard view (V cycles)", "CameraView", {"Skate", "Near", "Middle", "Far", "FirstPerson", "Head"},
