@@ -2677,8 +2677,6 @@ std::vector<menu::Page> MenuPages(Session& s) {
         Choice("Board tracks", "BoardTracks", {"1", "0"}, {"On", "Off"}, Bound("BoardTracks")),
         Choice("Snow", "Snow", {"0", "1", "2"}, {"Auto (GTA's snow and weather)", "Always (a trainer's snow)", "Never"},
                Bound("Snow")),
-        Choice("Camera view at the start (V cycles)", "CameraView", {"Skate", "Near", "Middle", "Far", "FirstPerson"},
-               {"Skate 3", "GTA near", "GTA middle", "GTA far", "GTA first person"}, Bound("CameraView")),
     }});
 
     pages.push_back({"Hall of Meat and records", {
@@ -2726,6 +2724,17 @@ std::vector<menu::Page> MenuPages(Session& s) {
                [](const std::string& v) { gtaaudio::SetGainDb(static_cast<float>(std::atof(v.c_str()))); }),
         Number("Master gain", "AudioMasterGain", 1, 0, 2, 0.1f, Fixed("x%.1f"), {}, true),
         Choice("Output", "AudioOutput", {"Gta", "Off"}, {"GTA mixer", "Off"}, {}, true),
+    }});
+
+    // Cameras in one place (contributed by GTAxSkate): the view skating starts
+    // in (V cycles them while skating; R on the keyboard: cinematic camera,
+    // skate filmer), Skate 3's camera height, the field of view.
+    pages.push_back({"Camera", {
+        Choice("View at the start (V cycles)", "CameraView", {"Skate", "Near", "Middle", "Far", "FirstPerson"},
+               {"Skate 3", "GTA near", "GTA middle", "GTA far", "GTA first person"}, Bound("CameraView")),
+        Choice("Skate 3 camera", "Camera", {"High", "Low"}, {"High (Skate 3 default)", "Low"},
+               Bound("Camera", [] { g_runtime.SetCameraType(g_config.cameraType); })),
+        Number("Field of view scale", "CameraFovScale", D.fovScale, 0.5f, 1.5f, 0.05f, Fixed("x%.2f"), Bound("CameraFovScale")),
     }});
 
     pages.push_back({"Controller and HUD", {
