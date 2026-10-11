@@ -224,11 +224,29 @@ void Turn(int axis, float angle) {
     }
 }
 
+float g_zoom = 1.6f; // the preview's distance from the camera (mouse wheel)
+
 void ShowPreview() {
     if (Call<BOOL>(IS_DISABLED_CONTROL_PRESSED, 0, 24)) {
         Turn(2, Call<float>(GET_DISABLED_CONTROL_NORMAL, 0, 1) * 4.0f);
         Turn(0, Call<float>(GET_DISABLED_CONTROL_NORMAL, 0, 2) * 4.0f);
     }
+    // Keyboard: A/D turn it round, W/S tip it; a controller's right stick does both.
+    const float dt = Call<float>(GET_FRAME_TIME), step = 2.2f * (dt > 0.1f ? 0.1f : dt);
+    auto down = [](int vk) { return (GetAsyncKeyState(vk) & 0x8000) != 0; };
+    if (down('A')) Turn(2, -step);
+    if (down('D')) Turn(2, step);
+    if (down('W')) Turn(0, -step);
+    if (down('S')) Turn(0, step);
+    if (!Call<BOOL>(IS_USING_KEYBOARD_AND_MOUSE, 0)) {
+        Turn(2, Call<float>(GET_DISABLED_CONTROL_NORMAL, 0, 220) * step * 1.5f); // INPUT_SCRIPT_RIGHT_AXIS_X
+        Turn(0, Call<float>(GET_DISABLED_CONTROL_NORMAL, 0, 221) * step * 1.5f);
+    }
+    // Mouse wheel (or the triggers): nearer or farther.
+    if (Call<BOOL>(IS_DISABLED_CONTROL_JUST_PRESSED, 0, 241)) g_zoom -= 0.15f;  // INPUT_CURSOR_SCROLL_UP
+    if (Call<BOOL>(IS_DISABLED_CONTROL_JUST_PRESSED, 0, 242)) g_zoom += 0.15f;  // INPUT_CURSOR_SCROLL_DOWN
+    g_zoom += (Call<float>(GET_DISABLED_CONTROL_NORMAL, 0, 229) - Call<float>(GET_DISABLED_CONTROL_NORMAL, 0, 228)) * dt; // RT / LT
+    g_zoom = g_zoom < 0.7f ? 0.7f : g_zoom > 3.0f ? 3.0f : g_zoom;
     const Vector3 cam = Call<Vector3>(GET_GAMEPLAY_CAM_COORD);
     const Vector3 rot = Call<Vector3>(GET_GAMEPLAY_CAM_ROT, 2);
     const float yaw = rot.z * 0.017453292f, pitch = rot.x * 0.017453292f;
@@ -240,10 +258,11 @@ void ShowPreview() {
         for (int i = 0; i < 3; ++i) at[r * 4 + i] = g_orient[r][0] * right[i] + g_orient[r][1] * forward[i] + g_orient[r][2] * up[i];
         at[r * 4 + 3] = 0.0f;
     }
-    // 1.6 m ahead and 0.5 m right of the camera, a little below its line.
-    at[12] = cam.x + fx * 1.6f + rx * 0.5f;
-    at[13] = cam.y + fy * 1.6f + ry * 0.5f;
-    at[14] = cam.z + fz * 1.6f - 0.2f;
+    // g_zoom m ahead (1.6 at first) and a little right of the camera, a little below its line.
+    const float side = 0.5f * g_zoom / 1.6f;
+    at[12] = cam.x + fx * g_zoom + rx * side;
+    at[13] = cam.y + fy * g_zoom + ry * side;
+    at[14] = cam.z + fz * g_zoom - 0.2f * g_zoom / 1.6f;
     at[15] = 1.0f;
     SvBoardPose pose{};
     if (g_rt->ShopRestPose(at, pose)) boardparts::Preview(Split(g_rt->ShopText(g_partView ? 5 : 2), ','), pose);
@@ -301,7 +320,7 @@ void Menu(int ped) {
         rows.push_back(row);
     }
     menu::DrawPanel("Boards", head.empty() ? "" : head[0], head.size() > 1 ? head[1] : "", rows,
-                    lines[1] + (g_partView ? "  Tab: whole board" : "  Tab: the part alone") + "  Left mouse button + mouse: turn it");
+                    lines[1] + (g_partView ? "  Tab: whole board" : "  Tab: the part alone") + "  Turn: hold left mouse + move, or W A S D  Zoom: mouse wheel");
     ShowPreview();
 }
 
