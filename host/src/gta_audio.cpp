@@ -207,6 +207,14 @@ DWORD WINAPI FeederMain(void*) {
             // remain on the script thread; this watchdog uses host time only.
             if (g_setPaused && g_rt && g_runtimeAudio) g_setPaused(g_rt, paused ? 1u : 0u);
             for (Slot& s : g_slots) RingSilence(s.ring.load(std::memory_order_acquire));
+            // A player's Skate sound died after pausing (2026-10-11): each edge, why, and what was live.
+            static int edges = 0;
+            if (++edges <= 200) {
+                const bool menu = g_pauseRequested.load();
+                Logf("gta audio: Skate sound %s (%s); streams live: board %d body %d speed %d", paused ? "paused" : "resumed",
+                     paused ? (menu ? "GTA menu" : "no script frame for 250 ms") : "playing", g_slots[0].ring.load() != nullptr,
+                     g_slots[1].ring.load() != nullptr, g_slots[2].ring.load() != nullptr);
+            }
         }
         if (g_runtimeAudio) {
             SvAudioEmitter infos[kSlots]{};

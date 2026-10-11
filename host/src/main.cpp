@@ -403,6 +403,50 @@ void DrawHud(const SvOutput& o, const SvScoreState& s, bool debug) {
     }
 }
 
+// GTA's own XInputGetState: the IAT slot of its XINPUT1_4 ordinal 2 import. A hook on what
+// GTA calls (Steam Input, a pad wrapper) can leave this ASI's import blind: a player's Xbox pad
+// moved GTA's player while SK8V found no controller on any slot (2026-10-11).
+using XInputGetStateFn = DWORD(WINAPI*)(DWORD, XINPUT_STATE*);
+XInputGetStateFn FindGtaXInputGetState() {
+    __try {
+        auto* base = reinterpret_cast<std::uint8_t*>(GetModuleHandleW(nullptr));
+        const auto* nt = reinterpret_cast<const IMAGE_NT_HEADERS64*>(base + reinterpret_cast<const IMAGE_DOS_HEADER*>(base)->e_lfanew);
+        const IMAGE_DATA_DIRECTORY& dir = nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT];
+        if (!dir.VirtualAddress) return nullptr;
+        for (auto* d = reinterpret_cast<const IMAGE_IMPORT_DESCRIPTOR*>(base + dir.VirtualAddress); d->Name; ++d) {
+            if (_stricmp(reinterpret_cast<const char*>(base + d->Name), "XINPUT1_4.dll") != 0) continue;
+            const auto* names = reinterpret_cast<const IMAGE_THUNK_DATA64*>(base + d->OriginalFirstThunk);
+            const auto* slots = reinterpret_cast<const IMAGE_THUNK_DATA64*>(base + d->FirstThunk);
+            for (; names->u1.Ordinal; ++names, ++slots)
+                if (IMAGE_SNAP_BY_ORDINAL64(names->u1.Ordinal) && IMAGE_ORDINAL64(names->u1.Ordinal) == 2)
+                    return reinterpret_cast<XInputGetStateFn>(slots->u1.Function);
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+    }
+    return nullptr;
+}
+
+XInputGetStateFn PadGetState() {
+    static const XInputGetStateFn fn = [] {
+        const XInputGetStateFn gta = FindGtaXInputGetState();
+        HMODULE module = nullptr;
+        wchar_t name[MAX_PATH] = L"?";
+        if (gta && GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                                      reinterpret_cast<LPCWSTR>(gta), &module))
+            GetModuleFileNameW(module, name, MAX_PATH);
+        const wchar_t* shortName = wcsrchr(name, L'\\') ? wcsrchr(name, L'\\') + 1 : name;
+        // &XInputGetState is this ASI's import stub; the export is what an unhooked import holds.
+        const HMODULE xinput = GetModuleHandleW(L"XINPUT1_4.dll");
+        const auto exported = xinput ? reinterpret_cast<void*>(GetProcAddress(xinput, "XInputGetState")) : nullptr;
+        Logf("SkateV Legacy: pads read through GTA's XInputGetState %p in %s (%s; XINPUT1_4's export %p)",
+             reinterpret_cast<void*>(gta), util::Narrow(shortName).c_str(),
+             !gta ? "not found, this ASI's import used" : reinterpret_cast<void*>(gta) == exported ? "not hooked" : "hooked",
+             exported);
+        return gta ? gta : &XInputGetState;
+    }();
+    return fn;
+}
+
 SvPad ReadPadRaw() {
     // Polled every frame in and out of skate mode (board action). XInput is
     // slow on empty slots, so connected slots are read each frame and the
@@ -417,7 +461,7 @@ SvPad ReadPadRaw() {
     DWORD pressing = XUSER_MAX_COUNT;
     for (DWORD i = 0; i < XUSER_MAX_COUNT; ++i) {
         if (!scan && !(s_connected & (1u << i))) continue;
-        if (XInputGetState(i, &st[i]) != ERROR_SUCCESS) {
+        if (PadGetState()(i, &st[i]) != ERROR_SUCCESS) {
             s_connected &= ~(1u << i);
             continue;
         }
@@ -1138,6 +1182,15 @@ void TryEnter(Session& s, const Config& cfg, bool strict) {
     // Skate reads only the controller (no keyboard): without one the player
     // would be held with nothing to move them.
     if (!ReadPadRaw().connected) {
+        static bool logged = false;
+        if (!logged) {
+            logged = true;
+            XINPUT_STATE st{};
+            DWORD codes[2][XUSER_MAX_COUNT]{};
+            for (DWORD i = 0; i < XUSER_MAX_COUNT; ++i) codes[0][i] = PadGetState()(i, &st), codes[1][i] = XInputGetState(i, &st);
+            Logf("SkateV Legacy: no controller: XInputGetState slots 0-3 return %lu %lu %lu %lu (this ASI's import %lu %lu %lu %lu)",
+                 codes[0][0], codes[0][1], codes[0][2], codes[0][3], codes[1][0], codes[1][1], codes[1][2], codes[1][3]);
+        }
         Notify(s, "SK8V needs a controller (Xbox or PlayStation); none is connected", 5000);
         SetState(s, LifeState::Ready, "no controller");
         return;
