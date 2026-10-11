@@ -9,6 +9,7 @@
 #include <cctype>
 #include <atomic>
 #include <cmath>
+#include <cstring>
 #include <cstdio>
 #include <string>
 #include <vector>
@@ -102,6 +103,7 @@ struct Config {
     // PushPower, Braking, Steering, Wobble, OffboardJump, Grip, TurnPower, ManualDrag.
     float trainer[11] = {1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1};
     bool holdFakie = false;        // HoldFakie: rolling fakie stays fakie
+    bool stamina = true;           // Stamina: GTA's stamina skill weakens push and pop when low; skating trains it
     int skaterTriangles = 3000;
     bool dynamicWorld = true;
     float dynamicRadius = 35.0f;
@@ -289,6 +291,7 @@ const Key kKeys[] = {
     {"TurnPower", [](Config& c, const std::string& v) { Parse(v, c.trainer[9]); }},
     {"ManualDrag", [](Config& c, const std::string& v) { Parse(v, c.trainer[10]); }},
     {"HoldFakie", Store<&Config::holdFakie>},
+    {"Stamina", Store<&Config::stamina>},
     {"SkitchStandoff", Store<&Config::skitchStandoff>},
     {"SkaterTriangles", Store<&Config::skaterTriangles>},
     {"DynamicWorld", Store<&Config::dynamicWorld>},
@@ -2530,7 +2533,56 @@ menu::Apply Bound(const char* key, std::function<void()> then = {}) {
 }
 
 // The trainer multipliers and hold-fakie to the runtime (overlay patch 0048).
-void ApplyTrainer() { g_runtime.SetTrainer(g_config.trainer, g_config.holdFakie); }
+// GTA's stamina skill (0..100) as leg strength: 85 % with none, all with
+// full, on pop, push speed, push power and the jump on foot.
+float g_strength = 1.0f;
+
+void ApplyTrainer() {
+    float tuning[11];
+    std::memcpy(tuning, g_config.trainer, sizeof(tuning));
+    for (int i : {0, 2, 3, 7}) tuning[i] *= g_strength;
+    g_runtime.SetTrainer(tuning, g_config.holdFakie);
+}
+
+// Stamina (contributed by GTAxSkate): every 2 s the character's stamina
+// stat sets the leg strength; a minute skated at 3 m/s or more trains one
+// point, as sprinting does.
+void StaminaTick(bool skating, const SvOutput& last) {
+    static DWORD s_check = 0, s_last = GetTickCount();
+    static float s_trained = 0.0f;
+    const DWORD now = GetTickCount();
+    const float dt = std::min(0.25f, static_cast<float>(now - s_last) / 1000.0f);
+    s_last = now;
+    if (!g_config.stamina) {
+        if (g_strength != 1.0f) g_strength = 1.0f, ApplyTrainer();
+        return;
+    }
+    const std::uint32_t model = Call<std::uint32_t>(gta::GET_ENTITY_MODEL, Call<int>(gta::PLAYER_PED_ID));
+    const char* stat = model == util::Joaat("player_zero") ? "SP0_STAMINA"
+                       : model == util::Joaat("player_one") ? "SP1_STAMINA"
+                       : model == util::Joaat("player_two") ? "SP2_STAMINA" : nullptr;
+    if (!stat) return;
+    const std::uint32_t hash = util::Joaat(stat);
+    const float speed = std::sqrt(last.velocity.x * last.velocity.x + last.velocity.y * last.velocity.y);
+    if (skating && speed >= 3.0f && (s_trained += dt) >= 60.0f) {
+        s_trained -= 60.0f;
+        int value = 0;
+        if (Call<BOOL>(gta::STAT_GET_INT, hash, &value, -1) && value < 100) {
+            Call<BOOL>(gta::STAT_SET_INT, hash, value + 1, true);
+            Logf("SkateV Legacy: skating trained stamina to %d", value + 1);
+        }
+    }
+    if (static_cast<LONG>(now - s_check) < 0) return;
+    s_check = now + 2000;
+    int value = 100;
+    if (!Call<BOOL>(gta::STAT_GET_INT, hash, &value, -1)) return;
+    const float strength = 0.85f + 0.15f * static_cast<float>(std::clamp(value, 0, 100)) / 100.0f;
+    if (std::fabs(strength - g_strength) > 0.005f) {
+        g_strength = strength;
+        ApplyTrainer();
+        Logf("SkateV Legacy: stamina %d: push and pop at %.0f %%", value, strength * 100.0f);
+    }
+}
 
 void ApplyQuirk() {
     const Config& c = g_config;
@@ -2603,6 +2655,7 @@ std::vector<menu::Page> MenuPages(Session& s) {
         Number("Turn power", "TurnPower", 1, 0.5f, 3, 0.05f, Fixed("%.2fx"), Bound("TurnPower", [] { ApplyTrainer(); })),
         Number("Manual drag", "ManualDrag", 1, 0.1f, 3, 0.05f, Fixed("%.2fx"), Bound("ManualDrag", [] { ApplyTrainer(); })),
         Flag("Hold fakie", "HoldFakie", false, Bound("HoldFakie", [] { ApplyTrainer(); })),
+        Flag("Stamina (GTA skill) sets push and pop", "Stamina", true, Bound("Stamina")),
         Flag("Ramp lip rule", "LipRule", D.lipRule, Bound("LipRule", [] { g_runtime.SetLipRule(g_config.lipRule); })),
         Number("Air time limit", "AirTimeLimit", D.airTimeLimit, -1, 120, 5, LimitText,
                Bound("AirTimeLimit", [] { g_runtime.SetAirLimit(g_config.airTimeLimit); })),
@@ -2894,6 +2947,7 @@ void ScriptMain() {
         Lap(kPartRecords);
         gtaaudio::Tick(s.state == LifeState::Skating);
         Lap(kPartAudio);
+        StaminaTick(s.state == LifeState::Skating, s.last);
         physlevel::Tick();
         Lap(kPartLevel);
         monitor.Work(monitor.Now() - workStart);
