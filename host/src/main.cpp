@@ -2886,6 +2886,8 @@ void ScriptMain() {
         Lap(kPartAudio);
         if (s.state != LifeState::Skating) boardnative::Tick(false, SvBoardPose{}), boardparts::Tick(false, SvBoardPose{});
         // The shop opens on foot: in GTA, or walking in Skate mode (not on the board).
+        if (s.state == LifeState::Skating)
+            boardshop::Riding(s.last.state_utf8, std::sqrt(s.last.velocity.x * s.last.velocity.x + s.last.velocity.y * s.last.velocity.y));
         boardshop::Tick(SkateOwnsPlayer(s) && !(s.state == LifeState::Skating &&
                                                 std::string_view(s.last.state_utf8).rfind("Biped", 0) == 0));
         physlevel::Tick();

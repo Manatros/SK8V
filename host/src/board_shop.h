@@ -18,6 +18,10 @@ bool Start(RuntimeBridge& runtime, const std::string& dataRoot, const std::strin
 // Once per script frame. `busy`: on the board or getting on or off (no store then).
 void Tick(bool busy);
 
+// A frame of skating (Skate's state, speed in m/s): the ridden board wears;
+// a part worn through shows Skate 3's worn finish of it.
+void Riding(const char* state, float speed);
+
 // The store's menu is open (other menus and Skate's input stay out).
 bool IsOpen();
 

@@ -696,6 +696,8 @@ using SvShopInputFn = std::uint32_t(__cdecl*)(void*, std::uint32_t input, std::i
 using SvShopTextFn = std::uint32_t(__cdecl*)(void*, std::uint32_t which, char* buf, std::uint32_t cap);
 using SvShopRestPoseFn = std::uint32_t(__cdecl*)(void*, const float* at, SvBoardPose* out);
 // A line the host casts for the store's show: writes where it hits, returns 1 (else 0).
+// sv_shop_ride(rt, state, speed, dt): a frame of skating for the board's wear; 1 when a part wore through.
+using SvShopRideFn = std::uint32_t(__cdecl*)(void*, const char* state, float speed, float dt);
 using SvProbeFn = std::uint32_t(__cdecl*)(void* ctx, const float* from, const float* to, float* hit);
 // sv_shop_display(rt, tier, interior[3], eye[3], clerk[6] or null, day, probe, ctx, out[max*16], max,
 // models, cap): the boards on show (entity matrices, comma lists of models a line each); returns how many.

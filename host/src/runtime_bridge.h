@@ -66,6 +66,7 @@ public:
     SvShopResult ShopInput(int input, long long cash);
     std::string ShopText(int which);
     bool ShopRestPose(const float (&at)[16], SvBoardPose& out);
+    bool ShopRide(const char* state, float speed, float dt); // true: a part wore through
     // The boards on show in a store: up to `max` entity matrices (16 floats each) and their models.
     int ShopDisplay(int tier, const float (&interior)[3], const float (&eye)[3], const float* clerk, unsigned day,
                     SvProbeFn probe, void* ctx, float* out, int max, std::vector<std::string>& models);
@@ -122,6 +123,7 @@ private:
     SvShopTextFn shopText_ = nullptr;
     SvShopRestPoseFn shopRestPose_ = nullptr;
     SvShopDisplayFn shopDisplay_ = nullptr;
+    SvShopRideFn shopRide_ = nullptr;
     SvSetVerboseLogFn setVerboseLog_ = nullptr;
     SvSetSkitchStandoffFn setSkitchStandoff_ = nullptr;
     SvSkitchVehicleFn skitchVehicle_ = nullptr;

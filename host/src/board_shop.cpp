@@ -334,6 +334,14 @@ void Tick(bool busy) {
     }
 }
 
+void Riding(const char* state, float speed) {
+    if (!g_ready) return;
+    if (g_rt->ShopRide(state, speed, Call<float>(GET_FRAME_TIME))) {
+        Log("board shop: a part of the board wore through: its worn finish shows now");
+        Ride();
+    }
+}
+
 bool IsOpen() {
     return g_open;
 }

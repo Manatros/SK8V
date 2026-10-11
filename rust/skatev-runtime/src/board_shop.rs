@@ -38,6 +38,53 @@ pub struct BoardShop {
     /// The part exporter's board frame to the native board's object space
     /// (prepare-board-parts.py's ROTATION and offset).
     frame: bevy_math::Mat4,
+    /// How worn the character's parts are, and the riding not yet counted.
+    wear: skate_boards::wear::Wear,
+    riding: Riding,
+}
+
+/// Riding as it happens, from Skate's state each frame: what wears the
+/// board (skate_boards::wear::Usage), counted into the wear every 2 s.
+#[derive(Default)]
+struct Riding {
+    usage: skate_boards::wear::Usage,
+    seconds: f32,
+    air: bool,
+    wipeout: bool,
+}
+
+impl Riding {
+    /// One frame in Skate state `state` at `speed` m/s; true every 2 s of riding.
+    fn frame(&mut self, state: &str, speed: f32, dt: f32) -> bool {
+        if !dt.is_finite() || dt <= 0.0 || !speed.is_finite() {
+            return false;
+        }
+        let dt = dt.min(0.25);
+        let u = &mut self.usage;
+        let on_board = !state.starts_with("Biped") && !state.starts_with("Wipeout") && !state.starts_with("Teleport");
+        if on_board && !state.contains("Air") {
+            u.rolled += speed * dt;
+        }
+        if state.starts_with("Grind") {
+            u.truck_grind += dt;
+        } else if state.contains("Powerslide") {
+            u.powerslide += dt;
+        } else if state.contains("Slide") {
+            u.deck_slide += dt;
+        }
+        let air = state.contains("Air");
+        if self.air && !air && on_board {
+            u.landings += 1;
+        }
+        self.air = air;
+        let wipeout = state.starts_with("Wipeout");
+        if wipeout && !self.wipeout {
+            u.bails += 1;
+        }
+        self.wipeout = wipeout;
+        self.seconds += dt;
+        self.seconds >= 2.0
+    }
 }
 
 /// The boards a store shows: up to this many.
@@ -165,6 +212,8 @@ impl BoardShop {
                 .map(|t| crate::shop::shows_from_text(&t))
                 .unwrap_or_default(),
             frame: exporter_frame(bevy_math::Vec3::new(0.0, 0.352, 0.064)),
+            wear: Default::default(),
+            riding: Default::default(),
         }
     }
 
@@ -185,6 +234,45 @@ impl BoardShop {
             .or_else(|_| std::fs::read_to_string(self.garages.join(format!("SkateGTA-boards-{who}.txt"))))
             .unwrap_or_default();
         self.garage = Garage::from_text(&text);
+        let wear = std::fs::read_to_string(self.wear_path())
+            .or_else(|_| std::fs::read_to_string(self.garages.join(format!("SkateGTA-wear-{who}.txt"))))
+            .unwrap_or_default();
+        self.wear = skate_boards::wear::Wear::from_text(&wear);
+        self.riding = Riding::default();
+    }
+
+    fn wear_path(&self) -> PathBuf {
+        self.garages.join(format!("SkateVWear-{}.txt", self.who))
+    }
+
+    /// One frame of skating (Skate's state, speed in m/s, seconds): wears
+    /// the ridden parts; true when one wore through (its worn finish shows now).
+    pub fn ride(&mut self, state: &str, speed: f32, dt: f32) -> bool {
+        if self.who.is_empty() || !self.riding.frame(state, speed, dt) {
+            return false;
+        }
+        let usage = std::mem::take(&mut self.riding.usage);
+        self.riding.seconds = 0.0;
+        let through = self.wear.ride(&self.garage.riding, &usage);
+        let _ = std::fs::write(self.wear_path(), self.wear.to_text());
+        through
+    }
+
+    /// The ridden board as its wear shows it: worn-through parts in Skate 3's
+    /// worn finish.
+    fn ridden(&self) -> Garage {
+        let mut garage = self.garage.clone();
+        let look = self.wear.look(&self.garage.riding, &self.library);
+        for part in Part::ALL {
+            // A worn finish without a built model keeps the new one.
+            let letter = ["d", "t", "w"][part.index()];
+            if let Some(worn) = look.get(part)
+                && self.available.contains(&format!("skatev_{letter}_{}", worn.material.to_ascii_lowercase()))
+            {
+                garage.riding.set(part, Some(worn.clone()));
+            }
+        }
+        garage
     }
 
     fn save(&self) {
@@ -216,7 +304,7 @@ impl BoardShop {
     /// The ridden board's models; none for the default board (the native
     /// board shows).
     pub fn riding(&self) -> Vec<String> {
-        if Self::is_default(&self.garage) { Vec::new() } else { self.models(&self.garage) }
+        if Self::is_default(&self.garage) { Vec::new() } else { self.models(&self.ridden()) }
     }
 
     /// The ridden wheels' hardness when they are painted (the paint's
@@ -292,6 +380,13 @@ impl BoardShop {
                 }
                 self.garage.add(&offer.goods);
                 self.garage.ride(&offer.goods);
+                // A new one: its wear starts over.
+                match &offer.goods {
+                    Goods::Part(_, part) => self.wear.renew(part),
+                    Goods::Complete(board) => Part::ALL.iter().filter_map(|&p| board.get(p)).for_each(|part| self.wear.renew(part)),
+                    _ => {}
+                }
+                let _ = std::fs::write(self.wear_path(), self.wear.to_text());
                 self.save();
                 self.say(format!("Bought {} for {}. Riding it now.", offer.title, money(offer.price)));
                 SvShopResult { kind: 2, price: offer.price }
@@ -568,6 +663,17 @@ pub unsafe extern "C" fn sv_shop_rest_pose(_rt: *mut c_void, at: *const f32, out
 /// writes where it hits to `hit` and returns 1, or returns 0.
 pub type SvProbe = unsafe extern "C" fn(ctx: *mut c_void, from: *const f32, to: *const f32, hit: *mut f32) -> u32;
 
+/// One frame of skating for the board's wear: Skate's state (UTF-8), speed
+/// (m/s), seconds. Returns 1 when a part wore through (the ridden models
+/// changed: ask for them again with `sv_shop_text` 1).
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sv_shop_ride(_rt: *mut c_void, state: *const c_char, speed: f32, dt: f32) -> u32 {
+    crate::guard(0, || {
+        let state = unsafe { crate::str_arg(state) };
+        with(0, |s| u32::from(s.ride(&state, speed, dt)))
+    })
+}
+
 /// The boards a store shows (see `BoardShop::display`). `interior`, `eye`:
 /// 3 floats; `clerk`: 6 (place, forward) or null; `out`: room for `max`
 /// matrices of 16 floats; `models`: one comma list per board, a line each.
@@ -750,6 +856,46 @@ mod tests {
         // (x, y, z) -> (y, 0.352 - z, 0.064 - x), as prepare-board-parts.py.
         let p = f.transform_point3(bevy_math::Vec3::new(-0.0517, 0.0216, -0.0929));
         assert!((p - bevy_math::Vec3::new(0.0216, 0.4449, 0.1157)).length() < 1e-3, "{p:?}");
+    }
+
+    #[test]
+    fn riding_counts_rolling_grinds_landings_and_bails() {
+        let mut r = Riding::default();
+        for _ in 0..60 {
+            r.frame("PhysicsGround", 5.0, 1.0 / 60.0);
+        }
+        r.frame("PhysicsAir", 5.0, 0.1);
+        r.frame("PhysicsGround", 5.0, 0.1);
+        r.frame("GrindFiveO", 3.0, 0.5);
+        r.frame("WipeoutGround", 1.0, 0.1);
+        r.frame("WipeoutGround", 1.0, 0.1);
+        let u = r.usage;
+        // A frame counts at most 0.25 s (a hitch does not wear the board).
+        assert!((u.rolled - (5.0 + 0.5 + 0.75)).abs() < 0.01, "{u:?}");
+        assert_eq!((u.landings, u.bails), (1, 1));
+        assert!((u.truck_grind - 0.25).abs() < 1e-6);
+        assert!(!r.frame("BipedGround", 2.0, 0.1), "under 2 s so far");
+    }
+
+    #[test]
+    fn a_worn_through_deck_rides_its_worn_finish_and_a_new_one_is_fresh() {
+        let d = dir("wear");
+        let mut s = shop(&d);
+        s.character("franklin");
+        let deck = PartRef::new("deckmodel", "d1");
+        s.garage.add(&Goods::Part(Part::Deck, deck.clone()));
+        s.garage.ride(&Goods::Part(Part::Deck, deck.clone()));
+        assert!(!s.ride("WipeoutGround", 0.0, 0.1));
+        // Many bails wear the deck through.
+        let mut through = false;
+        for i in 0..400 {
+            let state = if i % 2 == 0 { "WipeoutGround" } else { "PhysicsGround" };
+            through |= s.ride(state, 0.0, 0.5);
+        }
+        assert!(through, "{}", s.wear.of(&deck));
+        assert!(d.join("SkateVWear-franklin.txt").is_file());
+        s.wear.renew(&deck);
+        assert_eq!(s.wear.of(&deck), 0.0);
     }
 
     #[test]

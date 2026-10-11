@@ -63,6 +63,7 @@ bool RuntimeBridge::Load(const wchar_t* dllPath, const std::string& dataRoot, co
     optional(shopText_, "sv_shop_text");
     optional(shopRestPose_, "sv_shop_rest_pose");
     optional(shopDisplay_, "sv_shop_display");
+    optional(shopRide_, "sv_shop_ride");
     sym(setVerboseLog_, "sv_set_verbose_log");
     sym(setSkitchStandoff_, "sv_set_skitch_standoff");
     sym(skitchVehicle_, "sv_skitch_vehicle");
@@ -291,6 +292,10 @@ int RuntimeBridge::ShopDisplay(int tier, const float (&interior)[3], const float
         at = end == std::string::npos ? text.size() : end + 1;
     }
     return static_cast<int>(models.size() == n ? n : 0);
+}
+
+bool RuntimeBridge::ShopRide(const char* state, float speed, float dt) {
+    return runtime_ && shopRide_ && shopRide_(runtime_, state, speed, dt) != 0;
 }
 
 bool RuntimeBridge::ShopRestPose(const float (&at)[16], SvBoardPose& out) {
