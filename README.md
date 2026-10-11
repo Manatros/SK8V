@@ -61,7 +61,7 @@ Without a controller, the keyboard and mouse play Skate. The keys are in `SkateV
 | `Space` | Pop: hold to crouch, let go to ollie |
 | Arrow keys / numpad | Trick stick: type the motion (kickflip: down, then up-left) |
 | `E` / hold `E` | Mount or dismount / put the board away (Y) |
-| `F` | On foot (no vehicle within 6 m): board out and skate. Skating: back to GTA in one press (steps off first) |
+| `F` | On foot (no vehicle within 3.5 m): board out and skate. Skating: back to GTA in one press (steps off first) |
 | `F10` or `/` | SK8V's menu (every setting; `/` is the US layout's key) |
 | `,` / `.` | Radio: previous / next station |
 | `N` / hold `J` | Set a session marker / back to it |

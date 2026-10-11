@@ -2427,12 +2427,12 @@ void LifecycleFrame(Session& s, const Config& cfg, bool f6) {
         }
         const bool wheel = BoardWeaponTick(s, player);
         if (wheel) Log("SkateV Legacy: board picked in the weapon wheel");
-        // Keyboard: F on foot with no vehicle within 6 m gets on, as the weapon
+        // Keyboard: F on foot with no vehicle within 3.5 m gets on, as the weapon
         // wheel does (near a vehicle F stays GTA's enter).
         bool keyF = false;
         if (g_fPressed && g_keyboard && !g_controller && !menu::IsOpen() && Call<BOOL>(gta::IS_PED_ON_FOOT, player)) {
             const Vector3 at = Call<Vector3>(gta::GET_ENTITY_COORDS, player, 1);
-            if (!Call<BOOL>(gta::IS_ANY_VEHICLE_NEAR_POINT, at.x, at.y, at.z, 6.0f)) {
+            if (!Call<BOOL>(gta::IS_ANY_VEHICLE_NEAR_POINT, at.x, at.y, at.z, 3.5f)) {
                 Call<void>(gta::DISABLE_CONTROL_ACTION, 0, 23, 1); // INPUT_ENTER
                 keyF = true;
                 Log("SkateV Legacy: F on the keyboard: board out");
