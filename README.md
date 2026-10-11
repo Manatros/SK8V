@@ -62,6 +62,9 @@ Without a controller, the keyboard and mouse play Skate. The keys are in `SkateV
 | Arrow keys / numpad | Trick stick: type the motion (kickflip: down, then up-left) |
 | `E` / hold `E` | Mount or dismount / put the board away (Y) |
 | `F` | Put the board away and back to GTA in one press (steps off first) |
+| `,` / `.` | Radio: previous / next station |
+| `N` / hold `J` | Set a session marker / back to it |
+| `M` | GTA's interaction menu, also while skating |
 
 While you skate on the keyboard, your keys are listed down the left side of the screen (`KeyboardHints=0` or the menu's Controller and HUD page hides them).
 | `Q` | Hippie jump |

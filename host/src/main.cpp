@@ -1449,6 +1449,7 @@ void DisableSkateControls(std::uint16_t buttons, bool aiming) {
         skip[c] = (g_weaponWheel && ((c >= 12 && c <= 17) || c == 37 || c == 1 || c == 2)) ||
                   c == 199 || c == 200 || c == 170 || c == 288 || c == 289 || (c >= 296 && c <= 328) || c == 349 ||
                   (c == 19 && !(buttons & 0x0100)) ||
+                  (c == 244 && g_keyboard && !g_controller) || // keyboard and mouse: M stays GTA's interaction menu
                   (aiming && (c == 1 || c == 2 || c == 24 || c == 25 || c == 45 || (c >= 270 && c <= 273) || (c >= 290 && c <= 295)));
         if (skip[c]) continue;
         // GTA's value this frame whether or not it is disabled (scripts run after the input update).

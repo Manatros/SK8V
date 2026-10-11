@@ -45,7 +45,10 @@ pub fn default_controls() -> Controls {
     for id in ["trick_7", "trick_8", "trick_9", "trick_4", "trick_6", "trick_1", "trick_2", "trick_3", "camera", "mouse_trick", "ls"] {
         controls.unbind(index(id));
     }
-    for (id, key) in [("pop", "Space"), ("a", "LShift"), ("x", "T"), ("b", "LCtrl"), ("hippie", "Q"), ("y", "E")] {
+    // LB + d-pad left/right is SK8V's radio: Comma and Period, as GTA's own
+    // radio keys; M stays GTA's interaction menu, so the marker's return is J.
+    for (id, key) in [("pop", "Space"), ("a", "LShift"), ("x", "T"), ("b", "LCtrl"), ("hippie", "Q"), ("y", "E"),
+                      ("retry", "Comma"), ("object_dropper", "Period"), ("marker_return", "J")] {
         controls.bind(index(id), key).expect("a key");
     }
     controls.modern = false;
@@ -57,7 +60,22 @@ pub fn default_controls() -> Controls {
 /// exist. Returns problems found in the file (unknown keys or actions).
 pub fn configure(path: PathBuf) -> Vec<String> {
     let (controls, problems) = match std::fs::read_to_string(&path) {
-        Ok(text) => Controls::from_text(&text),
+        Ok(text) => {
+            let (mut controls, problems) = Controls::from_text(&text);
+            // Files written before the radio keys: the old defaults moved.
+            let index = |id: &str| Controls::action_index(id).expect("a Skate action");
+            let mut moved = false;
+            for (id, old, new) in [("object_dropper", "Y", "Period"), ("marker_return", "M", "J")] {
+                if controls.keys[index(id)] == [old] {
+                    let _ = controls.bind(index(id), new);
+                    moved = true;
+                }
+            }
+            if moved {
+                let _ = std::fs::write(&path, controls.to_text());
+            }
+            (controls, problems)
+        }
         Err(_) => {
             let controls = default_controls();
             let _ = std::fs::write(&path, controls.to_text());
@@ -107,6 +125,20 @@ pub fn is_active(p: &skate_input::Pad) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn old_key_files_get_the_radio_keys() {
+        let path = std::env::temp_dir().join(format!("skatev-keys-old-{}.txt", std::process::id()));
+        let mut old = default_controls();
+        let index = |id: &str| Controls::action_index(id).unwrap();
+        old.bind(index("object_dropper"), "Y").unwrap();
+        old.bind(index("marker_return"), "M").unwrap();
+        std::fs::write(&path, old.to_text()).unwrap();
+        configure(path.clone());
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("bind object_dropper = Period") && text.contains("bind marker_return = J"), "{text}");
+        assert!(hints(false).contains("Comma, Period\tRadio"), "{}", hints(false));
+    }
 
     #[test]
     fn the_hints_name_the_default_keys() {
