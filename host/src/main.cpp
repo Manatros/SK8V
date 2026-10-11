@@ -2103,7 +2103,8 @@ void OrbitCamera(Session& s, const SvOutput& o, const Config& cfg) {
     at[2] += (board[2] - at[2]) * ease(board[2] < at[2] ? 6.0f : 2.5f);
     if (std::fabs(board[2] - at[2]) > 3.0f) at[2] = board[2] + (at[2] > board[2] ? 3.0f : -3.0f);
     const float travel = speed > 1.5f ? std::atan2(-o.velocity.x, o.velocity.y) * 57.29578f : yaw;
-    yaw += wrap(travel - yaw) * ease(speed > 1.5f ? 2.2f : 0.0f);
+    // Swings in behind the travel slowly: it stays where it is a while.
+    yaw += wrap(travel - yaw) * ease(speed > 1.5f ? 1.1f : 0.0f);
     if (Call<BOOL>(gta::IS_USING_KEYBOARD_AND_MOUSE, 0)) {
         const float mx = Call<float>(gta::GET_DISABLED_CONTROL_NORMAL, 0, 1), my = Call<float>(gta::GET_DISABLED_CONTROL_NORMAL, 0, 2);
         if (std::fabs(mx) > 0.0005f || std::fabs(my) > 0.0005f) {
@@ -2121,15 +2122,16 @@ void OrbitCamera(Session& s, const SvOutput& o, const Config& cfg) {
     float want = kDist[s.view];
     const float behind[3] = {aim[0] - dir[0] * want, aim[1] - dir[1] * want, aim[2] - dir[2] * want};
     const int test = Call<int>(gta::START_EXPENSIVE_SYNCHRONOUS_SHAPE_TEST_LOS_PROBE, aim[0], aim[1], aim[2], behind[0], behind[1], behind[2],
-                               1 | 2 | 16, s.ped, 7);
+                               1 /* the map only: cars, poles and props passing by no longer pull it in */, s.ped, 7);
     BOOL hit = 0;
     Vector3 end{}, normal{};
     Entity entity = 0;
     if (Call<int>(gta::GET_SHAPE_TEST_RESULT, test, &hit, &end, &normal, &entity) == 2 && hit) {
         const float d = std::sqrt((end.x - aim[0]) * (end.x - aim[0]) + (end.y - aim[1]) * (end.y - aim[1]) + (end.z - aim[2]) * (end.z - aim[2]));
-        want = std::max(0.9f, d - 0.25f);
+        want = std::max(1.6f, d - 0.25f);
     }
-    dist = want < dist ? want : dist + (want - dist) * ease(3.0f);
+    // In quickly but smoothly, out slowly: no jumps into the skater and back.
+    dist += (want - dist) * ease(want < dist ? 8.0f : 1.5f);
     float eye[3] = {aim[0] - dir[0] * dist, aim[1] - dir[1] * dist, aim[2] - dir[2] * dist};
     // Never under the ground (slopes, stairs, the skater below the camera):
     // at least 0.3 m above what is under the eye.
