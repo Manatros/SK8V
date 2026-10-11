@@ -130,6 +130,7 @@ struct Config {
     // Radius is in SET_VEHICLE_DAMAGE's own units (scripts use tens to
     // hundreds; 0.5 dents nothing).
     float vehicleDamageScale = 0.5f, vehicleDamageMin = 200.0f, vehicleDamageRadius = 150.0f;
+    float vehiclePush = 1.0f; // VehiclePush: how much of Skate's impulse pushes vehicles (less: they bounce less)
     // GTA delegation: swim when the skater's chest is under water (water this
     // deep over the feet; GTA's ped starts swimming at about the same depth),
     // climb over a barrier on X, X off the board.
@@ -294,6 +295,7 @@ const Key kKeys[] = {
     {"PedGetUpSpeech", [](Config& c, const std::string& v) { c.pedGetUpSpeech = Speech(v); }},
     {"VehicleDamage", Store<&Config::vehicleDamage>},
     {"VehicleDamageScale", Store<&Config::vehicleDamageScale>},
+    {"VehiclePush", Store<&Config::vehiclePush>},
     {"VehicleDamageMin", Store<&Config::vehicleDamageMin>},
     {"VehicleDamageRadius", Store<&Config::vehicleDamageRadius>},
     {"GtaCharacter", Store<&Config::gtaCharacter>},
@@ -2065,6 +2067,7 @@ void UpdateActive(Session& s, const Config& cfg, const SvPad& pad) {
         s.world.SetPedLaunch(cfg.pedLaunch, cfg.pedLaunchScale, cfg.pedLaunchLift, cfg.pedLaunchSpin);
         s.world.SetPedVoices(cfg.pedPain, cfg.pedGetUpSpeech);
         s.world.SetVehicleDamage(cfg.vehicleDamage, cfg.vehicleDamageScale, cfg.vehicleDamageMin, cfg.vehicleDamageRadius);
+        s.world.SetVehiclePush(cfg.vehiclePush);
         s.world.Gather(s.ped, s.last.board_position, cfg.dynamicRadius, boardnative::Entity());
         if (const std::string line = s.world.TakePositionLog(); !line.empty()) Log(line.c_str());
         const auto& bodies = s.world.Bodies();
@@ -2622,7 +2625,12 @@ std::vector<menu::Page> MenuPages(Session& s) {
         Number("Launch tumble", "PedLaunchSpin", D.pedLaunchSpin, 0, 3, 0.1f, Fixed("x%.1f"), Bound("PedLaunchSpin")),
         Choice("Struck ped get-up line", "PedGetUpSpeech", {D.pedGetUpSpeech, "0"}, {"On", "Off"}, Bound("PedGetUpSpeech")),
         Flag("Dent vehicles", "VehicleDamage", D.vehicleDamage, Bound("VehicleDamage")),
-        Number("Dent strength", "VehicleDamageScale", D.vehicleDamageScale, 0, 2, 0.1f, Fixed("x%.1f"), Bound("VehicleDamageScale")),
+        Number("Dent strength", "VehicleDamageScale", D.vehicleDamageScale, 0, 2, 0.05f, Fixed("x%.2f"), Bound("VehicleDamageScale")),
+        // Contributed by GTAxSkate (vehicle shapes): the dent's size and threshold
+        // here too, and how hard the board pushes cars.
+        Number("Dent size", "VehicleDamageRadius", D.vehicleDamageRadius, 0, 300, 10, Fixed("%.0f"), Bound("VehicleDamageRadius")),
+        Number("Dent only from hits over", "VehicleDamageMin", D.vehicleDamageMin, 0, 2000, 50, Fixed("%.0f N s"), Bound("VehicleDamageMin")),
+        Number("How hard the skater pushes cars", "VehiclePush", D.vehiclePush, 0, 1, 0.05f, Fixed("x%.2f"), Bound("VehiclePush")),
     }});
 
     pages.push_back({"BackwardsMan", {
