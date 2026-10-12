@@ -67,6 +67,10 @@ Swimming switches to GTA automatically and returns to Skate afterward. **Hall of
 
 - **GTA V Enhanced:** SK8V currently supports GTA V Legacy only. Enhanced Edition compatibility is a long-term goal, but may require significant additional work and is not guaranteed.
 
+## Contributing
+
+SK8V doesn’t currently accept pull requests. Bug reports and feature requests go in issues, logs are appreciated!
+
 ## Support Me
 [<img src="https://cdn.buymeacoffee.com/buttons/v2/default-yellow.png" height="40">](https://buymeacoffee.com/becaring) [<img src="https://storage.ko-fi.com/cdn/kofi3.png?v=3" height="36">](https://ko-fi.com/becaring)
 
