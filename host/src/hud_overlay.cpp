@@ -187,6 +187,9 @@ void Start(const std::wstring& iniPath, void* runtime, LogFn log) {
         return;
     }
     g.runtime = runtime;
+    // A script restart must publish the initial viewport even if resolution
+    // and safe zone are unchanged. The renderer and registration stay alive.
+    g.sent = {};
     g.showRadio = reinterpret_cast<decltype(g.showRadio)>(GetProcAddress(module, "sv_show_radio"));
     g.getXray = IniFloat(iniPath, L"HallOfMeatXray", 1.0f) != 0.0f
                     ? reinterpret_cast<SvGetXrayFn>(GetProcAddress(module, "sv_get_xray"))

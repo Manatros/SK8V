@@ -4,6 +4,18 @@
 
 bool RuntimeBridge::Load(const wchar_t* dllPath, const std::string& dataRoot, const std::string& worldCache,
                          const std::string& logPath, std::uint32_t skaterTriangles, std::uint32_t presentationFlags, std::string& error) {
+    // ScriptHookV restarts the script on save load, but the ASI and its audio
+    // feeder remain alive. Reuse their runtime instead of orphaning a session
+    // and leaving the feeder bound to a different handle. Suspend is queued
+    // before the caller reapplies configuration and tracks the new player.
+    if (runtime_) {
+        if (!Deactivate()) {
+            error = "existing runtime could not suspend for script restart";
+            return false;
+        }
+        error.clear();
+        return true;
+    }
     if (!module_) module_ = LoadLibraryW(dllPath);
     if (!module_) {
         error = "LoadLibrary(SkateVRuntime.dll) failed, error " + std::to_string(GetLastError());
