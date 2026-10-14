@@ -274,6 +274,9 @@ static bool g_registered = false;
 
 void Start(void (*log)(const char*)) {
     g_log = log;
+    // ScriptHookV restarts ScriptMain when a save is loaded, without unloading
+    // the ASI. Registering the same callback again is a fatal SHV error.
+    if (g_registered) return;
     presentCallbackRegister(OnPresent);
     g_registered = true;
 }
