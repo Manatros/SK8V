@@ -72,7 +72,8 @@ def file_version(exe):
 
 
 def gta_running():
-    out = subprocess.run(['tasklist', '/FI', 'IMAGENAME eq GTA5.exe', '/NH'], capture_output=True, text=True).stdout
+    out = subprocess.run(['tasklist', '/FI', 'IMAGENAME eq GTA5.exe', '/NH'], capture_output=True, text=True,
+                         errors='replace').stdout  # localized, in the console's code page
     return 'GTA5.exe' in out
 
 

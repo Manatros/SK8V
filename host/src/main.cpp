@@ -1147,6 +1147,12 @@ void Track(Session& s, bool force) {
     g_runtime.LifecycleTrack(t);
 }
 
+// A Windows compatibility layer that makes every heap call ~15x slower
+// (measured: Vista, 7 and 8 layers; 8.1, XP and the DPI/fullscreen options
+// are not): a player's GTA in Windows 7 mode never finished preparing Skate.
+// Empty when GTA runs without one.
+std::string g_slowCompatLayer;
+
 // The Skate session exists and the collision working set covers the player.
 bool AreaReady(const char*& why) {
     SvLifecycleState l{};
@@ -1203,6 +1209,13 @@ void TryEnter(Session& s, const Config& cfg, bool strict) {
         return;
     }
     if (const char* why = nullptr; !AreaReady(why)) {
+        static bool compatWarned = false;
+        if (!g_slowCompatLayer.empty() && !compatWarned) {
+            compatWarned = true;
+            Notify(s, "GTA V runs in Windows " + g_slowCompatLayer +
+                          " compatibility mode, which slows SK8V's loading ~20x. Untick it in GTA5.exe and PlayGTAV.exe Properties > Compatibility",
+                   10000);
+        }
         Track(s, true); // also starts preparation when BackgroundPrepare=0
         SetState(s, LifeState::Waiting, why);
         return;
@@ -2695,6 +2708,14 @@ void ScriptMain() {
             FindClose(h);
         }
         Logf("SkateV Legacy: ASI files in game folder: %s", asis.c_str());
+    }
+    if (char layer[512]{}; GetEnvironmentVariableA("__COMPAT_LAYER", layer, sizeof layer) - 1u < sizeof layer - 1) {
+        std::string upper(layer);
+        for (char& c : upper) c = static_cast<char>(toupper(static_cast<unsigned char>(c)));
+        for (const auto& [name, label] : {std::pair{"VISTA", "Vista"}, {"WIN7RTM", "7"}, {"WIN8RTM", "8"}})
+            if (upper.find(name) != std::string::npos) g_slowCompatLayer = label;
+        Logf("SkateV Legacy: Windows compatibility layer %s%s", layer,
+             g_slowCompatLayer.empty() ? "" : " (heap calls ~15x slower: Skate prepares ~20x slower)");
     }
     const GameVersion version = ReadHostVersion();
     Logf("SkateV Legacy: host GTA5.exe %u.%u.%u.%u (required %u.%u.%u.%u)", version.major, version.minor,

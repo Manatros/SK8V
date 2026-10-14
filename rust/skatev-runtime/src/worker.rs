@@ -649,8 +649,10 @@ fn run(
                 .name("skatev-preload".into())
                 .stack_size(32 * 1024 * 1024)
                 .spawn(move || {
+                    crate::crash::PRELOAD.enter(1);
                     let result = catch_unwind(AssertUnwindSafe(|| preload_session(&root, natural_stance, &preload_log)))
                         .unwrap_or_else(|_| Err("session preload panicked".into()));
+                    crate::crash::PRELOAD.leave();
                     let _ = send.send(result);
                 });
             match spawned {
@@ -933,7 +935,7 @@ fn run(
                     ));
                 }
                 Job::DynamicBodies(bodies) => {
-                    let (triangles, messages) = prop_templates.triangles(&bodies);
+                    let (triangles, messages) = prop_templates.triangles(&bodies, live_level.as_ref());
                     for message in messages { log(&message); }
                     dynamic = Some(triangles);
                     entity_proxies = prop_templates.proxies(&bodies);

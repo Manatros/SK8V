@@ -440,6 +440,63 @@ impl Level {
         Ok(ids)
     }
 
+    /// The collision of the instance GTA placed at `position` with these
+    /// (scaled) axes, in its own model space: a prop with no template (spawned
+    /// by a script or trainer, stunt props in the Rockstar Editor's director
+    /// mode) is in the table like any other. Nearest match within 0.25 m.
+    pub fn model_at(&self, position: Vec3, axes: [Vec3; 3]) -> Result<Vec<Tri>, String> {
+        let unit = axes.map(|a| a.normalize_or_zero());
+        let mut best: Option<(f32, usize)> = None;
+        self.slots(|index, inst, _| {
+            let mut ih = [0u8; 0x60];
+            if !heap(inst as u64) || !read_mem(inst, &mut ih) || u16_at(&ih, 0x18) as usize != index {
+                return;
+            }
+            let vtable = u64_at(&ih, 0) as usize;
+            if vtable < self.image.0 || vtable >= self.image.1 {
+                return;
+            }
+            let d = vec3_at(&ih, 0x50).distance(position);
+            let aligned = (0..3).all(|k| vec3_at(&ih, 0x20 + k * 16).normalize_or_zero().dot(unit[k]) > 0.99);
+            if d < 0.25 && aligned && best.is_none_or(|(b, _)| d < b) {
+                best = Some((d, inst));
+            }
+        })?;
+        let (_, inst) = best.ok_or("no instance at the entity's position")?;
+        let mut ih = [0u8; 0x18];
+        let mut bound = [0u8; 8];
+        let mut bh = [0u8; 0x40];
+        let arch = if read_mem(inst, &mut ih) { u64_at(&ih, 0x10) } else { 0 };
+        if !heap(arch) || !read_mem(arch as usize + 0x20, &mut bound) || !heap(u64::from_le_bytes(bound))
+            || !read_mem(u64::from_le_bytes(bound) as usize, &mut bh)
+        {
+            return Err("instance bound unreadable".into());
+        }
+        let bound = u64::from_le_bytes(bound) as usize;
+        let rows = [Vec3::X, Vec3::Y, Vec3::Z, Vec3::ZERO];
+        let (far, clip) = (1.0e5, (-1.0e5, -1.0e5, 1.0e5, 1.0e5));
+        let mut census = Census::default();
+        let mut found = Vec::new();
+        match bh[0x10] {
+            BOUND_COMPOSITE => composite(bound, rows, inst, 0, [0.0, 0.0], far, &mut census, &mut |b| found.push(b)),
+            kind @ (BOUND_BVH | 4 | 0 | 1 | 3 | 12 | 13) => {
+                found.push(Bvh { inst, bound, kind, rows, identity: true, spare: false, at: [0.0, 0.0], reach: 0.0 })
+            }
+            kind => return Err(format!("bound type {kind}")),
+        }
+        let mut tris = Vec::new();
+        for b in found.iter().filter(|b| !b.spare) {
+            match b.kind {
+                BOUND_BVH | 4 => decode_geometry(b, clip, &mut tris, &mut census),
+                _ => decode_primitive(b, clip, &mut tris, &mut census),
+            }
+        }
+        if tris.is_empty() {
+            return Err(format!("no skater collision in its bound ({} parts, {} filtered)", found.len(), census.children_filtered));
+        }
+        Ok(tris)
+    }
+
     /// Triangles of the static map within `half` of `centre` (GTA space),
     /// plus what was found and the bounds read.
     pub fn walk(&self, centre: [f32; 2], half: f32) -> Result<(Vec<Tri>, Census, Vec<Seen>), String> {

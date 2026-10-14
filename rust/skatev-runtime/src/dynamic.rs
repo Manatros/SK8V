@@ -58,6 +58,9 @@ pub struct Templates {
     models: HashMap<u32, Option<Vec<(svwc::Tri, u32)>>>,
     /// Model space bound box of each loaded template (min, max).
     extents: HashMap<u32, (Vec3, Vec3)>,
+    /// Objects with no template whose bound GTA's physics level did not give
+    /// yet: when last tried and how often (a fresh spawn may not be in it).
+    misses: HashMap<u32, (std::time::Instant, u8)>,
     masses: HashMap<u32, Mass>,
     /// Metres the skitch grab line sits behind the rearmost bound.
     pub standoff: f32,
@@ -102,7 +105,7 @@ impl Templates {
         let masses = std::fs::read_to_string(world_cache.with_extension("prop-masses.txt"))
             .map(|t| parse_masses(&t))
             .unwrap_or_default();
-        Self { directory: world_cache.with_extension("prop-models"), models: HashMap::new(), extents: HashMap::new(), masses, standoff: SKITCH_STANDOFF }
+        Self { directory: world_cache.with_extension("prop-models"), models: HashMap::new(), extents: HashMap::new(), misses: HashMap::new(), masses, standoff: SKITCH_STANDOFF }
     }
 
     /// Contact-exchange proxies (Skate space) for the moving vehicles and
@@ -212,10 +215,30 @@ impl Templates {
         }
         out
     }
-    pub fn triangles(&mut self, bodies: &[HostBody]) -> (Vec<([[f32; 3]; 3], u32, u32)>, Vec<String>) {
+    fn install(&mut self, model: u32, tris: Vec<svwc::Tri>, source: &str, messages: &mut Vec<String>) {
+        messages.push(format!("dynamic model {model:08x}: {} {source}{}", tris.len(),
+            self.masses.get(&model).map_or(String::new(), |m| format!(", {:.1} kg", m.kg))));
+        let (mut lo, mut hi) = (Vec3::splat(f32::MAX), Vec3::splat(f32::MIN));
+        for t in &tris {
+            for p in t.v {
+                lo = lo.min(Vec3::from_array(p));
+                hi = hi.max(Vec3::from_array(p));
+            }
+        }
+        self.extents.insert(model, (lo, hi));
+        let surfaced = tris.into_iter().map(|t| { let surface = crate::materials::surface(t.material).packed(); (t, surface) }).collect();
+        self.models.insert(model, Some(surfaced));
+    }
+
+    /// Objects with no template are read from GTA's physics level (`level`):
+    /// retried every 2 s, 10 times, until it has them.
+    pub fn triangles(&mut self, bodies: &[HostBody], level: Option<&crate::live::Level>) -> (Vec<([[f32; 3]; 3], u32, u32)>, Vec<String>) {
+        const RETRY: std::time::Duration = std::time::Duration::from_secs(2);
+        const TRIES: u8 = 10;
         let mut triangles = Vec::new();
         let mut messages = Vec::new();
         for body in bodies {
+            let live = level.filter(|_| (body.fallback.tag >> 28) & 0x7 == 2);
             if body.model != 0 && !self.models.contains_key(&body.model) {
                 let path = self.directory.join(format!("{:08x}.svwc", body.model));
                 let loaded = svwc::Cache::open(&path).and_then(|mut cache| {
@@ -224,24 +247,35 @@ impl Templates {
                     if tris.is_empty() { return Err(std::io::Error::other("empty model bound")); }
                     Ok(tris)
                 });
-                match loaded {
-                    Ok(tris) => {
-                        messages.push(format!("dynamic model {:08x}: {} exact bound triangles{}", body.model, tris.len(),
-                            self.masses.get(&body.model).map_or(String::new(), |m| format!(", {:.1} kg", m.kg))));
-                        let (mut lo, mut hi) = (Vec3::splat(f32::MAX), Vec3::splat(f32::MIN));
-                        for t in &tris {
-                            for p in t.v {
-                                lo = lo.min(Vec3::from_array(p));
-                                hi = hi.max(Vec3::from_array(p));
-                            }
+                match (loaded, live) {
+                    (Ok(tris), _) => self.install(body.model, tris, "exact bound triangles", &mut messages),
+                    (Err(e), Some(level)) => match level.model_at(body.position, body.axes) {
+                        Ok(tris) => self.install(body.model, tris, "bound triangles read from GTA (no template)", &mut messages),
+                        Err(live) => {
+                            messages.push(format!("dynamic model {:08x}: no template ({e}) and not in GTA's physics level yet ({live}); box fallback {}", body.model, body.allow_box));
+                            self.models.insert(body.model, None);
+                            self.misses.insert(body.model, (std::time::Instant::now(), 1));
                         }
-                        self.extents.insert(body.model, (lo, hi));
-                        let surfaced = tris.into_iter().map(|t| { let surface = crate::materials::surface(t.material).packed(); (t, surface) }).collect();
-                        self.models.insert(body.model, Some(surfaced));
-                    }
-                    Err(e) => {
+                    },
+                    (Err(e), None) => {
                         messages.push(format!("dynamic model {:08x}: exact bound unavailable ({e}); box fallback {}", body.model, body.allow_box));
                         self.models.insert(body.model, None);
+                    }
+                }
+            } else if let (Some(level), Some((at, tries))) = (live, self.misses.get(&body.model).copied())
+                && tries < TRIES
+                && at.elapsed() >= RETRY
+            {
+                match level.model_at(body.position, body.axes) {
+                    Ok(tris) => {
+                        self.misses.remove(&body.model);
+                        self.install(body.model, tris, "bound triangles read from GTA (no template)", &mut messages);
+                    }
+                    Err(e) => {
+                        self.misses.insert(body.model, (std::time::Instant::now(), tries + 1));
+                        if tries + 1 == TRIES {
+                            messages.push(format!("dynamic model {:08x}: not in GTA's physics level after {TRIES} tries ({e})", body.model));
+                        }
                     }
                 }
             }
@@ -335,23 +369,23 @@ mod tests {
         let fallback = HostBox { tag: 19, center: Vec3::ZERO, rotation: Quat::IDENTITY, half_extents: Vec3::ONE };
         let mut body = HostBody { model: 1, position: Vec3::ZERO, axes: [Vec3::X, Vec3::Y, Vec3::Z], fallback, allow_box: true, velocity: None, grab_point: None };
         let mut models = Templates::new(&root.join("world.svwc"));
-        let (first, messages) = models.triangles(&[body.clone()]);
+        let (first, messages) = models.triangles(&[body.clone()], None);
         assert_eq!(first[0].2, crate::materials::surface(3).packed());
         assert_eq!(first[0].1, 19 | DYNAMIC_TAG);
         assert_eq!(first.len(), 1, "a model's opening must not be filled by its fallback box");
         assert_eq!(messages.len(), 1);
         std::fs::remove_file(&file).unwrap();
         body.position = Vec3::new(10., 20., 30.);
-        let (moved, messages) = models.triangles(&[body.clone()]);
+        let (moved, messages) = models.triangles(&[body.clone()], None);
         assert_eq!(moved.len(), 1, "model data is cached independently of moving instances");
         assert!(messages.is_empty());
         assert_eq!(moved[0].0[0], [12., 30., -20.]);
         body.model = 2;
         body.allow_box = false;
-        assert!(models.triangles(&[body.clone()]).0.is_empty());
+        assert!(models.triangles(&[body.clone()], None).0.is_empty());
         body.allow_box = true;
-        assert_eq!(models.triangles(&[body]).0.len(), 12, "missing models need explicit fallback permission");
-        assert!(models.triangles(&[]).0.is_empty(), "removed entities leave no geometry");
+        assert_eq!(models.triangles(&[body], None).0.len(), 12, "missing models need explicit fallback permission");
+        assert!(models.triangles(&[], None).0.is_empty(), "removed entities leave no geometry");
         std::fs::remove_dir(&directory).unwrap();
         std::fs::remove_dir(&root).unwrap();
     }
@@ -370,7 +404,7 @@ mod tests {
 
     #[test]
     fn grab_line_spans_template_width_at_bone_height_behind_the_body_and_skips_non_vehicles() {
-        let mut t = Templates { directory: PathBuf::new(), models: HashMap::new(), extents: HashMap::new(), masses: HashMap::new(), standoff: 0.0 };
+        let mut t = Templates { directory: PathBuf::new(), models: HashMap::new(), extents: HashMap::new(), misses: HashMap::new(), masses: HashMap::new(), standoff: 0.0 };
         t.extents.insert(7, (Vec3::new(-1.0, -2.5, -0.6), Vec3::new(1.0, 2.5, 0.8)));
         let fallback = HostBox { tag: 0x0000_0042, center: Vec3::ZERO, rotation: Quat::IDENTITY, half_extents: Vec3::ONE };
         let body = HostBody { model: 7, position: Vec3::new(10.0, 20.0, 1.0), axes: [Vec3::X, Vec3::Y, Vec3::Z], fallback,
@@ -441,7 +475,7 @@ bad line
 ");
         assert_eq!(masses.len(), 2);
         assert_eq!(masses[&0xeb70965f].kg, 1200.0);
-        let mut t = Templates { directory: PathBuf::new(), models: HashMap::new(), extents: HashMap::new(), masses, standoff: 0.0 };
+        let mut t = Templates { directory: PathBuf::new(), models: HashMap::new(), extents: HashMap::new(), misses: HashMap::new(), masses, standoff: 0.0 };
         let fallback = HostBox { tag: 9, center: Vec3::new(5.0, 6.0, 1.0), rotation: Quat::IDENTITY, half_extents: Vec3::new(1.0, 2.0, 0.5) };
         let body = HostBody { model: 0xeb70965f, position: Vec3::new(5.0, 6.0, 0.3), axes: [Vec3::X, Vec3::Y, Vec3::Z], fallback,
             allow_box: true, velocity: Some((Vec3::new(0.0, 8.0, 0.0), Vec3::new(0.0, 0.0, 0.5))), grab_point: None };

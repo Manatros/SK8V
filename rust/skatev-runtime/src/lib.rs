@@ -32,6 +32,34 @@ mod private_heap;
 #[global_allocator]
 static ALLOCATOR: private_heap::PrivateHeap = private_heap::PrivateHeap;
 
+/// Every `mul_add` in Skate compiles to a call to the C runtime's fma/fmaf.
+/// On a CPU without FMA3 (Intel before Haswell, AMD before Piledriver) the
+/// UCRT's fallback takes 11/25 ns a call against 2.4 for libm's, which made the
+/// Skate tick ~5x slower (harness HARNESS_NO_FMA3: 4.4 ms, 0.85 with libm) and
+/// a player's i7-3770K tick at 15 Hz. These definitions link ahead of the UCRT
+/// import: the FMA3 instruction where the CPU has it, else libm. All three are
+/// correctly rounded, so results are the same bits.
+#[cfg(all(windows, target_arch = "x86_64"))]
+mod fma {
+    use std::arch::x86_64::*;
+    #[target_feature(enable = "fma")]
+    unsafe fn hw32(a: f32, b: f32, c: f32) -> f32 {
+        _mm_cvtss_f32(_mm_fmadd_ss(_mm_set_ss(a), _mm_set_ss(b), _mm_set_ss(c)))
+    }
+    #[target_feature(enable = "fma")]
+    unsafe fn hw64(a: f64, b: f64, c: f64) -> f64 {
+        _mm_cvtsd_f64(_mm_fmadd_sd(_mm_set_sd(a), _mm_set_sd(b), _mm_set_sd(c)))
+    }
+    #[unsafe(no_mangle)]
+    pub extern "C" fn fmaf(a: f32, b: f32, c: f32) -> f32 {
+        if is_x86_feature_detected!("fma") { unsafe { hw32(a, b, c) } } else { libm::fmaf(a, b, c) }
+    }
+    #[unsafe(no_mangle)]
+    pub extern "C" fn fma(a: f64, b: f64, c: f64) -> f64 {
+        if is_x86_feature_detected!("fma") { unsafe { hw64(a, b, c) } } else { libm::fma(a, b, c) }
+    }
+}
+
 use std::ffi::{CStr, c_char, c_void};
 use std::io::Write;
 use std::panic::{AssertUnwindSafe, catch_unwind};
@@ -1722,6 +1750,43 @@ pub unsafe extern "C" fn sv_get_dynamic_impulses(rt: *mut c_void, out: *mut SvDy
 mod tests {
     use super::*;
     use std::mem::offset_of;
+
+    /// The no-FMA3 fallback (libm) gives the hardware's bits (this test needs an FMA3 CPU).
+    #[test]
+    #[cfg(target_arch = "x86_64")]
+    fn software_fma_matches_hardware() {
+        use std::arch::x86_64::*;
+        if !is_x86_feature_detected!("fma") {
+            return;
+        }
+        #[target_feature(enable = "fma")]
+        unsafe fn hw(a: f32, b: f32, c: f32, x: f64, y: f64, z: f64) -> (f32, f64) {
+            (
+                _mm_cvtss_f32(_mm_fmadd_ss(_mm_set_ss(a), _mm_set_ss(b), _mm_set_ss(c))),
+                _mm_cvtsd_f64(_mm_fmadd_sd(_mm_set_sd(x), _mm_set_sd(y), _mm_set_sd(z))),
+            )
+        }
+        let mut seed = 0x9E37_79B9_7F4A_7C15u64;
+        let mut next = || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed
+        };
+        for i in 0..2_000_000u32 {
+            let (r0, r1, r2) = (next(), next(), next());
+            // Half the cases near 1 with cancelling addends: the rounding edges.
+            let f = |r: u64| if i % 2 == 0 { f32::from_bits(r as u32) } else { 1.0 + (r as u32 >> 9) as f32 * 1e-7 };
+            let d = |r: u64| if i % 2 == 0 { f64::from_bits(r) } else { 1.0 + (r >> 12) as f64 * 1e-16 };
+            let (a, b, c) = (f(r0), f(r1), if i % 2 == 0 { f(r2) } else { -f(r0) * f(r1) });
+            let (x, y, z) = (d(r0), d(r1), if i % 2 == 0 { d(r2) } else { -d(r0) * d(r1) });
+            let (hf, hd) = unsafe { hw(a, b, c, x, y, z) };
+            let sf = libm::fmaf(a, b, c);
+            let sd = libm::fma(x, y, z);
+            assert!(sf.to_bits() == hf.to_bits() || (sf.is_nan() && hf.is_nan()), "fmaf({a:e},{b:e},{c:e}) {sf:e} vs {hf:e}");
+            assert!(sd.to_bits() == hd.to_bits() || (sd.is_nan() && hd.is_nan()), "fma({x:e},{y:e},{z:e}) {sd:e} vs {hd:e}");
+        }
+    }
 
     /// Must match the static_asserts in host/include/skatev_runtime.h.
     #[test]
