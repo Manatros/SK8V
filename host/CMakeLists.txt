@@ -46,7 +46,27 @@ add_library(SkateVLegacy SHARED
   src/skate_map.cpp
 )
 target_compile_features(SkateVLegacy PRIVATE cxx_std_20)
-target_compile_definitions(SkateVLegacy PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
+# Source provenance only: never carry a hard-coded release number into a future
+# upstream merge. No Git/tags in a source archive means unknown, not a guessed
+# installed version. Bound the optional local query and sanitize for a C string.
+set(SK8V_SOURCE_TAG "unknown")
+find_package(Git QUIET)
+if(GIT_FOUND)
+  execute_process(
+    COMMAND "${GIT_EXECUTABLE}" describe --tags --abbrev=0 --match "1.*"
+    WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/.."
+    RESULT_VARIABLE _source_tag_result
+    OUTPUT_VARIABLE _source_tag
+    OUTPUT_STRIP_TRAILING_WHITESPACE
+    ERROR_QUIET
+    TIMEOUT 5)
+  if(_source_tag_result EQUAL 0 AND _source_tag MATCHES "^1\\.[0-9]+(\\.[0-9]+)?$")
+    set(SK8V_SOURCE_TAG "${_source_tag}")
+  endif()
+endif()
+message(STATUS "SK8V nearest source tag: ${SK8V_SOURCE_TAG}")
+target_compile_definitions(SkateVLegacy PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX
+  SK8V_SOURCE_TAG="${SK8V_SOURCE_TAG}")
 target_include_directories(SkateVLegacy PRIVATE include "${SHVDIR}/inc")
 target_link_libraries(SkateVLegacy PRIVATE "${SHVDIR}/lib/ScriptHookV.lib" version xinput hid setupapi shell32)
 # Original Skate 3 HUD overlay (hud_overlay.cpp): D3D11 + runtime shader compile.

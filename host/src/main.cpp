@@ -46,6 +46,10 @@
 #include "injuries.h"
 #include "version_guard.h"
 
+#ifndef SK8V_SOURCE_TAG
+#define SK8V_SOURCE_TAG "unknown"
+#endif
+
 namespace {
 using gta::Call;
 
@@ -3252,8 +3256,8 @@ void AppendDeveloperPage(std::vector<menu::Page>& pages, Session& s) {
     // Provenance stays in Developer. Source basis, compiled host and installer
     // receipt are different facts; none detects arbitrary third-party installs.
     pages.push_back({"Developer", {
-        Action("SK8V source basis: 1.1.8", [&s] {
-            Notify(s, "SK8V source basis 1.1.8 (our fork). This is not an automatic installed-version detector.", 7000);
+        Action("SK8V source tag: " SK8V_SOURCE_TAG, [&s] {
+            Notify(s, "Nearest SK8V source tag: " SK8V_SOURCE_TAG ". Source metadata, not an installed-release detector.", 7000);
         }),
         Action("GTAxSkate host build", [&s] {
             Notify(s, "GTAxSkate host compiled " __DATE__ " " __TIME__, 7000);
