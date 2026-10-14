@@ -3361,7 +3361,7 @@ std::vector<menu::Page> MenuPages(Session& s) {
     }});
 
     pages.push_back({"Controller and HUD", {
-        Chord("Open menu (with /)", "MenuButton", D.life.menuButton, true, Bound("MenuButton")),
+        Chord("Open menu (F10)", "MenuButton", D.life.menuButton, true, Bound("MenuButton")),
         Chord("Gun out / away", "GunButton", D.gunButton, false, Bound("GunButton")),
         Chord("Aim", "AimButton", D.aimButton, false, Bound("AimButton")),
         Chord("Fire", "FireButton", D.fireButton, false, Bound("FireButton")),
@@ -3411,7 +3411,66 @@ std::vector<menu::Page> MenuPages(Session& s) {
         Flag("Editor audio tone", "AudioEditorTone", false, {}, true),
         Flag("Stall sampler", "StallSampler", D.stallSampler, {}, true),
     }});
-    return pages;
+    // Package-owned presentation: preserve every setting and its live callback.
+    // Advanced is an explicit category; uncommon tuning no longer fills the main pages.
+    std::vector<Page> sorted = {
+        {"Presets", {
+            Action("GTA - LS Skate integration (WIP)", [&s] {
+                Notify(s, "WIP: LS Skate animation / integration is not available yet. Settings unchanged.", 6000);
+            }),
+            Action("Skate - SK8V focused", [] {
+                ApplyPreset("Skate", {{"CameraView", "Skate"}, {"Difficulty", "Normal"},
+                    {"Pop", "1"}, {"GrindPop", "1"}, {"PushSpeed", "1"}, {"PushPower", "1"},
+                    {"BoardAim", "1"}, {"HallOfMeat", "1"}, {"TrickAnalyzer", "1"},
+                    {"PedsSurvive", "1"}, {"PedLaunch", "0"}, {"VehicleDamage", "1"},
+                    {"VehiclePush", "0.2"}, {"Injuries", "1"}, {"Stamina", "1"}, {"KeyboardHints", "1"}});
+            }),
+            Action("RP - gentle world, minimal HUD", [] {
+                ApplyPreset("RP", {{"CameraView", "Near"}, {"Difficulty", "Hardcore"},
+                    {"Pop", "1"}, {"GrindPop", "1"}, {"PushSpeed", "1"}, {"PushPower", "1"},
+                    {"BoardAim", "0"}, {"HallOfMeat", "0"}, {"TrickAnalyzer", "0"},
+                    {"PedsSurvive", "1"}, {"PedLaunch", "0"}, {"VehicleDamage", "0"},
+                    {"VehiclePush", "0"}, {"Injuries", "1"}, {"Stamina", "1"}, {"KeyboardHints", "0"}});
+            }),
+        }},
+        {"Skating", {}}, {"Camera", {}}, {"Keyboard keys", {}},
+        {"Controller and HUD", {}}, {"World and roleplay", {}}, {"Audio", {}},
+        {"Interaction", {}}, {"Advanced", {}}
+    };
+    const auto destination = [](const Page& page, const Item& item) -> std::string {
+        const std::string& k = item.key;
+        if (page.title == "Dev" || page.title == "BackwardsMan" || page.title == "Board in hand") return "Advanced";
+        if (page.title == "Peds and vehicles") {
+            if (k == "PedsSurvive" || k == "PedLaunch" || k == "VehicleDamage" || k == "DynamicWorld") return "World and roleplay";
+            return "Advanced";
+        }
+        if (page.title == "Hall of Meat and records") {
+            if (k == "Injuries") return "World and roleplay";
+            if (k == "HallOfMeat" || k.empty()) return "Controller and HUD";
+            return "Advanced";
+        }
+        if (page.title == "Skating") {
+            if (k == "Camera" || k == "CameraFovScale") return ""; // already on Camera
+            if (k == "SkateRadio") return "Audio";
+            if (k == "GtaDelegation" || k == "BoardAim" || k == "Stamina") return "World and roleplay";
+            if (k.empty() || k == "Stance" || k == "Difficulty" || k == "Posture" || k == "RidingStyle" ||
+                k == "TruckTightness" || k == "WheelHardness" || k == "Pop" || k == "GrindPop") return "Skating";
+            return "Advanced";
+        }
+        return page.title;
+    };
+    for (Page& page : pages) for (Item& item : page.items) {
+        const std::string target = destination(page, item);
+        for (Page& out : sorted) if (out.title == target) {
+            // Duplicate developer rows use the player's existing row and range.
+            const bool duplicate = !item.key.empty() && std::any_of(out.items.begin(), out.items.end(),
+                [&](const Item& previous) { return previous.key == item.key; });
+            if (!duplicate) out.items.push_back(std::move(item));
+            break;
+        }
+    }
+    return sorted;
+
 }
 
 void ScriptMain() {

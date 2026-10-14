@@ -184,6 +184,12 @@ constexpr const char* kHint = "Left/Right change   Back: categories   * restart 
 // Footer description for a category row, by page title.
 inline std::string PageHint(const std::string& title) {
     static const std::pair<const char*, const char*> kHints[] = {
+        {"Presets", "Enter applies Skate or RP settings. GTA is a WIP placeholder and changes nothing."},
+        {"Advanced", "Rare tuning, board placement and diagnostics. Defaults are recommended."},
+        {"World and roleplay", "Gentle pedestrian collisions, vehicle damage, injuries and GTA integration."},
+        {"Camera", "Choose the starting view, mouse camera and cinematic look."},
+        {"Keyboard keys", "Choose a layout or press Enter on an action to bind its key."},
+        {"Interaction", "GPS routes to board shops and skate spots."},
         {"Skating", "Skate on or off, stance and the core Skate rules."},
         {"Hall of Meat and records", "Hall of Meat bail records and the records display."},
         {"Peds and vehicles", "Collision, launch and dent settings for pedestrians and vehicles."},
@@ -194,7 +200,7 @@ inline std::string PageHint(const std::string& title) {
     };
     for (const auto& h : kHints)
         if (title == h.first) return h.second;
-    return "Back or / closes";
+    return "Back or F10 closes";
 }
 
 using LogFn = void (*)(const char*);
@@ -204,6 +210,8 @@ void Start(const std::wstring& ini, std::vector<Page> pages, std::function<unsig
 // The '/' key: opens the menu, closes it when open (the closing frame still
 // keeps the game's controls, so the key press does not reach GTA).
 void Toggle();
+// Applies only the listed settings through the same save/live path as editing rows.
+void ApplyPreset(const std::string& name, const std::vector<std::pair<std::string, std::string>>& settings);
 // Opens the menu straight on the page titled `title` (closes it when open).
 void OpenPage(const std::string& title);
 bool IsOpen();

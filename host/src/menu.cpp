@@ -151,7 +151,7 @@ void Draw() {
     // Banner: black block, big title, orange rule under it.
     Rect(x, y, kW, kBanner, 12, 12, 12, 235);
     Rect(x, y + kBanner - 0.004f, kW, 0.004f, 255, 110, 0, 255);
-    Text("SK8V", x + kPad, y + 0.008f, 0.8f, 255);
+    Text("GTAxSkate", x + kPad, y + 0.008f, 0.8f, 255);
     y += kBanner;
 
     // Subtitle bar: page title left, "n / total" right.
@@ -277,6 +277,21 @@ void Navigate() {
 
 void Start(const std::wstring& ini, std::vector<Page> pages, std::function<unsigned()> padButtons, LogFn log) {
     g_ini = ini, g_pages = std::move(pages), g_pad = std::move(padButtons), g_log = log;
+}
+
+void ApplyPreset(const std::string& name, const std::vector<std::pair<std::string, std::string>>& settings) {
+    for (const auto& [key, value] : settings) {
+        Item* found = nullptr;
+        for (Page& page : g_pages)
+            for (Item& item : page.items)
+                if (item.key == key) { found = &item; break; }
+        if (!found) { Say("Preset setting unavailable: " + key); return; }
+        Commit(*found, value);
+        if (g_cache[key] != value) return;
+    }
+    Toggle(); // Keep the preset page visible, with confirmation after refreshing saved values.
+    Say(name + " preset saved");
+    if (g_log) g_log(("SkateV preset: " + name).c_str());
 }
 
 void Toggle() {
