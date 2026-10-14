@@ -3253,9 +3253,24 @@ const std::string& TestPackageReceipt() {
 
 void AppendDeveloperPage(std::vector<menu::Page>& pages, Session& s) {
     using namespace menu;
+    for (auto& page : pages) if (page.title == "Presets") {
+        page.items.push_back(Action("Developer - inputs, HUD and logs", [] {
+            ApplyPreset("Developer", {{"ShowInputs", "1"}, {"ShowDebug", "1"},
+                {"VerboseLog", "1"}, {"KeyboardHints", "1"}, {"TrickAnalyzer", "1"}, {"Hud", "1"}});
+            // Hud is normally restart-only; this diagnostic action can safely
+            // reinitialize the existing renderer through its guarded Start.
+            if (g_runtime.IsLoaded()) {
+                hudoverlay::Start(g_gameDir + L"SkateVLegacy.ini", g_runtime.Handle(), Log);
+                hudoverlay::SetTrickAnalyzer(g_config.trickAnalyzer);
+            }
+        }));
+    }
     // Provenance stays in Developer. Source basis, compiled host and installer
     // receipt are different facts; none detects arbitrary third-party installs.
     pages.push_back({"Developer", {
+        Action("Disable diagnostic overlays and verbose log", [] {
+            ApplyPreset("Diagnostics off", {{"ShowInputs", "0"}, {"ShowDebug", "0"}, {"VerboseLog", "0"}});
+        }),
         Action("SK8V source tag: " SK8V_SOURCE_TAG, [&s] {
             Notify(s, "Nearest SK8V source tag: " SK8V_SOURCE_TAG ". Source metadata, not an installed-release detector.", 7000);
         }),
