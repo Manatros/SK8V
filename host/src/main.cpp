@@ -3213,6 +3213,63 @@ menu::Item Emote(const char* label, int direction, const Config& D) {
     return i;
 }
 
+// Display-only installer metadata, never a compatibility or binary-integrity
+// check. Read once, bounded; only the simple unescaped identifiers we write.
+const std::string& TestPackageReceipt() {
+    static const std::string id = [] {
+        FILE* file = nullptr;
+        if (_wfopen_s(&file, (g_gameDir + L"GTAxSkate-test-version.json").c_str(), L"rb") || !file)
+            return std::string{};
+        char bytes[16385]{};
+        const std::size_t size = std::fread(bytes, 1, sizeof(bytes), file);
+        const bool failed = std::ferror(file) != 0;
+        std::fclose(file);
+        if (failed || size == sizeof(bytes)) return std::string{};
+        const std::string text(bytes, size);
+        auto field = [&](const char* key) -> std::string {
+            std::size_t p = text.find(std::string("\"") + key + "\"");
+            if (p == std::string::npos) return {};
+            p += std::strlen(key) + 2;
+            auto space = [&] { while (p < text.size() && std::isspace(static_cast<unsigned char>(text[p]))) ++p; };
+            space();
+            if (p >= text.size() || text[p++] != ':') return {};
+            space();
+            if (p >= text.size() || text[p++] != '"') return {};
+            const std::size_t first = p;
+            while (p < text.size() && (std::isalnum(static_cast<unsigned char>(text[p])) || text[p] == '-' || text[p] == '_' || text[p] == '.')) ++p;
+            if (p >= text.size() || text[p] != '"' || p == first || p - first > 96) return {};
+            return text.substr(first, p - first);
+        };
+        if (field("format") != "gtaxskate-test") return std::string{};
+        const std::string value = field("id");
+        return value.rfind("test-", 0) == 0 ? value : std::string{};
+    }();
+    return id;
+}
+
+void AppendDeveloperPage(std::vector<menu::Page>& pages, Session& s) {
+    using namespace menu;
+    // Provenance stays in Developer. Source basis, compiled host and installer
+    // receipt are different facts; none detects arbitrary third-party installs.
+    pages.push_back({"Developer", {
+        Action("SK8V source basis: 1.1.8", [&s] {
+            Notify(s, "SK8V source basis 1.1.8 (our fork). This is not an automatic installed-version detector.", 7000);
+        }),
+        Action("GTAxSkate host build", [&s] {
+            Notify(s, "GTAxSkate host compiled " __DATE__ " " __TIME__, 7000);
+        }),
+        Action("Test package receipt (metadata)", [&s] {
+            const std::string& id = TestPackageReceipt();
+            const std::string message = id.empty() ? "No readable test package receipt; package version unknown." :
+                "Test package receipt: " + id + ". Metadata only; installed binaries not verified here.";
+            Notify(s, message.c_str(), 9000);
+        }),
+        Action("LS Skate: not integrated", [&s] {
+            Notify(s, "LS Skate is not integrated in this package. Its installed version is unavailable.", 7000);
+        }),
+    }});
+}
+
 std::vector<menu::Page> MenuPages(Session& s) {
     using namespace menu;
     const Config D{};
@@ -3601,7 +3658,9 @@ void ScriptMain() {
          cfg.life.inMissions ? "allowed" : "blocked", cfg.life.backgroundPrepare ? "on" : "off");
     Session s;
     g_hallOfMeatOn = cfg.hallOfMeat;
-    menu::Start(g_gameDir + L"SkateVLegacy.ini", MenuPages(s), RawPadButtons, Log);
+    auto pages = MenuPages(s);
+    AppendDeveloperPage(pages, s);
+    menu::Start(g_gameDir + L"SkateVLegacy.ini", std::move(pages), RawPadButtons, Log);
     FrameMonitor monitor;
     stall::SetLog(Log);
     // Line= may list several files separated by ';': the Dev menu replays the
