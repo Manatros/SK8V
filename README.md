@@ -1,4 +1,12 @@
 > ## Download and play
+
+> **GTAxSkate development fork:** branch `skatemods` adds keyboard/mouse, shop,
+> camera and package settings. [Fork status and adoption guide](GTAXSKATE.md).
+> Players should use the [GTAxSkate installer/downloads](https://github.com/Manatros/GTAxSkate).
+> Report package bugs in [GTAxSkate issues](https://github.com/Manatros/GTAxSkate/issues).
+> The original upstream README below documents unmodified SK8V; its controller-only
+> requirement does not describe the fork's added keyboard support. Development
+> fixes are pending the next in-game acceptance run. No AI-skater feature is promised.
 > **[GTAxSkate-Setup.zip](https://github.com/Manatros/GTAxSkate/releases/latest/download/GTAxSkate-Setup.zip)**: unzip, close GTA V, double-click `Install GTAxSkate.cmd`, pick your Skate 3 disc. It installs SK8V with every addition below. Help and problems: [GTAxSkate](https://github.com/Manatros/GTAxSkate).
 >
 > This repository is GTAxSkate's fork of SK8V: the source of its builds (branch `skatemods`) and of its pull requests to SK8V (one `contrib/` branch per feature). What each addition does and why: [GTAXSKATE.md](GTAXSKATE.md).
