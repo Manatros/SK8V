@@ -206,6 +206,10 @@ impl Translator {
             MouseTrick::Hold => mouse_held,
             MouseTrick::Always => true,
         };
+        if !mouse_on || !self.mouse_on {
+            self.mouse = [0., 0.];
+            self.mouse_still = 0.;
+        }
         self.mouse_on = mouse_on;
         // Pop: down while held, then up (toward a held side) a moment.
         if self.pop_held && !pop {

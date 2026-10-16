@@ -2,6 +2,7 @@
 #include <cstdint>
 #include <string>
 #include "skatev_runtime.h"
+#include "board_pose_diagnostics.h"
 namespace boardnative {
 // Call on the ScriptHookV script thread, after the Legacy Story Mode guard.
 bool Start(const std::wstring& iniPath,const std::wstring& dataRoot,void (*log)(const char*));
@@ -13,6 +14,6 @@ void Stop();
 int Entity(); // Exclude this presentation-only entity from ExternalQueries.
 // Writes the seven board bones of `object` (a drawable with the native board's
 // skeleton) from `pose`. `cache` keeps its bone indices; one per object.
-struct PoseCache { std::uintptr_t skeleton = 0; int indices[7] = {}; bool reported = false; };
+struct PoseCache { std::uintptr_t skeleton = 0; int indices[7] = {}; bool reported = false; diagnostics::State diagnostic; };
 bool PoseObject(int object, const SvBoardPose& pose, PoseCache& cache, void (*log)(const char*));
 }

@@ -1,11 +1,11 @@
 # GTAxSkate's additions to SK8V
 
-**To play:** download [GTAxSkate-Setup.zip](https://github.com/Manatros/GTAxSkate/releases/latest/download/GTAxSkate-Setup.zip), unzip, double-click `Install GTAxSkate.cmd`. Help: [GTAxSkate](https://github.com/Manatros/GTAxSkate).
+**To play:** download [GTAxSkate-Setup.zip](https://github.com/Manatros/GTAxSkate/releases/download/dev-build/GTAxSkate-Setup.zip), unzip, double-click `Install GTAxSkate.cmd`. Help: [GTAxSkate](https://github.com/Manatros/GTAxSkate).
 
 This fork of [SK8V](https://github.com/becaring/SK8V) (by becaring) is what
 [GTAxSkate](https://github.com/Manatros/GTAxSkate) plays: SK8V as it is, plus a
 set of additions, each in its own branch so SK8V can take any of them as a pull
-request. The branch `skatemods` currently uses SK8V 1.1.8 plus our contributions and
+request. The branch `skatemods` currently uses SK8V 1.1.9 plus our contributions and
 package patches. Published installers and the newest development build may differ.
 The package test plan controls the next promotion; newer upstream versions require
 compatibility checks, never an automatic assumption.
@@ -15,8 +15,7 @@ compatibility checks, never an automatic assumption.
 GTAxSkate started as its own Skate 3 mod for GTA V, with its own Skate core,
 ground probes, park collision, board sounds and a lot of board customization.
 SK8V does the core better: Skate's own audio engine, the pose hook, live
-collision, Hall of Meat, skitching, guns on the board. So the decision (the maintainer,
-10-10) was:
+collision, Hall of Meat, skitching, guns on the board. So the decision (2026-10-10) was:
 
 1. **SK8V is the base.** Skating, animation, collision, audio and the HUD stay
    SK8V's. GTAxSkate does not keep a second core.
@@ -29,7 +28,7 @@ collision, Hall of Meat, skitching, guns on the board. So the decision (the main
    are not supported.
 4. **SK8V's behaviour stays SK8V's by default.** Options that change how SK8V
    plays (GTA's camera, knocked people surviving) are off in SK8V's template;
-   the GTAxSkate installer turns on what the maintainer prefers.
+   the GTAxSkate installer turns on the GTAxSkate defaults.
 5. **The best working solution wins.** Where SK8V already does something well,
    GTAxSkate's version was dropped; where GTAxSkate's worked better (the vehicle
    shapes, the board shop), it was ported into SK8V's structure.
@@ -58,14 +57,14 @@ nothing lost a brace, builds and runs the tests).
 
 ## Status
 
-Built and unit-tested on SK8V 1.1.8; released as GTAxSkate v0.5.2. Tested in
-the game: keyboard and mouse with its layouts, the camera views and cinematic
-camera, the board shop with its show, purchases, paints and wear, stamina,
-skateable cars and the hippie jump, gentle peds, the limp after hard bails,
-F to get on. Open: M while skating does not open GTA's interaction menu.
+The current development branch uses SK8V 1.1.9. The latest wheel direction
+fix was confirmed in game on 2026-10-16; speed appeared correct. Standstill,
+other animation checks, the optional board composer, and broader release
+acceptance remain covered by the GTAxSkate test plan. Historical stable
+releases do not imply acceptance of this development snapshot.
 
 
-## Current package integration status (2026-10-14)
+## Current package integration status (2026-10-16)
 
 Runtime ownership/callback/HUD reload fixes, camera clearance and Developer
 provenance/diagnostics are independent overlays maintained in the player repo's
@@ -82,3 +81,5 @@ Maintainer adoption notes:
 
 Next test and release gates:
 https://github.com/Manatros/GTAxSkate/blob/dev/TEST-RUN.md
+
+Board composition setup and rollback: [guide](https://github.com/Manatros/GTAxSkate/blob/dev/BOARD-COMPOSITION.md).

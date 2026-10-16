@@ -52,6 +52,8 @@ void Name(const wchar_t* name) {
     if (set) set(GetCurrentThread(), name);
 }
 
+void Reset() { g_last.clear(); }
+
 std::string Report(double seconds, int top) {
     struct Row {
         double ms;

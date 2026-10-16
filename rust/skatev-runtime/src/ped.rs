@@ -380,6 +380,11 @@ struct Fit {
     sole: [Vec3; 2],
     /// Skate's deck, for keeping the shoes out of it.
     deck: Option<Deck>,
+    /// GTA leg length over Skate's, at most 1: a shorter ped's hips are
+    /// lowered toward the feet by it, so its legs keep Skate's knee angles
+    /// (with Skate's hip height a 85% ped's legs were out of reach 19% of the
+    /// time, knees locked straight and feet up to 8 cm off the deck).
+    leg_ratio: f32,
 }
 
 /// A GTA roll bone and how its expression is reproduced.
@@ -918,7 +923,11 @@ impl PedModel {
             Mat3::from_mat4(self.bind[upper]).transpose() * axis
         }).collect();
         let source_bind = (0..self.sources.len()).map(|i| skate_bind.get(i).copied().flatten()).collect();
-        self.fit = Some(Fit { offset, source_bind, hips, hinge, sole: [Vec3::ZERO; 2], deck: None });
+        let leg = |a: Vec3, b: Vec3, c: Vec3| a.distance(b) + b.distance(c);
+        let skate_leg = leg(need("LEFTUPLEG")?, need("LEFTLEG")?, need("LEFTFOOT")?);
+        let gta_leg = leg(g("SKEL_L_Thigh")?, g("SKEL_L_Calf")?, g("SKEL_L_Foot")?);
+        let leg_ratio = if skate_leg > 1e-3 && gta_leg.is_finite() { (gta_leg / skate_leg).clamp(0.3, 1.0) } else { 1.0 };
+        self.fit = Some(Fit { offset, source_bind, hips, hinge, sole: [Vec3::ZERO; 2], deck: None, leg_ratio });
         Ok(())
     }
 
@@ -1017,7 +1026,12 @@ impl PedModel {
         // GTA's pelvis joint sits above its hips: place it so the GTA hip
         // joints straddle Skate's.
         let pelvis_rot = rot[self.pelvis]?;
-        let hips = (target(self.hip_sources[0])? + target(self.hip_sources[1])?) * 0.5;
+        let mut hips = (target(self.hip_sources[0])? + target(self.hip_sources[1])?) * 0.5;
+        let foot = |side: usize| self.mapped[self.limbs[side][2]].and_then(target).map(|p| p + shift[side]);
+        if let (true, Some(left), Some(right)) = (fit.leg_ratio < 1.0, foot(0), foot(1)) {
+            let feet = (left + right) * 0.5;
+            hips = feet + (hips - feet) * fit.leg_ratio;
+        }
         let pelvis = rigid(pelvis_rot, hips - pelvis_rot * fit.hips);
         let mut world = self.fk(pelvis, &rot, &pos);
         // A hand in contact beyond the GTA arm's reach (its shoulder sits
@@ -1491,6 +1505,19 @@ mod tests {
         for bone in ["SKEL_R_UpperArm", "SKEL_R_Forearm", "SKEL_R_Hand"] {
             assert!(Mat3::from_mat4(at(&model, &world, bone)).abs_diff_eq(Mat3::IDENTITY, 1e-4), "{bone}");
         }
+    }
+
+    #[test]
+    fn a_shorter_ped_lowers_its_hips_so_its_feet_reach_skates() {
+        // Skate's skater 1.25x the GTA rig (a small add-on ped): at Skate's
+        // hip height the legs fell short; lowered by the leg ratio they reach.
+        let (model, _) = fitted("short", |p| p * 1.25);
+        let world = model.pose(&vec![Some(Mat4::IDENTITY); model.sources.len()]).unwrap();
+        for (gta, skate) in [("SKEL_L_Foot", [0.1, 0., 0.1]), ("SKEL_R_Foot", [-0.1, 0., 0.1])] {
+            let p = at(&model, &world, gta).w_axis.truncate();
+            assert!(p.distance(Vec3::from(skate) * 1.25) < 1e-3, "{gta} at {p}");
+        }
+        assert!(at(&model, &world, "SKEL_Pelvis").w_axis.z < 0.95 * 1.25 - 0.1, "hips lowered");
     }
 
     #[test]

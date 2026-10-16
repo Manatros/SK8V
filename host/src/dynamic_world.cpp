@@ -178,7 +178,9 @@ bool DynamicWorld::AddBody(int entity, EntityKind kind) {
             return false;
         }
     }
-    if (route == PropCollisionIndex::Route::None) { ++stats_.missingBounds; return false; }
+    // A large object with no template (a stunt prop, a trainer's spawn) still
+    // goes: the runtime reads its bound from GTA's physics level, never a box.
+    if (route == PropCollisionIndex::Route::None && (kind != EntityKind::Object || isDoor)) { ++stats_.missingBounds; return false; }
     body.flags = PropCollisionIndex::AllowsBox(route) ? 1u : 0u; // Exact gaps must NEVER be filled by the fallback box.
     bodies_.push_back(body);
     if (exact) ++stats_.exactBounds;

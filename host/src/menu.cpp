@@ -1,5 +1,6 @@
 // In-game settings menu (see menu.h).
 #include "menu.h"
+#include "menu_presets.h"
 #include <windows.h>
 #include <main.h>
 #include <map>
@@ -29,6 +30,7 @@ int g_level = 0;                // 0 categories, 1 a page's items
 int g_sel[2] = {0, 0};          // selection per level
 int g_pageIndex = 0;
 std::map<std::string, std::string> g_cache;  // INI text per key, refreshed on open
+std::vector<std::pair<std::string, std::string>> g_presetDefaults;
 std::string g_status;
 ULONGLONG g_statusUntil = 0;
 
@@ -55,19 +57,108 @@ void Refresh() {
 }
 
 void Say(const std::string& text) {
+    // Menu actions release controls before invoking their callback. Preset/save
+    // confirmations and failures need to restore the page so the result is visible.
+    g_open = true;
     g_status = text;
     g_statusUntil = GetTickCount64() + 2500;
 }
 
-void Commit(Item& it, const std::string& value) {
-    if (!WritePrivateProfileStringW(L"SkateV", Wide(it.key).c_str(), Wide(value).c_str(), g_ini.c_str())) {
-        Say("Could not save SkateVLegacy.ini");
-        return;
+using presets::Settings;
+Settings Current() {
+    Settings out;
+    for (const auto& page : g_pages) for (const auto& item : page.items)
+        if (!item.key.empty()) out[item.key] = ReadIni(item);
+    return out;
+}
+
+// Snapshots are complete, versioned sections; missing/old/corrupt snapshots never
+// become a partial preset. Empty choice values (e.g. SkateRadio) are legitimate.
+bool Snapshot(const wchar_t* section, Settings& out, bool& exists) {
+    wchar_t marker[32]{};
+    GetPrivateProfileStringW(section, L"__schema", L"", marker, 32, g_ini.c_str());
+    exists = *marker != 0;
+    if (!exists || std::wstring(marker) != L"1") return false;
+    for (const auto& [key, unused] : Current()) {
+        wchar_t value[1024]{};
+        GetPrivateProfileStringW(section, Wide(key).c_str(), L"\x1", value, 1024, g_ini.c_str());
+        if (value[0] == 1 && value[1] == 0) return false;
+        out[key] = util::Narrow(value);
     }
-    g_cache[it.key] = value;
-    if (it.apply) it.apply(value);
-    Say(it.restart ? "Saved - applies after restarting GTA" : "Saved");
-    if (g_log) g_log(("SkateV menu: " + it.key + "=" + value).c_str());
+    const auto count = GetPrivateProfileIntW(section, L"__count", -1, g_ini.c_str());
+    std::string error;
+    return count == out.size() && presets::Validate(g_pages, out, error);
+}
+
+bool User(Settings& out) {
+    bool exists = false;
+    if (Snapshot(L"Preset.User", out, exists)) return true;
+    if (exists) { Say("User snapshot invalid; settings unchanged"); return false; }
+    out = Current();
+    std::string error;
+    if (!presets::Validate(g_pages, out, error)) { Say(error); return false; }
+    return true;
+}
+
+bool WriteSection(const std::wstring& path, const wchar_t* section, const Settings& values, bool snapshot) {
+    if (snapshot && !WritePrivateProfileStringW(section, nullptr, nullptr, path.c_str())) return false;
+    for (const auto& [key, value] : values)
+        if (!WritePrivateProfileStringW(section, Wide(key).c_str(), Wide(value).c_str(), path.c_str())) return false;
+    return !snapshot || (WritePrivateProfileStringW(section, L"__schema", L"1", path.c_str()) &&
+        WritePrivateProfileStringW(section, L"__count", std::to_wstring(values.size()).c_str(), path.c_str()));
+}
+
+// Stage all sections beside the INI, flush, then replace it once. No callbacks or
+// active values change unless every write succeeds. Unrelated INI sections survive.
+bool Save(const Settings* active, const Settings* user, const Settings* custom) {
+    const auto temp = g_ini + L".preset.tmp";
+    if (!CopyFileW(g_ini.c_str(), temp.c_str(), FALSE)) {
+        if (GetLastError() != ERROR_FILE_NOT_FOUND) { Say("Could not stage settings; unchanged"); return false; }
+        const HANDLE file = CreateFileW(temp.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+        if (file == INVALID_HANDLE_VALUE) { Say("Could not stage settings; unchanged"); return false; }
+        CloseHandle(file);
+    }
+    const bool written = (!active || WriteSection(temp, L"SkateV", *active, false)) &&
+        (!user || WriteSection(temp, L"Preset.User", *user, true)) &&
+        (!custom || WriteSection(temp, L"Preset.Custom", *custom, true));
+    // The profile-cache flush operation has no useful success return value.
+    WritePrivateProfileStringW(nullptr, nullptr, nullptr, temp.c_str());
+    const HANDLE file = CreateFileW(temp.c_str(), GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE,
+                                   nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    const bool flushed = file != INVALID_HANDLE_VALUE && FlushFileBuffers(file);
+    if (file != INVALID_HANDLE_VALUE) CloseHandle(file);
+    if (!written || !flushed || !MoveFileExW(temp.c_str(), g_ini.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
+        DeleteFileW(temp.c_str()); Say("Could not save settings; unchanged"); return false;
+    }
+    WritePrivateProfileStringW(nullptr, nullptr, nullptr, g_ini.c_str());
+    return true;
+}
+
+bool Activate(const std::string& name, const Settings& next, const Settings* user, bool changedOnly = false) {
+    std::string error;
+    if (!presets::Validate(g_pages, next, error)) { Say(error); return false; }
+    const auto previous = Current();
+    if (!Save(&next, user, nullptr)) return false;
+    bool restart = false;
+    g_cache = next;
+    for (auto& page : g_pages) for (auto& item : page.items) {
+        if (item.key.empty()) continue;
+        const auto& value = next.at(item.key);
+        if (item.restart && previous.at(item.key) != value) restart = true;
+        if (item.apply && (!changedOnly || previous.at(item.key) != value)) item.apply(value);
+    }
+    Say(name + (restart ? " saved - restart GTA required" : " applied"));
+    if (g_log) g_log(("SkateV preset: " + name + (restart ? " (restart required)" : "")).c_str());
+    return true;
+}
+
+void Commit(Item& it, const std::string& value) {
+    Settings user;
+    if (!User(user)) return;
+    user[it.key] = value;
+    auto next = Current();
+    next[it.key] = value;
+    Activate("User change", next, &user, true);
 }
 
 void Beep(const char* name) { Call<void>(gta::PLAY_SOUND_FRONTEND, -1, name, "HUD_FRONTEND_DEFAULT_SOUNDSET", 1); }
@@ -277,21 +368,52 @@ void Navigate() {
 
 void Start(const std::wstring& ini, std::vector<Page> pages, std::function<unsigned()> padButtons, LogFn log) {
     g_ini = ini, g_pages = std::move(pages), g_pad = std::move(padButtons), g_log = log;
+    g_cache.clear();
+    g_presetDefaults.clear();
 }
 
-void ApplyPreset(const std::string& name, const std::vector<std::pair<std::string, std::string>>& settings) {
+void SetPresetDefaults(std::vector<std::pair<std::string, std::string>> defaults) {
+    g_presetDefaults = std::move(defaults);
+}
+
+bool ApplyPreset(const std::string& name, const std::vector<std::pair<std::string, std::string>>& settings) {
+    Settings next, user;
+    std::string error;
+    if (!presets::Build(g_pages, g_presetDefaults, settings, next, error)) { Say(error); return false; }
+    return User(user) && Activate(name, next, &user);
+}
+
+bool ApplySettings(const std::string& name, const std::vector<std::pair<std::string, std::string>>& settings) {
+    auto next = Current();
     for (const auto& [key, value] : settings) {
-        Item* found = nullptr;
-        for (Page& page : g_pages)
-            for (Item& item : page.items)
-                if (item.key == key) { found = &item; break; }
-        if (!found) { Say("Preset setting unavailable: " + key); return; }
-        Commit(*found, value);
-        if (g_cache[key] != value) return;
+        if (!next.count(key)) { Say("Setting unavailable: " + key); return false; }
+        next[key] = value;
     }
-    Toggle(); // Keep the preset page visible, with confirmation after refreshing saved values.
-    Say(name + " preset saved");
-    if (g_log) g_log(("SkateV preset: " + name).c_str());
+    Settings user;
+    return User(user) && Activate(name, next, &user);
+}
+
+bool RestoreUserPreset() {
+    Settings user;
+    return User(user) && Activate("User", user, &user);
+}
+
+bool SaveCustomPreset() {
+    const auto current = Current();
+    std::string error;
+    if (!presets::Validate(g_pages, current, error)) { Say(error); return false; }
+    if (!Save(nullptr, nullptr, &current)) return false;
+    Say("Custom preset saved (keyboard bindings stay personal)");
+    return true;
+}
+
+bool RestoreCustomPreset() {
+    Settings custom, user;
+    bool exists = false;
+    if (!Snapshot(L"Preset.Custom", custom, exists)) {
+        Say(exists ? "Custom snapshot invalid; settings unchanged" : "Save a Custom preset first"); return false;
+    }
+    return User(user) && Activate("Custom", custom, &user);
 }
 
 void Toggle() {
@@ -317,6 +439,7 @@ void OpenPage(const std::string& title) {
 }
 
 bool IsOpen() { return g_open; }
+void Status(const std::string& text) { Say(text); }
 
 void DrawPanel(const std::string& banner, const std::string& title, const std::string& counter,
                const std::vector<PanelRow>& rows, const std::string& help) {

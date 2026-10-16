@@ -106,16 +106,17 @@ static DUMPS: AtomicUsize = AtomicUsize::new(0);
 static OWN_BASE: AtomicUsize = AtomicUsize::new(0);
 
 /// Runtime thread stages the watchdog watches: a stage code and when it
-/// was entered (ms since install; 0 = idle).
+/// was entered (ms since install; 0 = idle), reported past `limit` ms.
 pub struct Stage {
     pub name: &'static str,
+    limit: u64,
     code: AtomicU32,
     since: AtomicU64,
 }
 
 impl Stage {
-    const fn new(name: &'static str) -> Stage {
-        Stage { name, code: AtomicU32::new(0), since: AtomicU64::new(0) }
+    const fn new(name: &'static str, limit: u64) -> Stage {
+        Stage { name, limit, code: AtomicU32::new(0), since: AtomicU64::new(0) }
     }
     pub fn enter(&self, code: u32) {
         self.code.store(code, Ordering::Relaxed);
@@ -126,8 +127,10 @@ impl Stage {
     }
 }
 
-pub static AUDIO: Stage = Stage::new("skatev-audio");
-pub static WORKER: Stage = Stage::new("skatev-skate");
+pub static AUDIO: Stage = Stage::new("skatev-audio", 4000);
+pub static WORKER: Stage = Stage::new("skatev-skate", 4000);
+/// The session preload (14-38 s in players' logs); a player's never finished.
+pub static PRELOAD: Stage = Stage::new("skatev-preload", 120_000);
 
 fn now_ms() -> u64 {
     STATE.get().map_or(0, |s| s.start.elapsed().as_millis() as u64)
@@ -312,8 +315,8 @@ fn private_bytes() -> usize {
 }
 
 fn watchdog() {
-    let mut reported = [false; 2];
-    let mut stall_dumped = false;
+    let mut reported = [false; 3];
+    let mut stall_dumped = [false; 3];
     let base_private = private_bytes();
     let mut next_memory = base_private + (1 << 30);
     let (mut repeats, mut repeats_at) = (0, 0);
@@ -325,14 +328,14 @@ fn watchdog() {
             write_line(&format!("crash: reported faults came back {} more times ({r} in all)", r - repeats));
             (repeats, repeats_at) = (r, now);
         }
-        for (k, stage) in [&AUDIO, &WORKER].into_iter().enumerate() {
+        for (k, stage) in [&AUDIO, &WORKER, &PRELOAD].into_iter().enumerate() {
             let since = stage.since.load(Ordering::Relaxed);
             let busy = if since == 0 { 0 } else { now.saturating_sub(since) };
-            if busy > 4000 && !reported[k] {
+            if busy > stage.limit && !reported[k] {
                 reported[k] = true;
                 write_line(&format!("crash: {} busy {busy} ms in stage {}", stage.name, stage.code.load(Ordering::Relaxed)));
-                if !stall_dumped {
-                    stall_dumped = true;
+                if !stall_dumped[k] {
+                    stall_dumped[k] = true;
                     dump("stall", 0, 0);
                 }
             } else if busy == 0 && reported[k] {

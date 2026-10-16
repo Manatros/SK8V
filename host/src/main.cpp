@@ -81,8 +81,11 @@ struct Config {
     bool wheelsFromPaint = true; // WheelsFromPaint: painted wheels set the wheel hardness (matte soft .. metallic hard)
     bool vehicleShapes = true; // VehicleShapes: survey vehicles without an extracted bound (a roof to ride, a gap to hippie jump)
     bool drawBoard = true;    // DrawBoard: the native board object (and its mesh fallback)
+    bool skateHud = true;    // Master visibility for every Skate overlay; F10 remains available.
+    bool hud = true;         // Original Skate HUD within the master visibility gate.
     bool showDebug = false;   // ShowDebug=1: old debug text HUD (the original Skate HUD is hud_overlay)
     bool verboseLog = false;  // VerboseLog=1: periodic runtime log lines (perf, skater trace, collision streaming)
+    bool threadCensus = false; // Separate opt-in: enumerating process threads can stall the game tick.
     bool loadRuntime = true;  // Runtime=0: ASI + frame-timing log only (A/B testing)
     bool posePed = true;      // PosePed: Skate's pose on the real ped (ped vtable slot 65 wrapper)
     bool carryBoard = false;  // CarryBoard (SkateMods): the board picked in the wheel stays in hand; E/F get on (off: SK8V's way)
@@ -275,8 +278,11 @@ const Key kKeys[] = {
     {"WheelsFromPaint", Store<&Config::wheelsFromPaint>},
     {"VehicleShapes", Store<&Config::vehicleShapes>},
     {"DrawBoard", Store<&Config::drawBoard>},
+    {"SkateHud", Store<&Config::skateHud>},
+    {"Hud", Store<&Config::hud>},
     {"ShowDebug", Store<&Config::showDebug>},
     {"VerboseLog", Store<&Config::verboseLog>},
+    {"ThreadCensus", Store<&Config::threadCensus>},
     {"Runtime", Store<&Config::loadRuntime>},
     {"PosePed", Store<&Config::posePed>},
     {"CarryBoard", Store<&Config::carryBoard>},
@@ -545,6 +551,7 @@ XInputGetStateFn PadGetState() {
 
 // Keyboard and mouse: on when the runtime has them and the INI allows it.
 bool g_keyboard = false;
+bool g_weaponWheel = false;
 bool g_boardArmed = false; // a gun out on the board: the mouse buttons aim and shoot
 // The controller is what the player uses now (the keyboard and mouse were not
 // touched since it was): the keys on screen hide, M and F stay the pad's.
@@ -659,7 +666,7 @@ SvPad ReadPadRaw() {
         SvPad keys{};
         const float mx = Call<float>(gta::GET_DISABLED_CONTROL_NORMAL, 0, 1);
         const float my = Call<float>(gta::GET_DISABLED_CONTROL_NORMAL, 0, 2);
-        bool typed = g_runtime.KeyboardPad(mx, my, dt, GameFocused() && !menu::IsOpen(), keys);
+        bool typed = g_runtime.KeyboardPad(mx * 100.0f, my * 100.0f, dt, GameFocused() && !menu::IsOpen() && !g_weaponWheel, keys, !g_boardArmed);
         // GTA's own weapon keys on the board: Tab is the gun button (tap: gun
         // out or away, hold: GTA's weapon wheel), and with a gun out the
         // right mouse button aims and the left one shoots (SK8V's drive-by
@@ -776,8 +783,9 @@ public:
         if (ms > maxFrame_) maxFrame_ = ms;
         if (ms > 50.0) {
             ++hitches_;
-            if (util::g_verbose) Logf("hitch %.1f ms (skating %d): SkateV script work %.2f ms", ms, active ? 1 : 0, lastWork_);
+            if (util::g_verbose) Logf("hitch %.1f ms (skating %d): SkateV script work %.2f ms; prior diagnostic report %.2f ms", ms, active ? 1 : 0, lastWork_, lastReport_);
         }
+        lastReport_ = 0.0;
         activeFrames_ += active ? 1 : 0;
         for (int i = 0; i < kPartCount; ++i) {
             if (active) g_partMs[i] += g_frameMs[i];
@@ -785,6 +793,7 @@ public:
         }
         const double windowMs = static_cast<double>(now.QuadPart - window_.QuadPart) * 1000.0 / static_cast<double>(freq_.QuadPart);
         if (windowMs >= 10000.0) {
+            const double reportStart = Now();
             const unsigned draws = boardstencil::TakeAllDraws();
             if (util::g_verbose) Logf("frames %.1fs: %u frames (%.1f fps), worst %.1f ms, %u over 50 ms, SkateV work avg %.3f ms max %.3f ms, skating %u/%u (GTA's camera %u), GTA indexed draws %.0f/frame",
                  windowMs / 1000.0, frames_, frames_ * 1000.0 / windowMs, maxFrame_, hitches_,
@@ -806,11 +815,16 @@ public:
                      pose.mainMs / activeFrames_, pose.workerMs / activeFrames_, pose.calls);
             }
             // Every thread's CPU in or out of skate mode: what skating makes busier, GTA's threads included.
-            if (util::g_verbose) Logf("threads ms/s: %s", threadcensus::Report(windowMs / 1000.0, 12).c_str());
+            if (util::g_verbose && g_config.threadCensus)
+                Logf("threads ms/s: %s", threadcensus::Report(windowMs / 1000.0, 12).c_str());
+            else threadcensus::Reset(); // A later opt-in starts with a fresh CPU baseline.
             for (double& v : g_partMs) v = 0.0;
             frames_ = hitches_ = activeFrames_ = 0;
             maxFrame_ = workTotal_ = workMax_ = 0.0;
             window_ = now;
+            lastReport_ = Now() - reportStart;
+            if (util::g_verbose) Logf("frames: diagnostic report %.3f ms (thread census %s)", lastReport_,
+                                      g_config.threadCensus ? "on; may cause hitches" : "off");
         }
     }
     void Work(double ms) {
@@ -823,6 +837,7 @@ private:
     LARGE_INTEGER freq_{}, last_{}, window_{};
     unsigned frames_ = 0, hitches_ = 0, activeFrames_ = 0;
     double maxFrame_ = 0.0, workTotal_ = 0.0, workMax_ = 0.0, lastWork_ = 0.0;
+    double lastReport_ = 0.0;
 };
 
 // ---- session ---------------------------------------------------------------
@@ -1412,6 +1427,12 @@ void Track(Session& s, bool force) {
     g_runtime.LifecycleTrack(t);
 }
 
+// A Windows compatibility layer that makes every heap call ~15x slower
+// (measured: Vista, 7 and 8 layers; 8.1, XP and the DPI/fullscreen options
+// are not): a player's GTA in Windows 7 mode never finished preparing Skate.
+// Empty when GTA runs without one.
+std::string g_slowCompatLayer;
+
 // The Skate session exists and the collision working set covers the player.
 bool AreaReady(const char*& why) {
     SvLifecycleState l{};
@@ -1468,6 +1489,13 @@ void TryEnter(Session& s, const Config& cfg, bool strict) {
         return;
     }
     if (const char* why = nullptr; !AreaReady(why)) {
+        static bool compatWarned = false;
+        if (!g_slowCompatLayer.empty() && !compatWarned) {
+            compatWarned = true;
+            Notify(s, "GTA V runs in Windows " + g_slowCompatLayer +
+                          " compatibility mode, which slows SK8V's loading ~20x. Untick it in GTA5.exe and PlayGTAV.exe Properties > Compatibility",
+                   10000);
+        }
         Track(s, true); // also starts preparation when BackgroundPrepare=0
         SetState(s, LifeState::Waiting, why);
         return;
@@ -1644,7 +1672,7 @@ void StopAim(Session& s, bool restoreCam) {
 // Each control is named, so GTA's related actions (disableRelatedActions) are
 // not walked: that walk cost a player 2.4 ms a frame for the ~310 calls
 // (8 us each against 0.08 on the owner's PC).
-bool g_weaponWheel = false;
+
 
 // Script frames since each control last read non-zero. Only controls in use (or released within
 // the last frames, for GTA's just-released checks) are disabled: DISABLE_CONTROL_ACTION took
@@ -1656,7 +1684,8 @@ constexpr std::uint8_t kControlHoldFrames = 10;
 // A disabled GTA axis still reports controller trick input; it is not a
 // mouse delta merely because a script camera wants to look around.
 bool SkateMouseLook() {
-    return !g_controller && Call<BOOL>(gta::IS_USING_KEYBOARD_AND_MOUSE, 0);
+    return !g_controller && (g_boardArmed || !g_runtime.KeyboardMouseTricks()) &&
+           Call<BOOL>(gta::IS_USING_KEYBOARD_AND_MOUSE, 0);
 }
 
 void ReadSkateCameraLook(float& x, float& y) {
@@ -1741,7 +1770,7 @@ void StepRadio(Session& s, int dir) {
         Call<void>(gta::SET_MOBILE_RADIO_ENABLED_DURING_GAMEPLAY, 0);
         Call<void>(gta::SET_AUDIO_FLAG, "MobileRadioInGame", 0);
         s.radioDue = 0;
-        if (!hudoverlay::ShowRadio("Radio Off", "", "", "OFF")) Notify(s, "Radio off", 1500);
+        if (g_config.skateHud && !hudoverlay::ShowRadio("Radio Off", "", "", "OFF")) Notify(s, "Radio off", 1500);
         return;
     }
     Call<void>(gta::SET_AUDIO_FLAG, "MobileRadioInGame", 1);
@@ -1807,6 +1836,7 @@ void RadioTick(Session& s) {
     std::string station = GameText(id);
     if (station.empty()) station = id ? id : "Radio";
     // Station as the heading, then song, then artist.
+    if (!g_config.skateHud) return;
     const bool shown = known ? hudoverlay::ShowRadio(station.c_str(), song.c_str(), artist.c_str(), id ? id : "")
                              : hudoverlay::ShowRadio(station.c_str(), "", "", id ? id : "");
     if (!shown) Notify(s, known ? song + " - " + artist : station, 2500);
@@ -2808,6 +2838,8 @@ void UpdateActive(Session& s, const Config& cfg, const SvPad& pad) {
     }
 
     Lap(kPartPose);
+    // CameraView=Skate (view 0): use SK8V's original output below.
+    // Orbit/head/action views are separate additions; never replace this path.
     if (o.camera_valid) {
         Call<void>(gta::SET_CAM_COORD, s.cam, o.camera_position.x, o.camera_position.y, o.camera_position.z);
         Call<void>(gta::SET_CAM_ROT, s.cam, o.camera_rotation.x, o.camera_rotation.y, o.camera_rotation.z, 2);
@@ -2874,7 +2906,7 @@ void UpdateActive(Session& s, const Config& cfg, const SvPad& pad) {
     BoardWeather(s, cfg, nativeBoard ? &boardPose : nullptr);
     if (cfg.drawSkater && !nativeBoard) DrawBoardMesh();
     if (g_quirkRequested.exchange(false) && cfg.backwardsMan) g_runtime.TriggerQuirk(0);
-    if (cfg.showDebug) { // dev only; the player sees hud_overlay
+    if (cfg.skateHud && cfg.showDebug) { // dev only; the player sees hud_overlay
         SvScoreState score{};
         g_runtime.Score(score);
         DrawHud(o, score, true);
@@ -3045,7 +3077,7 @@ void LifecycleFrame(Session& s, const Config& cfg, bool f6) {
     }
     case LifeState::Skating: {
         SvPad pad = ReadPad(); // once per frame
-        if (cfg.showInputs) DrawInputs(pad);
+        if (cfg.skateHud && cfg.showInputs) DrawInputs(pad);
         // Keyboard: F puts the board away in one press, as Y held does: Skate
         // steps off first, then the board goes away. Read from the key itself
         // (GTA's enter/exit is the pad's Y, whose tap mounts and dismounts).
@@ -3280,22 +3312,21 @@ const std::string& TestPackageReceipt() {
 void AppendDeveloperPage(std::vector<menu::Page>& pages, Session& s) {
     using namespace menu;
     for (auto& page : pages) if (page.title == "Presets") {
-        page.items.push_back(Action("Developer - inputs, HUD and logs", [] {
-            ApplyPreset("Developer", {{"ShowInputs", "1"}, {"ShowDebug", "1"},
-                {"VerboseLog", "1"}, {"KeyboardHints", "1"}, {"TrickAnalyzer", "1"}, {"Hud", "1"}});
-            // Hud is normally restart-only; this diagnostic action can safely
-            // reinitialize the existing renderer through its guarded Start.
-            if (g_runtime.IsLoaded()) {
-                hudoverlay::Start(g_gameDir + L"SkateVLegacy.ini", g_runtime.Handle(), Log);
-                hudoverlay::SetTrickAnalyzer(g_config.trickAnalyzer);
-            }
+        page.items.push_back(Action("Developer - complete test baseline", [] {
+            ApplyPreset("Developer", {{"SkateHud", "1"}, {"ShowInputs", "1"}, {"ShowDebug", "1"},
+                {"VerboseLog", "1"}, {"KeyboardHints", "1"}, {"TrickAnalyzer", "1"}, {"Hud", "1"},
+                {"HallOfMeatMetrics", "1"}, {"Stamina", "0"}, {"PedsSurvive", "1"}});
         }));
     }
     // Provenance stays in Developer. Source basis, compiled host and installer
     // receipt are different facts; none detects arbitrary third-party installs.
     pages.push_back({"Developer", {
         Action("Disable diagnostic overlays and verbose log", [] {
-            ApplyPreset("Diagnostics off", {{"ShowInputs", "0"}, {"ShowDebug", "0"}, {"VerboseLog", "0"}});
+            ApplySettings("Diagnostics off", {{"ShowInputs", "0"}, {"ShowDebug", "0"}, {"VerboseLog", "0"}});
+        }),
+        Action("Test controls: Advanced", [] { menu::OpenPage("Advanced"); }),
+        Action("Skate cheats: Motorized / BackwardsMan / multipliers", [&s] {
+            Notify(s, "Advanced: Motorized difficulty, BackwardsMan, stamina and trainer multipliers are individually configurable. Costly probes are opt-in.", 9000);
         }),
         Action("SK8V source tag: " SK8V_SOURCE_TAG, [&s] {
             Notify(s, "Nearest SK8V source tag: " SK8V_SOURCE_TAG ". Source metadata, not an installed-release detector.", 7000);
@@ -3442,12 +3473,23 @@ std::vector<menu::Page> MenuPages(Session& s) {
     // Keyboard keys (contributed by GTAxSkate): Enter, then the new key; saved to SkateVKeys.txt.
     {
         menu::Page keys{"Keyboard keys", {}};
-        // The whole layout first: GTAxSkate's (GTA-like) or like a controller in Skate 3.
-        keys.items.push_back(menu::Choice("Layout", "KeyLayout", {"standard", "skate"},
-                                          {"GTAxSkate standard (GTA-like)", "Skate (I J K L trick stick, U O diagonals)"},
-                                          [](const std::string& v) {
-                                              if (g_runtime.KeyboardLayout(v.c_str())) g_keyHints[0].clear(), g_keyHints[1].clear();
-                                          }));
+        // Explicit actions avoid a stale INI label after individual rebinding.
+        const auto applyKeys = [](const char* command) {
+            if (g_runtime.KeyboardLayout(command)) {
+                g_keyHints[0].clear(); g_keyHints[1].clear();
+                Logf("SkateV keys: %s", command);
+            } else {
+                g_routeNotice = "Keys could not be saved/loaded; check the key file.";
+                Logf("SkateV keys: FAILED %s", command);
+            }
+        };
+        keys.items.push_back(Action("GTA - Shift push, Space pop, arrow tricks", [applyKeys] { applyKeys("standard"); }));
+        keys.items.push_back(Action("Twin Stick - WASD + IJKL, Space push", [applyKeys] { applyKeys("skate"); }));
+        keys.items.push_back(Action("Mouse Flick - hold CapsLock for tricks", [applyKeys] { applyKeys("mouse"); }));
+        keys.items.push_back(Action("Arcade - Space ollie, U/O flips, H/L shoves", [applyKeys] { applyKeys("arcade"); }));
+        keys.items.push_back(Action("Save my personal bindings", [applyKeys] { applyKeys("save_custom"); }));
+        keys.items.push_back(Action("Restore my personal bindings", [applyKeys] { applyKeys("custom"); }));
+        keys.items.push_back(Action("Restore bindings from before presets", [applyKeys] { applyKeys("original"); }));
         const std::pair<const char*, const char*> actions[] = {
             {"lean_forward", "Lean forward / walk"}, {"lean_back", "Lean back"}, {"steer_left", "Steer left"},
             {"steer_right", "Steer right"}, {"a", "Push"}, {"pop", "Ollie (hold, let go)"}, {"trick_up", "Trick stick up"},
@@ -3455,13 +3497,20 @@ std::vector<menu::Page> MenuPages(Session& s) {
             {"manual", "Manual"}, {"nose_manual", "Nose manual"}, {"lt", "Left grab"}, {"rt", "Right grab"},
             {"hippie", "Hippie jump"}, {"y", "Get on / off (hold: put away)"}, {"x", "X"}, {"b", "B"},
             {"retry", "Radio: previous"}, {"object_dropper", "Radio: next"}, {"marker_place", "Set a marker"},
-            {"marker_return", "Back to the marker (hold)"}};
+            {"marker_return", "Back to the marker (hold)"},
+            {"mouse_trick", "Hold: mouse trick stick"}, {"lb", "Left bumper / modifier"},
+            {"rb", "Hold: skitch"}, {"rs", "Right stick click"},
+            {"ollie", "Arcade: ollie"}, {"nollie", "Arcade: nollie"},
+            {"kickflip", "Arcade: kickflip"}, {"heelflip", "Arcade: heelflip"},
+            {"shove_back", "Arcade: shove-it"}, {"shove_front", "Arcade: front shove-it"},
+            {"flip_360", "Arcade: 360 flip"}};
         for (const auto& [id, label] : actions) {
             const std::string action = id;
             keys.items.push_back(menu::Key(
                 label, [action] { const std::string k = g_runtime.KeyboardKey(action.c_str()); return k.empty() ? std::string("-") : k; },
                 [action](int vk) {
                     if (g_runtime.KeyboardBind(action.c_str(), vk)) g_keyHints[0].clear(), g_keyHints[1].clear();
+                    else g_routeNotice = "Key is reserved for GTA, or could not be saved.";
                 }));
         }
         pages.push_back(std::move(keys));
@@ -3474,8 +3523,8 @@ std::vector<menu::Page> MenuPages(Session& s) {
         Choice("Keep the view (walking and skating)", "CameraRemember", {"1", "0"},
                {"On: the view last used", "Off: always the standard view"}, Bound("CameraRemember")),
         Choice("Standard view (V cycles)", "CameraView", {"Skate", "Near", "Middle", "Far", "FirstPerson", "Head"},
-               {"Skate 3", "Near", "Middle", "Far", "First person", "First person (skater's eyes)"}, Bound("CameraView")),
-        Choice("Skate 3 camera", "Camera", {"High", "Low"}, {"High (Skate 3 default)", "Low"},
+               {"Original SK8V / Skate 3", "Near", "Middle", "Far", "First person", "First person (skater's eyes)"}, Bound("CameraView")),
+        Choice("Original SK8V camera height", "Camera", {"High", "Low"}, {"High (Skate 3 default)", "Low"},
                Bound("Camera", [] { g_runtime.SetCameraType(g_config.cameraType); })),
         Number("Field of view scale", "CameraFovScale", D.fovScale, 0.5f, 1.5f, 0.05f, Fixed("x%.2f"), Bound("CameraFovScale")),
         Choice("Cinematic camera look (R)", "CinemaFilter", {"NG_filmic01", "NG_filmic02", "NG_filmic03", "NG_filmic04", "NG_filmic05", "NG_filmic09", "NG_filmic13", "NG_filmic20", "none"},
@@ -3495,7 +3544,12 @@ std::vector<menu::Page> MenuPages(Session& s) {
         Flag("Radio on LB + d-pad", "RadioControls", D.radioControls, Bound("RadioControls")),
         Flag("Keyboard and mouse", "Keyboard", D.keyboard, {}, true),
         Flag("Keyboard keys on screen", "KeyboardHints", D.keyboardHints, Bound("KeyboardHints")),
-        Flag("Original Skate HUD", "Hud", true, {}, true),
+        Flag("All Skate overlays", "SkateHud", true, Bound("SkateHud", [] {
+            hudoverlay::SetVisible(g_config.skateHud && g_config.hud);
+        })),
+        Flag("Original Skate HUD", "Hud", true, Bound("Hud", [] {
+            hudoverlay::SetVisible(g_config.skateHud && g_config.hud);
+        })),
         Flag("Trick Analyzer", "TrickAnalyzer", D.trickAnalyzer,
              Bound("TrickAnalyzer", [] { hudoverlay::SetTrickAnalyzer(g_config.trickAnalyzer); })),
     }});
@@ -3518,6 +3572,7 @@ std::vector<menu::Page> MenuPages(Session& s) {
         Flag("Skate with GTA's camera (frame cost A/B)", "GtaCamera", D.gtaCamera, Bound("GtaCamera")),
         Flag("Debug text HUD", "ShowDebug", D.showDebug, Bound("ShowDebug")),
         Flag("Verbose log", "VerboseLog", D.verboseLog, Bound("VerboseLog", [] { util::g_verbose = g_config.verboseLog; g_runtime.SetVerboseLog(g_config.verboseLog); })),
+        Flag("Thread CPU scan (may cause stutter; verbose log)", "ThreadCensus", D.threadCensus, Bound("ThreadCensus", [] { threadcensus::Reset(); })),
         Number("Ped Z offset", "PedZOffset", D.pedZOffset, 0, 2, 0.05f, Fixed("%.2f m"), Bound("PedZOffset")),
         Number("Track width", "TrackWidth", D.trackWidth, 0.02f, 0.5f, 0.02f, Fixed("%.2f m"), Bound("TrackWidth")),
         Number("Bail hit speed", "BailHitSpeed", D.bailHitSpeed, 0, 20, 0.5f, Fixed("%.1f m/s"), Bound("BailHitSpeed")),
@@ -3535,28 +3590,40 @@ std::vector<menu::Page> MenuPages(Session& s) {
         Choice("Audio placement", "AudioGtaPlacement", {"Position", "Tracker"}, {"Emitter positions", "Player ped"}, {}, true),
         Flag("Editor audio tone", "AudioEditorTone", false, {}, true),
         Flag("Stall sampler", "StallSampler", D.stallSampler, {}, true),
+        Flag("GPS route while skating", "GpsWhileSkating", D.gpsWhileSkating, Bound("GpsWhileSkating")),
+        Flag("Skate spot map blips", "SkateSpots", D.skateSpots, Bound("SkateSpots")),
+        Flag("Board shop", "BoardShop", D.boardShop, {}, true),
+        Flag("Wheel paint determines hardness", "WheelsFromPaint", D.wheelsFromPaint, Bound("WheelsFromPaint")),
+        Flag("Survey vehicle shapes", "VehicleShapes", D.vehicleShapes, Bound("VehicleShapes")),
+        Flag("Fallback board mesh", "DrawSkater", D.drawSkater, Bound("DrawSkater")),
+        Flag("Use GTA character", "GtaCharacter", D.gtaCharacter, {}, true),
+        Number("Skate skater triangle limit", "SkaterTriangles", D.skaterTriangles, 0, 50000, 1000, Fixed("%.0f"), {}, true),
+        Number("GTA character triangle limit", "CharacterTriangles", D.characterTriangles, 0, 50000, 1000, Fixed("%.0f"), {}, true),
     }});
     // Package-owned presentation: preserve every setting and its live callback.
     // Advanced is an explicit category; uncommon tuning no longer fills the main pages.
     std::vector<Page> sorted = {
         {"Presets", {
-            Action("GTA - LS Skate integration (WIP)", [&s] {
-                Notify(s, "WIP: LS Skate animation / integration is not available yet. Settings unchanged.", 6000);
+            Action("SK8V - official default settings", [] {
+                ApplyPreset("SK8V", {});
             }),
-            Action("Skate - SK8V focused", [] {
-                ApplyPreset("Skate", {{"CameraView", "Skate"}, {"Difficulty", "Normal"},
-                    {"Pop", "1"}, {"GrindPop", "1"}, {"PushSpeed", "1"}, {"PushPower", "1"},
-                    {"BoardAim", "1"}, {"HallOfMeat", "1"}, {"TrickAnalyzer", "1"},
-                    {"PedsSurvive", "1"}, {"PedLaunch", "0"}, {"VehicleDamage", "1"},
-                    {"VehiclePush", "0.2"}, {"Injuries", "1"}, {"Stamina", "1"}, {"KeyboardHints", "1"}});
+            Action("LS Skate - unavailable (requires LS adapter)", [&s] {
+                menu::Status("LS Skate implementation/animations unavailable; settings unchanged");
             }),
-            Action("RP - gentle world, minimal HUD", [] {
-                ApplyPreset("RP", {{"CameraView", "Near"}, {"Difficulty", "Hardcore"},
-                    {"Pop", "1"}, {"GrindPop", "1"}, {"PushSpeed", "1"}, {"PushPower", "1"},
-                    {"BoardAim", "0"}, {"HallOfMeat", "0"}, {"TrickAnalyzer", "0"},
-                    {"PedsSurvive", "1"}, {"PedLaunch", "0"}, {"VehicleDamage", "0"},
+            Action("RP - grounded values, no Skate overlays", [] {
+                ApplyPreset("RP", {{"SkateHud", "0"}, {"Hud", "0"}, {"ShowInputs", "0"},
+                    {"ShowDebug", "0"}, {"CameraView", "Near"}, {"CameraRemember", "0"},
+                    {"Difficulty", "Hardcore"}, {"Pop", "0.8"}, {"GrindPop", "0.8"},
+                    {"PushSpeed", "0.85"}, {"PushPower", "0.85"}, {"OffboardJump", "0.8"}, {"HippieJump", "0.8"},
+                    {"BoardAim", "0"}, {"HallOfMeat", "0"}, {"HallOfMeatMetrics", "0"},
+                    {"HallOfMeatXray", "0"}, {"TrickAnalyzer", "0"}, {"BackwardsMan", "0"},
+                    {"PedsSurvive", "0"}, {"PedLaunch", "0"}, {"PedLaunchScale", "0"},
+                    {"PedLaunchLift", "0"}, {"PedLaunchSpin", "0"}, {"VehicleDamage", "0"},
                     {"VehiclePush", "0"}, {"Injuries", "1"}, {"Stamina", "1"}, {"KeyboardHints", "0"}});
             }),
+            Action("User - restore my last manual settings", [] { RestoreUserPreset(); }),
+            Action("Custom - save current settings", [] { SaveCustomPreset(); }),
+            Action("Custom - restore saved settings", [] { RestoreCustomPreset(); }),
         }},
         {"Skating", {}}, {"Camera", {}}, {"Keyboard keys", {}},
         {"Controller and HUD", {}}, {"World and roleplay", {}}, {"Audio", {}},
@@ -3613,6 +3680,14 @@ void ScriptMain() {
         }
         Logf("SkateV Legacy: ASI files in game folder: %s", asis.c_str());
     }
+    if (char layer[512]{}; GetEnvironmentVariableA("__COMPAT_LAYER", layer, sizeof layer) - 1u < sizeof layer - 1) {
+        std::string upper(layer);
+        for (char& c : upper) c = static_cast<char>(toupper(static_cast<unsigned char>(c)));
+        for (const auto& [name, label] : {std::pair{"VISTA", "Vista"}, {"WIN7RTM", "7"}, {"WIN8RTM", "8"}})
+            if (upper.find(name) != std::string::npos) g_slowCompatLayer = label;
+        Logf("SkateV Legacy: Windows compatibility layer %s%s", layer,
+             g_slowCompatLayer.empty() ? "" : " (heap calls ~15x slower: Skate prepares ~20x slower)");
+    }
     const GameVersion version = ReadHostVersion();
     Logf("SkateV Legacy: host GTA5.exe %u.%u.%u.%u (required %u.%u.%u.%u)", version.major, version.minor,
          version.build, version.revision, kRequiredVersion.major, kRequiredVersion.minor, kRequiredVersion.build,
@@ -3654,6 +3729,7 @@ void ScriptMain() {
         Logf("SkateV Legacy: BackwardsMan %s chord %04x", cfg.backwardsMan ? "on" : "off", cfg.backwardsManChord);
         hudoverlay::Start(g_gameDir + L"SkateVLegacy.ini", g_runtime.Handle(), Log);
         hudoverlay::SetTrickAnalyzer(cfg.trickAnalyzer);
+        hudoverlay::SetVisible(cfg.skateHud && cfg.hud);
         boardstencil::Start(Log);
         recordsui::Start(g_runtime.Handle(), Log);
         Logf("SkateV Legacy: Hall of Meat %s (%s)", cfg.hallOfMeat ? "on" : "off",
@@ -3726,7 +3802,8 @@ void ScriptMain() {
             static DWORD nextFetch = 0;
             static std::string list;
             if (g_soundListToggle.exchange(false)) showList = !showList;
-            if (showList && g_runtime.IsLoaded()) {
+            if (!cfg.skateHud) showList = false;
+            if (cfg.skateHud && showList && g_runtime.IsLoaded()) {
                 if (GetTickCount() >= nextFetch) {
                     nextFetch = GetTickCount() + 250;
                     list = g_runtime.AudioDebugText();
@@ -3773,14 +3850,14 @@ void ScriptMain() {
             Notify(s, "runtime unavailable: " + error);
         }
 
-        if (!s.message.empty() && GetTickCount() < s.messageUntil) {
+        if (cfg.skateHud && !s.message.empty() && GetTickCount() < s.messageUntil) {
             Text(s.message.c_str(), 0.5f, 0.88f, 0.4f, 255, 255, 255, true);
         }
         // The cinematic camera and the filmer shoot a clean picture: no GTA HUD,
         // radar or Skate trick display while they run.
         const bool filming = s.state == LifeState::Skating && s.action != 0;
         if (filming) Call<void>(gta::HIDE_HUD_AND_RADAR_THIS_FRAME);
-        hudoverlay::Tick(s.state == LifeState::Skating && !filming);
+        hudoverlay::Tick(cfg.skateHud && s.state == LifeState::Skating && !filming);
         injuries::Tick(Call<Ped>(gta::PLAYER_PED_ID), s.state != LifeState::Skating && Call<BOOL>(gta::IS_PED_ON_FOOT, Call<Ped>(gta::PLAYER_PED_ID)),
                        cfg.injuries, Log);
         Lap(kPartHud);
@@ -3801,12 +3878,12 @@ void ScriptMain() {
         if (g_routeNotice) Notify(s, g_routeNotice, 3000), g_routeNotice = nullptr;
         Lap(kPartMenu);
         recordsui::Tick(s.state == LifeState::Skating,
-                        g_hallOfMeatOn && std::string_view(s.last.state_utf8).rfind("Wipeout", 0) == 0);
+                        g_hallOfMeatOn && std::string_view(s.last.state_utf8).rfind("Wipeout", 0) == 0, cfg.skateHud && !filming);
         if (s.state != LifeState::Skating) boardnative::Tick(false, SvBoardPose{}), boardstencil::SetActive(false);
         Lap(kPartRecords);
         gtaaudio::Tick(s.state == LifeState::Skating);
         Lap(kPartAudio);
-        if (s.state == LifeState::Skating && g_keyboard && !g_controller && g_config.keyboardHints && !menu::IsOpen())
+        if (s.state == LifeState::Skating && g_keyboard && !g_controller && g_config.skateHud && g_config.keyboardHints && !menu::IsOpen())
             DrawKeyboardHints(std::string_view(s.last.state_utf8).rfind("Biped", 0) == 0);
         skatemap::Tick(SkateOwnsPlayer(s), g_config.gpsWhileSkating, g_config.skateSpots);
         // M while skating: GTA's own interaction menu. It did not open because
@@ -3849,7 +3926,8 @@ void ScriptMain() {
         if (s.state == LifeState::Skating)
             boardshop::Riding(s.last.state_utf8, std::sqrt(s.last.velocity.x * s.last.velocity.x + s.last.velocity.y * s.last.velocity.y));
         boardshop::Tick(SkateOwnsPlayer(s) && !(s.state == LifeState::Skating &&
-                                                std::string_view(s.last.state_utf8).rfind("Biped", 0) == 0));
+                                                std::string_view(s.last.state_utf8).rfind("Biped", 0) == 0),
+                        cfg.carryBoard && s.state == LifeState::Ready);
         physlevel::Tick();
         Lap(kPartLevel);
         monitor.Work(monitor.Now() - workStart);

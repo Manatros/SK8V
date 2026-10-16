@@ -63,6 +63,7 @@ struct Shared {
     Published pub;
     std::atomic<UINT> backbufferWidth{0}, backbufferHeight{0};
     std::atomic<bool> stopping{false};
+    std::atomic<bool> visible{false};
 } g;
 
 template <class... A>
@@ -104,7 +105,7 @@ void Present(void* swapChainPtr) {
         Published& p = g.pub;
         // Stale publication (script thread stalled: loading, pause): hide.
         const bool fresh = GetTickCount64() - p.stamp < 500;
-        frame.visible = p.frame.visible && fresh;
+        frame.visible = g.visible.load() && p.frame.visible && fresh;
         if (frame.visible && p.frame.serial != frame.serial) {
             frame.serial = p.frame.serial;
             frame.width = p.frame.width;
@@ -116,13 +117,17 @@ void Present(void* swapChainPtr) {
             frame.textures = p.frame.textures;
             frame.textureGeneration = p.frame.textureGeneration;
         }
-        xray.visible = p.xray.visible && fresh;
+        xray.visible = g.visible.load() && p.xray.visible && fresh;
         if (xray.visible) {
             xray.vertices = p.xray.vertices;
             xray.camera = p.xray.camera;
         }
     }
+    // Recheck after copying: a live preset change may have cleared the gate
+    // while the render thread was preparing this frame.
+    xray.visible = xray.visible && g.visible.load();
     xrayrender::Present(sc, xray); // under the HUD
+    frame.visible = frame.visible && g.visible.load();
     hudrender::Present(sc, frame);
 }
 
@@ -170,10 +175,8 @@ PresentStats TakePresentStats() {
 void Start(const std::wstring& iniPath, void* runtime, LogFn log) {
     g.log = log;
     g.enabled = false;
-    if (IniFloat(iniPath, L"Hud", 1.0f) == 0.0f) {
-        Logf("SkateV HUD: off (Hud=0)");
-        return;
-    }
+    SetVisible(false);
+    const bool visible = IniFloat(iniPath, L"Hud", 1.0f) != 0.0f;
     const HMODULE module = GetModuleHandleW(L"SkateVRuntime.dll");
     if (!runtime || !module) {
         Logf("SkateV HUD: runtime not loaded; original HUD off");
@@ -205,18 +208,32 @@ void Start(const std::wstring& iniPath, void* runtime, LogFn log) {
         g.registered = true;
     }
     g.enabled = true;
-    Logf("SkateV HUD: original trickdisplay on (HudMaxAspect %.3f, HudSafeZone %.2f), Hall of Meat x-ray %s",
-         g.maxAspect, g.safeOverride, g.getXray ? "on" : "off");
+    SetVisible(visible);
+    Logf("SkateV HUD: original trickdisplay ready, %s (HudMaxAspect %.3f, HudSafeZone %.2f), Hall of Meat x-ray %s",
+         visible ? "shown when skating" : "hidden (Hud=0)", g.maxAspect, g.safeOverride, g.getXray ? "on" : "off");
+}
+
+void SetVisible(bool visible) {
+    if (g.visible.load() == visible) return;
+    // Gate first so the render thread cannot reuse a previously published HUD.
+    // Keep texture/serial data cached, but never re-show it before a fresh Tick.
+    g.visible.store(false);
+    std::lock_guard<std::mutex> lock(g.mutex);
+    g.pub.frame.visible = false;
+    g.pub.xray.visible = false;
+    g.pub.stamp = 0;
+    g.visible.store(visible);
 }
 
 bool ShowRadio(const char* top, const char* middle, const char* bottom, const char* station) {
-    return g.enabled && g.runtime && g.showRadio && g.showRadio(g.runtime, top, middle, bottom, station) == 1;
+    return g.enabled && g.visible.load() && g.runtime && g.showRadio &&
+           g.showRadio(g.runtime, top, middle, bottom, station) == 1;
 }
 
 void SetTrickAnalyzer(bool on) { g.trickAnalyzer = on; }
 
 void Tick(bool skating) {
-    if (!g.enabled) return;
+    if (!g.enabled || !g.visible.load()) return;
     const UINT w = g.backbufferWidth.load(), h = g.backbufferHeight.load();
     float safe = g.safeOverride >= 0.5f ? std::fmin(g.safeOverride, 1.0f) : Call<float>(gta::GET_SAFE_ZONE_SIZE);
     if (!(safe >= 0.5f && safe <= 1.0f)) safe = 1.0f;
@@ -301,13 +318,13 @@ void Tick(bool skating) {
     std::lock_guard<std::mutex> lock(g.mutex);
     Published& p = g.pub;
     p.stamp = GetTickCount64();
-    p.xray.visible = xrayCount > 0;
+    p.xray.visible = g.visible.load() && xrayCount > 0;
     if (xrayCount) {
         p.xray.camera = camera;
         p.xray.vertices.resize(xrayCount);
         std::memcpy(p.xray.vertices.data(), g.xray.data(), xrayCount * sizeof(SvXrayVertex));
     }
-    p.frame.visible = show;
+    p.frame.visible = g.visible.load() && show;
     if (!show || f.serial == p.frame.serial) return;
     hudrender::Frame& out = p.frame;
     out.serial = f.serial;
@@ -329,6 +346,9 @@ void Tick(bool skating) {
 
 void Shutdown(bool processExit) {
     g.stopping.store(true);
+    // DllMain can run after other threads stopped while holding the mutex.
+    // The atomic gates suffice here; never wait for a publication on detach.
+    g.visible.store(false);
     if (g.registered) {
         presentCallbackUnregister(OnPresent);
         g.registered = false;

@@ -191,7 +191,9 @@ def export(board_path, lighting_path, reference, rage, out):
         vec(b, 'Translation', local[:3, 3]); vec(b, 'Rotation', quaternion(local[:3, :3] / scale))
         vec(b, 'Scale', scale); vec(b, 'TransformUnk', [0, 0, 0, 0])
     model = node(node(root, 'DrawableModelsHigh'), 'Item')
-    for key, value in [('RenderMask', 255), ('Flags', 0), ('HasSkin', 1), ('BoneIndex', 0), ('Unknown1', 0)]: node(model, key, value=value)
+    # Both fields declare skinning: HasSkin is the binding, Flags bit 0 is
+    # the model's skin render flag (also set by Sollumz and owned references).
+    for key, value in [('RenderMask', 255), ('Flags', 1), ('HasSkin', 1), ('BoneIndex', 0), ('Unknown1', 0)]: node(model, key, value=value)
     geometries = node(model, 'Geometries')
     for si, (s, p) in enumerate(zip(data['surfaces'], positions)):
         normals = np.array([v['normal'] for v in s['vertices']]) @ C[:3, :3].T
@@ -216,6 +218,9 @@ def export(board_path, lighting_path, reference, rage, out):
     archetype_flags = export_archetype(rage, ydr, out)
     dumped = out / 'skatev_board.roundtrip.xml'; run_rage(rage, 'resource', 'dump', ydr, '-o', dumped)
     back = ET.parse(dumped)
+    for model in back.findall('./DrawableModelsHigh/Item'):
+        if int(model.find('HasSkin').get('value')) != 1 or not int(model.find('Flags').get('value')) & 1:
+            raise ValueError('native model lost its skin render flag or binding')
     checks = []
     converted_geometries = back.findall('./DrawableModelsHigh/Item/Geometries/Item')
     converted_bones = back.findall('./Skeleton/Bones/Item')

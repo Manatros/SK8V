@@ -184,7 +184,7 @@ constexpr const char* kHint = "Left/Right change   Back: categories   * restart 
 // Footer description for a category row, by page title.
 inline std::string PageHint(const std::string& title) {
     static const std::pair<const char*, const char*> kHints[] = {
-        {"Presets", "Enter applies Skate or RP settings. GTA is a WIP placeholder and changes nothing."},
+        {"Presets", "Apply complete play settings; User restores manual choices; Custom is explicitly saved. Keyboard bindings stay personal."},
         {"Advanced", "Rare tuning, board placement and diagnostics. Defaults are recommended."},
         {"World and roleplay", "Gentle pedestrian collisions, vehicle damage, injuries and GTA integration."},
         {"Camera", "Choose the starting view, mouse camera and cinematic look."},
@@ -210,11 +210,19 @@ void Start(const std::wstring& ini, std::vector<Page> pages, std::function<unsig
 // The '/' key: opens the menu, closes it when open (the closing frame still
 // keeps the game's controls, so the key press does not reach GTA).
 void Toggle();
-// Applies only the listed settings through the same save/live path as editing rows.
-void ApplyPreset(const std::string& name, const std::vector<std::pair<std::string, std::string>>& settings);
+// Complete named presets start from every keyed row's defaults. Personal key bindings
+// and action-only state are separate. Unknown/invalid keys reject the whole change.
+void SetPresetDefaults(std::vector<std::pair<std::string, std::string>> defaults);
+bool ApplyPreset(const std::string& name, const std::vector<std::pair<std::string, std::string>>& overrides);
+bool ApplySettings(const std::string& name, const std::vector<std::pair<std::string, std::string>>& overrides);
+bool RestoreUserPreset();
+bool SaveCustomPreset();
+bool RestoreCustomPreset();
 // Opens the menu straight on the page titled `title` (closes it when open).
 void OpenPage(const std::string& title);
 bool IsOpen();
+// Feedback stays in the menu even when all Skate overlays are hidden.
+void Status(const std::string& text);
 // Script thread, once per frame: draws and handles navigation while open.
 void Tick();
 

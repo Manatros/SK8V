@@ -16,8 +16,10 @@ namespace boardshop {
 bool Start(RuntimeBridge& runtime, const std::string& dataRoot, const std::string& gameDir, void (*log)(const char*),
            void (*wheels)(float hardness));
 
-// Once per script frame. `busy`: on the board or getting on or off (no store then).
-void Tick(bool busy);
+// Shop availability and weapon presentation are separate: Skate's on-foot
+// state may browse the shop, but SK8V still owns its animated held board.
+// `carryBoard` is only true for the optional GTA weapon mode while Ready.
+void Tick(bool busy, bool carryBoard);
 
 // A frame of skating (Skate's state, speed in m/s): the ridden board wears;
 // a part worn through shows Skate 3's worn finish of it.

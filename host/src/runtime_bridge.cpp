@@ -95,6 +95,7 @@ bool RuntimeBridge::Load(const wchar_t* dllPath, const std::string& dataRoot, co
     keyboardPad_ = reinterpret_cast<SvKeyboardPadFn>(GetProcAddress(module_, "sv_keyboard_pad"));
     keyboardHints_ = reinterpret_cast<SvKeyboardHintsFn>(GetProcAddress(module_, "sv_keyboard_hints"));
     keyboardKey_ = reinterpret_cast<SvKeyboardKeyFn>(GetProcAddress(module_, "sv_keyboard_key"));
+    keyboardMouseTricks_ = reinterpret_cast<SvKeyboardMouseTricksFn>(GetProcAddress(module_, "sv_keyboard_mouse_tricks"));
     keyboardLayout_ = reinterpret_cast<SvKeyboardLayoutFn>(GetProcAddress(module_, "sv_keyboard_layout"));
     keyboardBind_ = reinterpret_cast<SvKeyboardBindFn>(GetProcAddress(module_, "sv_keyboard_bind"));
     if (!missing.empty()) {
@@ -262,6 +263,10 @@ std::string RuntimeBridge::KeyboardKey(const char* action) {
     return text;
 }
 
+bool RuntimeBridge::KeyboardMouseTricks() const {
+    return runtime_ && keyboardMouseTricks_ && keyboardMouseTricks_(runtime_) != 0;
+}
+
 bool RuntimeBridge::KeyboardLayout(const char* name) {
     return runtime_ && keyboardLayout_ && keyboardLayout_(runtime_, name) != 0;
 }
@@ -279,8 +284,8 @@ std::string RuntimeBridge::KeyboardHints(bool onFoot) {
     return text;
 }
 
-bool RuntimeBridge::KeyboardPad(float mouseX, float mouseY, float dt, bool active, SvPad& out) {
-    return runtime_ && keyboardPad_ && keyboardPad_(runtime_, mouseX, mouseY, dt, active ? 1u : 0u, &out) != 0;
+bool RuntimeBridge::KeyboardPad(float mouseX, float mouseY, float dt, bool active, SvPad& out, bool allowMouse) {
+    return runtime_ && keyboardPad_ && keyboardPad_(runtime_, mouseX, mouseY, dt, active ? (allowMouse ? 1u : 3u) : 0u, &out) != 0;
 }
 
 bool RuntimeBridge::SetLipRule(bool enabled) {

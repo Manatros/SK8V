@@ -2763,6 +2763,7 @@ name = "skatev-runtime"
 version = "0.2.0"
 dependencies = [
  "bevy_math",
+ "libm",
  "png 0.17.16",
  "rustc-hash",
  "serde_json",

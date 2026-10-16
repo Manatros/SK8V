@@ -21,6 +21,8 @@ serde_json = "1"
 rustc-hash = "1.1"
 # The board shop's catalog and garage (contributed by GTAxSkate).
 skate_boards = { path = "../skate-boards" }
+# Software fma/fmaf (see lib.rs); already in the graph through bevy_math.
+libm = "0.2.16"
 png = "0.17"
 # Skate 3 AEMS audio port (docs/AEMS.md); the live engine renders dry voices.
 skate-aems = { path = "../skate-aems" }

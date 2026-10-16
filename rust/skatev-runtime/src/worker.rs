@@ -653,8 +653,10 @@ fn run(
                 .name("skatev-preload".into())
                 .stack_size(32 * 1024 * 1024)
                 .spawn(move || {
+                    crate::crash::PRELOAD.enter(1);
                     let result = catch_unwind(AssertUnwindSafe(|| preload_session(&root, natural_stance, &preload_log)))
                         .unwrap_or_else(|_| Err("session preload panicked".into()));
+                    crate::crash::PRELOAD.leave();
                     let _ = send.send(result);
                 });
             match spawned {
@@ -937,7 +939,7 @@ fn run(
                     ));
                 }
                 Job::DynamicBodies(bodies) => {
-                    let (triangles, messages) = prop_templates.triangles(&bodies);
+                    let (triangles, messages) = prop_templates.triangles(&bodies, live_level.as_ref());
                     for message in messages { log(&message); }
                     dynamic = Some(triangles);
                     entity_proxies = prop_templates.proxies(&bodies);
@@ -2106,7 +2108,9 @@ fn publish(
     log: &Log,
 ) -> Published {
     let board_pose = crate::board_pose::world(&p.names, &p.bones, p.root).map(|mut w| {
-        crate::board_pose::present_wheels(&mut w, p.tick);
+        let angular = s.wheel_presentation_angular_velocity()
+            .map(|v| coords::from_skate(Vec3::from_array(v)));
+        crate::board_pose::present_wheels_with_motion(&mut w, p.tick, Some(angular));
         w
     });
     let mut presenter = presenter;

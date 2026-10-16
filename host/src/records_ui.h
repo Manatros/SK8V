@@ -18,6 +18,7 @@ void Start(void* runtime, LogFn log);
 void NextPage();
 bool Showing();
 // Script thread, once per frame. `skating`: Skate is active; `homBail`: a
-// Hall of Meat bail is on screen.
-void Tick(bool skating, bool homBail);
+// Hall of Meat bail is on screen. Hidden UI still polls record state, consumes
+// announcements and closes the board, so restoring visibility cannot replay it.
+void Tick(bool skating, bool homBail, bool visible = true);
 }

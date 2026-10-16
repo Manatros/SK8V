@@ -18,6 +18,9 @@ using LogFn = void (*)(const char*);
 // After the runtime loaded: looks up the optional HUD exports and registers
 // the Present callback. `runtime` is the sv_create handle (nullptr: inert).
 void Start(const std::wstring& iniPath, void* runtime, LogFn log);
+// Script thread: live master gate for the original HUD, radio and x-ray.
+// Hiding clears the publication immediately; showing waits for a fresh Tick.
+void SetVisible(bool visible);
 // Script thread, once per frame. `skating`: Skate is active (the HUD shows,
 // unless the pause menu or a loading screen is up).
 void Tick(bool skating);

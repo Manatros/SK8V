@@ -183,9 +183,14 @@ def lut_patch(data, tags, names):
     raise SystemExit(f'WeaponsLUT: no single int definition of {" or ".join(DONORS)}')
 
 
+def uncompressed(data):
+    """A CFX (zlib) movie, as some HUD mods ship hud.gfx, as plain GFX."""
+    return b'GFX' + data[3:8] + zlib.decompress(data[8:]) if data[:3] == b'CFX' else data
+
+
 def build(data, asset):
     if data[:3] != b'GFX':
-        raise SystemExit('hud.gfx: expected an uncompressed GFX file')
+        raise SystemExit('hud.gfx: expected a GFX file')
     w, h = struct.unpack_from('<HH', asset, 4)
     argb_z = asset[8:]
     start = header_end(data)
@@ -263,8 +268,12 @@ def main():
             raise SystemExit(f'{args.source} missing: pass --game-root to extract it')
         subprocess.run([RAGE, '--no-update-check', '--exe', args.game_root, 'extract', '-r',
                         args.game_root / 'update/update.rpf', '*scaleform_generic.rpf/hud.gfx', '-o', WORK], check=True)
-    data, px, size, donor = build(args.source.read_bytes(), ASSET.read_bytes())
+    source = uncompressed(args.source.read_bytes())
     args.out.parent.mkdir(parents=True, exist_ok=True)
+    if f'INT{HASH}'.encode() in source:  # a copy of SK8V's own, already edited
+        args.out.write_bytes(source)
+        return print(f'{args.out}: {args.source} already has the INT{HASH} frame; copied')
+    data, px, size, donor = build(source, ASSET.read_bytes())
     args.out.write_bytes(data)
     print(f'{args.out}: INT{HASH} frame, {px[0]}x{px[1]} px, {size[0]}x{size[1]} twips; {donor} -> board (no ammo text)')
 

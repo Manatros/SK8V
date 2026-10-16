@@ -1,3 +1,9 @@
+> **GTAxSkate development fork:** see [GTAXSKATE.md](GTAXSKATE.md) for this
+> fork's additions, installation, status and support. Current development uses
+> SK8V 1.1.9; optional composer setup and release gates live in
+> [GTAxSkate](https://github.com/Manatros/GTAxSkate/tree/dev).
+> The upstream README follows below; upstream credits and licensing are retained.
+
 > ## Download and play
 
 > **GTAxSkate development fork:** branch `skatemods` adds keyboard/mouse, shop,
@@ -18,7 +24,7 @@
 **Skate 3 gameplay. GTA V's open world.**
 
 
-SK8V brings *Skate 3*'s Flick-It controls, board/skater physics, grinds, manuals, skitching, tricks, combos, bails, scoring, session markers, and Hall of Meat into **GTA V Legacy Story Mode**. Skate's gameplay runs alongside GTA's characters, traffic, weapons, radio, and world interactions. Skate 3’s own audio engine runs inside GTA’s mixer, so wheels sound different on every GTA surface. Things like concrete, asphalt, wood, metal, tile all sound different, and your wheels click over the cracks and seams in the pavement, with almost complete coverage.
+SK8V brings *Skate 3*'s Flick-It controls, board/skater physics, grinds, manuals, skitching, tricks, combos, bails, scoring, session markers, and Hall of Meat into **GTA V Legacy Story Mode**. Skate's gameplay runs alongside GTA's characters, traffic, weapons, radio, and world interactions. Skate 3â€™s own audio engine runs inside GTAâ€™s mixer, so wheels sound different on every GTA surface. Things like concrete, asphalt, wood, metal, tile all sound different, and your wheels click over the cracks and seams in the pavement, with almost complete coverage.
 
 ## Requirements
 - **Controller is Required**
@@ -53,7 +59,7 @@ python tools/prepare.py --skate "<Skate 3.iso or folder>" --gta "<GTA V folder>"
 
 | Input | Action |
 |---|---|
-| GTA weapon wheel → **Skateboard** | Enter Skate mode |
+| GTA weapon wheel â†’ **Skateboard** | Enter Skate mode |
 | `Y` / hold `Y` | Mount or dismount / put the board away and return to GTA |
 | Keyboard `/` or controller `Back + LB` | Open SK8V menu |
 | `Back` / hold `Back` | Equip or holster a weapon / open weapon wheel when armed |
@@ -102,6 +108,10 @@ Swimming switches to GTA automatically and returns to Skate afterward. While ska
 - **Teleporting while skating:** Teleporting directly while Skate mode is active may cause the skater to fall through the map. Switch back to GTA control before teleporting, then resume skating at your destination.
 
 - **GTA V Enhanced:** SK8V currently supports GTA V Legacy only. Enhanced Edition compatibility is a long-term goal, but may require significant additional work and is not guaranteed.
+
+## Contributing
+
+SK8V doesnâ€™t currently accept pull requests. Bug reports and feature requests go in issues, logs are appreciated!
 
 ## Support Me
 [<img src="https://cdn.buymeacoffee.com/buttons/v2/default-yellow.png" height="40">](https://buymeacoffee.com/becaring) [<img src="https://storage.ko-fi.com/cdn/kofi3.png?v=3" height="36">](https://ko-fi.com/becaring)

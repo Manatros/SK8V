@@ -170,6 +170,9 @@ def convert(source_dir, name, out_name, offset, template, work):
     for model in drawable.iter('DrawableModelsHigh'):
         for item in model.findall('Item'):
             item.find('HasSkin').set('value', '1')
+            # Input props are rigid (Flags=0). Turning them into skinned
+            # parts requires the matching render flag as well as the binding.
+            item.find('Flags').set('value', str(int(item.find('Flags').get('value')) | 1))
             for geometry in item.find('Geometries').findall('Item'):
                 buffer = geometry.find('VertexBuffer')
                 layout = buffer.find('Layout')

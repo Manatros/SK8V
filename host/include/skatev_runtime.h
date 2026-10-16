@@ -340,6 +340,7 @@ using SvSetLipRuleFn = std::uint32_t(__cdecl*)(void*, std::uint32_t);
 // Keyboard and mouse as a controller (optional exports; contributed by GTAxSkate).
 // sv_keyboard_configure(rt, keys_file_utf8): loads the key file (written with the
 // defaults when missing); returns how many of its lines could not be read.
+// active flags: 0 releases all; 1 enables input; bit 1 suppresses mouse tricks (package extension).
 // sv_keyboard_pad(rt, mouse_x, mouse_y, dt, active, out): this frame's pad from
 // the keys and the mouse look input; 1 when something is pressed (out filled).
 using SvKeyboardConfigureFn = std::uint32_t(__cdecl*)(void*, const char*);
@@ -347,6 +348,7 @@ using SvKeyboardPadFn = std::uint32_t(__cdecl*)(void*, float, float, float, std:
 // sv_keyboard_hints(rt, on_foot, buf, cap): the keys for the HUD, "key\twhat" lines; returns the
 // bytes needed (optional export).
 // sv_keyboard_key(rt, id, buf, cap) / sv_keyboard_bind(rt, id, vk): read and rebind one action's key.
+using SvKeyboardMouseTricksFn = std::uint32_t(__cdecl*)(void*);
 using SvKeyboardLayoutFn = std::uint32_t(__cdecl*)(void*, const char*);
 using SvKeyboardKeyFn = std::uint32_t(__cdecl*)(void*, const char*, char*, std::uint32_t);
 using SvKeyboardBindFn = std::uint32_t(__cdecl*)(void*, const char*, std::uint32_t);

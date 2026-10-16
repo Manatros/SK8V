@@ -202,8 +202,17 @@ void NextPage() {
 
 bool Showing() { return g.page != 0; }
 
-void Tick(bool skating, bool homBail) {
+void Tick(bool skating, bool homBail, bool visible) {
     if (!g.ready) return;
+    if (!visible) {
+        g.page = 0;
+        g.shardUntil = 0;
+        g.shardSent = false;
+        if (g.shard) {
+            Call<void>(gta::SET_SCALEFORM_MOVIE_AS_NO_LONGER_NEEDED, &g.shard);
+            g.shard = 0;
+        }
+    }
     const bool paused = gta::FrontendActive();
     if (skating) UpdateContext();
     SvRecordState s{};
@@ -214,8 +223,9 @@ void Tick(bool skating, bool homBail) {
         g.seeded = true;
     } else if (s.sequence != g.seen) {
         g.seen = s.sequence;
-        StartShard(s);
+        if (visible) StartShard(s);
     }
+    if (!visible) return;
     DrawShard(paused);
     if (paused) return;
     if (skating && homBail) DrawBailRecord(s);

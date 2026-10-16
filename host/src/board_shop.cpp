@@ -456,7 +456,7 @@ bool Start(RuntimeBridge& runtime, const std::string& dataRoot, const std::strin
     return g_ready;
 }
 
-void Tick(bool busy) {
+void Tick(bool busy, bool carryBoard) {
     if (!g_ready) return;
     const int ped = Call<int>(PLAYER_PED_ID);
     const std::uint32_t model = Call<std::uint32_t>(GET_ENTITY_MODEL, ped);
@@ -469,7 +469,7 @@ void Tick(bool busy) {
         g_rt->ShopCharacter(who ? who : hex);
         Ride();
     }
-    if (!busy) Carry(ped);
+    if (!busy && carryBoard) Carry(ped);
     else boardparts::Hand({}, SvBoardPose{});
     const int tier = TierHere(ped);
     if (tier != g_tierShown) {

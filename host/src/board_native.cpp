@@ -21,12 +21,26 @@ std::uint32_t g_ydrId=~0u,g_ytypId=~0u;
 ULONGLONG g_begin=0;
 void Log(const char* s){if(g_log)g_log(s);}
 bool Pose(const SvBoardPose& pose) { return PoseObject(g_object,pose,g_cache,g_log); }
+// One bounded summary for the whole board renderer per five seconds. No
+// allocation or extra matrix reads while Developer verbose logging is off.
+ULONGLONG g_diagnosticLogAt=0;
+bool ReadDiagnosticRows(std::uintptr_t address,const int* indices,M (&out)[7]) {
+    __try {
+        for(int i=0;i<7;++i) {
+            out[i]=posemath::Identity();
+            const auto* source=reinterpret_cast<const float*>(address)+indices[i]*16;
+            for(int r=0;r<4;++r)for(int c=0;c<3;++c)out[i].r[r][c]=source[r*4+c];
+        }
+        return true;
+    } __except(EXCEPTION_EXECUTE_HANDLER){return false;}
+}
 }
 bool PoseObject(int object,const SvBoardPose& pose,PoseCache& cache,void (*log)(const char*)) {
     probe::SkeletonInfo s; const char* why=nullptr;
     if(!probe::ResolvePedSkeleton(object,s,why)||s.count!=7){if(!cache.reported&&log){char line[256];std::snprintf(line,sizeof(line),"native board: skeleton unavailable (%s, bones=%d); object hidden",why?why:"expected seven bones",s.count);log(line);cache.reported=true;}return false;}
     if(s.skeleton!=cache.skeleton) {
         cache.skeleton=0;
+        cache.diagnostic=diagnostics::State{};
         for(int i=0;i<7;++i) { cache.indices[i]=probe::BoneIndexByTag(s,static_cast<std::uint16_t>(i)); if(cache.indices[i]<0||cache.indices[i]>=7)return false; }
         cache.skeleton=s.skeleton;
     }
@@ -39,10 +53,31 @@ bool PoseObject(int object,const SvBoardPose& pose,PoseCache& cache,void (*log)(
         M world[7],objects[7],locals[7],entity;
         std::memcpy(world,pose.world,sizeof(world)); std::memcpy(&entity,reinterpret_cast<void*>(s.parentMtx),64);
         if(!detail::Convert(world,entity,objects,locals))return false;
+        const bool verbose=util::g_verbose.load(std::memory_order_relaxed);
+        const auto now=verbose?GetTickCount64():0;
+        bool sample=diagnostics::ShouldSample(cache.diagnostic,verbose,pose.tick,now);
+        M before[7],after[7],objectsAfter[7];
+        if(sample)sample=ReadDiagnosticRows(s.objectMtx,indices,before);
         for(int i=0;i<7;++i) for(int r=0;r<4;++r) for(int c=0;c<3;++c) {
             reinterpret_cast<float*>(s.objectMtx)[indices[i]*16+r*4+c]=locals[i].r[r][c];
             reinterpret_cast<float*>(s.globalMtx)[indices[i]*16+r*4+c]=objects[i].r[r][c];
         }
+        if(sample&&ReadDiagnosticRows(s.objectMtx,indices,after)&&ReadDiagnosticRows(s.globalMtx,indices,objectsAfter)) {
+            auto& d=cache.diagnostic;
+            diagnostics::Sample(d,pose.tick,now,locals,before,after,objects,objectsAfter);
+            if(log&&now-g_diagnosticLogAt>=5000) {
+                g_diagnosticLogAt=now;
+                char line[768];
+                std::snprintf(line,sizeof(line),
+                    "board anim diagnostic: object %d tick %llu samples %u; parent-local motion deg TF/TB/WLF/WLB/WRF/WRB [%.3f %.3f %.3f %.3f %.3f %.3f]; before-vs-prior-written deg [%.3f %.3f %.3f %.3f %.3f %.3f]; immediate readback rotation max error local %.6g object %.6g; observations only, not render/overwrite proof",
+                    object,static_cast<unsigned long long>(pose.tick),d.samples,
+                    d.motion[0],d.motion[1],d.motion[2],d.motion[3],d.motion[4],d.motion[5],
+                    d.beforeWritten[0],d.beforeWritten[1],d.beforeWritten[2],d.beforeWritten[3],d.beforeWritten[4],d.beforeWritten[5],
+                    d.localError,d.objectError);
+                log(line);diagnostics::ClearWindow(d);
+            }
+        }
+        if(verbose)diagnostics::Written(cache.diagnostic,locals);
         return true;
     } __except(EXCEPTION_EXECUTE_HANDLER){return false;}
 }

@@ -1,0 +1,22 @@
+--- a/crates/skate-host/src/physics/bridge.rs
++++ b/crates/skate-host/src/physics/bridge.rs
+@@ -398,6 +398,19 @@
+         super::player_state::publish(&mut self.physics, &mut self.skater)
+     }
+ 
++    /// Read-only physical wheel motion for presentation, in animation-name
++    /// order LF/LB/RF/RB. skeleton_output::board::publish maps native physical
++    /// parts 0/1/2/3 to LF/RF/LB/RB, independently of the BodyId labels.
++    /// Subtract the corresponding truck so whole-board turning is not spin.
++    pub fn wheel_presentation_angular_velocity(&self) -> [[f32; 3]; 4] {
++        let bodies = self.physics.board.bodies();
++        [0usize, 2, 1, 3].map(|wheel| {
++            let w = bodies[wheel].rates.angular_velocity;
++            let t = bodies[4 + wheel / 2].rates.angular_velocity;
++            [w.x - t.x, w.y - t.y, w.z - t.z]
++        })
++    }
++
+     pub fn pose(&self) -> Pose {
+         let v = self.physics.board.bodies()[skate_core::physics::board::BodyId::Deck.index()]
+             .rates
