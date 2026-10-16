@@ -190,9 +190,12 @@ class Prepare:
                 print(f"mods folder hud.gfx not read, using GTA's: {e}", flush=True)
             found = next((self.work / 'hud-mods').rglob('hud.gfx'), None)
             if found:
-                print(f"board icon added to the mods folder's hud.gfx ({mod})", flush=True)
-                py('build-board-icon.py', '--source', found, '--out', self.clip / 'hud.gfx')
-                return
+                try:
+                    py('build-board-icon.py', '--source', found, '--out', self.clip / 'hud.gfx')
+                    print(f"board icon added to the mods folder's hud.gfx ({mod})", flush=True)
+                    return
+                except subprocess.CalledProcessError:  # a HUD mod's movie the edit does not fit: GTA's
+                    print("the mods folder's hud.gfx cannot take the board icon (above); using GTA's", flush=True)
         gta_extract.extract(binary(RPF), self.keys, self.gta / 'update/update.rpf', ['*scaleform_generic.rpf/hud.gfx'], hud)
         py('build-board-icon.py', '--source', next(hud.rglob('hud.gfx')), '--out', self.clip / 'hud.gfx')
 
