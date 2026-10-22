@@ -1,21 +1,42 @@
-> **GTAxSkate development fork:** see [GTAXSKATE.md](GTAXSKATE.md) for this
-> fork's additions, installation, status and support. Current development uses
-> SK8V 1.1.9; optional composer setup and release gates live in
-> [GTAxSkate](https://github.com/Manatros/GTAxSkate/tree/dev).
-> The upstream README follows below; upstream credits and licensing are retained.
+# Manatros/SK8V: the GTAxSkate fork of SK8V
 
-> ## Download and play
+This is **GTAxSkate's development fork** of [SK8V](https://github.com/becaring/SK8V) by becaring.
+It holds the source code of the mod that [GTAxSkate](https://github.com/Manatros/GTAxSkate)
+installs: plain SK8V plus our additions (keyboard and mouse, board shop, GTA-style cameras,
+trainer tuning, skate radio and more). Upstream credits and licensing are kept as they are.
 
-> **GTAxSkate development fork:** branch `skatemods` adds keyboard/mouse, shop,
-> camera and package settings. [Fork status and adoption guide](GTAXSKATE.md).
-> Players should use the [GTAxSkate installer/downloads](https://github.com/Manatros/GTAxSkate).
-> Report package bugs in [GTAxSkate issues](https://github.com/Manatros/GTAxSkate/issues).
-> The original upstream README below documents unmodified SK8V; its controller-only
-> requirement does not describe the fork's added keyboard support. Development
-> fixes are pending the next in-game acceptance run. No AI-skater feature is promised.
-> **[GTAxSkate-Setup.zip](https://github.com/Manatros/GTAxSkate/releases/latest/download/GTAxSkate-Setup.zip)**: unzip, close GTA V, double-click `Install GTAxSkate.cmd`, pick your Skate 3 disc. It installs SK8V with every addition below. Help and problems: [GTAxSkate](https://github.com/Manatros/GTAxSkate).
->
-> This repository is GTAxSkate's fork of SK8V: the source of its builds (branch `skatemods`) and of its pull requests to SK8V (one `contrib/` branch per feature). What each addition does and why: [GTAXSKATE.md](GTAXSKATE.md).
+> **Just want to play?** Don't build from here. Use the
+> **[GTAxSkate installer](https://github.com/Manatros/GTAxSkate#get-it)** and report bugs in
+> [GTAxSkate issues](https://github.com/Manatros/GTAxSkate/issues).
+
+### How the projects fit together
+
+| Repository | Role |
+|---|---|
+| [becaring/SK8V](https://github.com/becaring/SK8V) | The original SK8V. Runs Skate 3's engine in GTA V. |
+| **Manatros/SK8V** (this fork) | SK8V + GTAxSkate's additions, as source code. |
+| [Manatros/GTAxSkate](https://github.com/Manatros/GTAxSkate) | Installer, downloads, docs and issue tracker for players. |
+
+### Branches in this fork
+
+| Branch | What's on it |
+|---|---|
+| `skatemods` (default) | All additions on top of SK8V: the source of the current GTAxSkate release. Only tested, game-accepted work lands here. |
+| **[`dev`](https://github.com/Manatros/SK8V/tree/dev)** | The **absolute latest** development state, pushed continuously. **May be completely broken**: may not build, may crash GTA. For testers and contributors only. |
+| `contrib/<feature>` | One branch per addition, cut from SK8V's `main`, so becaring can take any of them as a separate pull request. |
+| `main` | Mirror of upstream SK8V. |
+
+Want to help? Branch off `dev` and open pull requests against `dev`; tested work is promoted from
+`dev` to `skatemods`. What each addition does and why it's built this way:
+**[GTAXSKATE.md](GTAXSKATE.md)**. Package-level contribution rules:
+[GTAxSkate CONTRIBUTING](https://github.com/Manatros/GTAxSkate/blob/main/CONTRIBUTING.md).
+
+---
+
+*The original upstream SK8V README follows. It describes unmodified SK8V, so a few points
+(for example "controller is required") don't apply to this fork's keyboard support.*
+
+---
 
 ![SK8V Gameplay](media/sk8v.webp)
 
