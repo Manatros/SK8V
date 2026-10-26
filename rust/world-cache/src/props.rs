@@ -150,12 +150,13 @@ fn entity_world(e: &YmapEntity, v: rage_formats::math::Vec3) -> rage_formats::ma
 /// file name), shared by the static bake and the map-state layers.
 pub struct Library {
     pub arch: HashMap<u32, Archetype>,
-    pub mlos: HashMap<u32, Vec<YmapEntity>>,
+    pub mlos: HashMap<u32, (Vec<YmapEntity>, Vec<rage_formats::MloEntitySet>)>,
     door_archetypes: std::collections::HashSet<u32>,
     mlo_doors: HashMap<u32, interiors::doors::Metadata>,
     pub models: BTreeMap<u32, PathBuf>,
     /// Model bounds decoded so far (None: the drawable has no bound).
     bounds: HashMap<u32, Option<Vec<Triangle>>>,
+    static_only: bool,
 }
 
 impl Library {
@@ -163,7 +164,7 @@ impl Library {
         let base = meta_dir.join("base");
         let layers = meta_dir.join("layers");
         let mut arch: HashMap<u32, Archetype> = HashMap::new();
-        let mut mlos: HashMap<u32, Vec<YmapEntity>> = HashMap::new();
+        let mut mlos: HashMap<u32, (Vec<YmapEntity>, Vec<rage_formats::MloEntitySet>)> = HashMap::new();
         let mut door_archetypes = std::collections::HashSet::new();
         let mut mlo_doors = HashMap::new();
         for p in layered(&base, Some(&layers), "ytyp", |_| true) {
@@ -177,13 +178,17 @@ impl Library {
             }
             for m in y.mlos {
                 mlo_doors.insert(m.name_hash, doors.clone());
-                mlos.insert(m.name_hash, m.entities);
+                mlos.insert(m.name_hash, (m.entities, m.entity_sets));
             }
         }
         let models: BTreeMap<u32, PathBuf> =
             layered(&base, Some(&layers), "ydr", |_| true).into_iter().map(|p| (stem_hash(&p), p)).collect();
-        Library { arch, mlos, door_archetypes, mlo_doors, models, bounds: HashMap::new() }
+        Library { arch, mlos, door_archetypes, mlo_doors, models, bounds: HashMap::new(), static_only: false }
     }
+
+    /// The tiled world retains authored drawable bounds for all non-door
+    /// placements. Moving door leaves remain dynamic templates.
+    pub fn require_static_placements(&mut self) { self.static_only = true; }
 
     /// One placement's world-space collision, if it is a static drawable
     /// with a bound. Moving door leaves remain model templates; neither their
@@ -212,6 +217,14 @@ impl Library {
         true
     }
 
+    /// Sources whose embedded physical bounds have been consulted. Include
+    /// models without a bound too: adding a bound must invalidate an old bake.
+    pub fn used_model_paths(&self) -> Vec<&Path> {
+        let mut paths: Vec<_> = self.bounds.keys().filter_map(|h| self.models.get(h).map(PathBuf::as_path)).collect();
+        paths.sort();
+        paths
+    }
+
     /// Every static placement of one ymap: plain entities, then interior
     /// furniture (MLO-local entities, then the MLO placement).
     pub fn bake_ymap(&mut self, bytes: &[u8], path: &Path, options: Options, counts: &mut Counts,
@@ -226,9 +239,15 @@ impl Library {
         }
         if let Ok(instances) = parse_ymap_mlo_instances(bytes) {
             for inst in instances {
-                let Some(children) = self.mlos.get(&inst.entity.archetype_hash).cloned() else { continue };
+                let Some((children, sets)) = self.mlos.get(&inst.entity.archetype_hash) else { continue };
                 let mlo_door = self.mlo_doors.get(&inst.entity.archetype_hash).cloned();
-                for c in &children {
+                let mut all_children = children.clone();
+                for set in sets {
+                    if inst.default_entity_sets.contains(&set.name_hash) {
+                        all_children.extend(set.entities.iter().cloned());
+                    }
+                }
+                for c in &all_children {
                     let world = |v| interiors::place(&inst.entity, c.to_world(v), false);
                     if self.place(c, mlo_door.as_ref().is_some_and(|d| d.entity_is_door(c)), &world, options, counts, out, stats, baked) {
                         stats.mlo_furniture += 1;
@@ -374,7 +393,7 @@ pub fn audit(meta_dir: &Path, near: Option<([f32; 3], f32)>) {
     let base = meta_dir.join("base");
     let layers = meta_dir.join("layers");
     let mut arch: HashMap<u32, Archetype> = HashMap::new();
-    let mut mlos: HashMap<u32, Vec<YmapEntity>> = HashMap::new();
+    let mut mlos: HashMap<u32, (Vec<YmapEntity>, Vec<rage_formats::MloEntitySet>)> = HashMap::new();
     let mut door_archetypes = std::collections::HashSet::new();
     let mut mlo_doors = HashMap::new();
     for p in layered(&base, Some(&layers), "ytyp", |_| true) {
@@ -388,7 +407,7 @@ pub fn audit(meta_dir: &Path, near: Option<([f32; 3], f32)>) {
         }
         for m in y.mlos {
             mlo_doors.insert(m.name_hash, doors.clone());
-            mlos.insert(m.name_hash, m.entities);
+            mlos.insert(m.name_hash, (m.entities, m.entity_sets));
         }
     }
     let models: BTreeMap<u32, PathBuf> =
@@ -435,9 +454,15 @@ pub fn audit(meta_dir: &Path, near: Option<([f32; 3], f32)>) {
         }
         if let Ok(instances) = parse_ymap_mlo_instances(&bytes) {
             for inst in instances {
-                let Some(children) = mlos.get(&inst.entity.archetype_hash) else { continue };
+                let Some((children, sets)) = mlos.get(&inst.entity.archetype_hash) else { continue };
                 let mlo_door = mlo_doors.get(&inst.entity.archetype_hash);
-                for ch in children {
+                let mut all_children = children.clone();
+                for set in sets {
+                    if inst.default_entity_sets.contains(&set.name_hash) {
+                        all_children.extend(set.entities.iter().cloned());
+                    }
+                }
+                for ch in &all_children {
                     let c = classify(ch, mlo_door.is_some_and(|d| d.entity_is_door(ch)));
                     let pos = interiors::place(&inst.entity, ch.to_world(rage_formats::math::Vec3::new(0.0, 0.0, 0.0)), false);
                     note(c, ch, pos, true);
@@ -518,6 +543,16 @@ mod tests {
         assert_eq!(stats.instances[0].position.x,5.0);
         assert_eq!(triangles.len(),12,"only neighbor box emitted, not closed door geometry");
         assert_eq!(stats.templates[&model].len(),12,"moving door still has exact local collision");
+        let mut lib = Library::load(&dir);
+        lib.require_static_placements();
+        let mut output = Vec::new();
+        let mut static_stats = Stats::default();
+        lib.bake_ymap(&build_rsc7(2,&ymap,&[]),&base.join("fixture.ymap"),
+            Options {primitives:true,all_flags:false},&mut Counts::default(),
+            &mut output,&mut static_stats,&mut BTreeSet::new());
+        assert_eq!(output.len(),12,"non-door neighbor is baked while door is excluded");
+        assert_eq!(static_stats.instances[0].position.x,5.0);
+        assert_eq!(lib.used_model_paths(),vec![base.join("fixture_door.ydr").as_path()]);
         // Test-created directory only, under the process temp root.
         std::fs::remove_dir_all(&dir).unwrap();
     }

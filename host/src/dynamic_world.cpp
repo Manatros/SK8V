@@ -3,6 +3,7 @@
 #include <windows.h>
 #include <main.h>
 #include <algorithm>
+#include <limits>
 #include <cmath>
 #include <cstdio>
 #include <fstream>
@@ -136,6 +137,12 @@ bool DynamicWorld::AddBody(int entity, EntityKind kind) {
     const Vector3 w = Call<Vector3>(gta::GET_ENTITY_ROTATION_VELOCITY, entity);
     body.linear_velocity = {v.x, v.y, v.z};
     body.angular_velocity = {w.x, w.y, w.z};
+    if (std::find(fixed_.begin(), fixed_.end(), entity) != fixed_.end()) {
+        // The runtime drops non-finite velocities: no proxy, fixed ground.
+        const float none = std::numeric_limits<float>::quiet_NaN();
+        body.linear_velocity = {none, none, none};
+        body.angular_velocity = {none, none, none};
+    }
     if (kind == EntityKind::Vehicle) {
         // Skitch grab line: the rear bumper bone. Bikes and models without
         // bumper_r get no line.
@@ -149,6 +156,7 @@ bool DynamicWorld::AddBody(int entity, EntityKind kind) {
         }
     }
     bool isDoor = false, unlocked = false;
+    const bool isFixed = std::find(fixed_.begin(), fixed_.end(), entity) != fixed_.end();
     if (kind == EntityKind::Object) {
         // Open unlocked doors, but retain their moving exact collision when a template exists.
         DoorRef& ref = doorRefs_[entity];
@@ -162,7 +170,7 @@ bool DynamicWorld::AddBody(int entity, EntityKind kind) {
         isDoor = door != 0;
         unlocked = isDoor && PropCollisionIndex::DoorMayOpen(Call<int>(gta::DOOR_SYSTEM_GET_DOOR_STATE, door));
         if (unlocked) {
-            doors_.push_back({door, {pos.x, pos.y, pos.z}, {fwd.x, fwd.y, fwd.z}});
+            doors_.push_back({door, {pos.x, pos.y, pos.z}, {fwd.x, fwd.y, fwd.z}, entity});
             ++stats_.doors;
         }
     }
@@ -180,8 +188,15 @@ bool DynamicWorld::AddBody(int entity, EntityKind kind) {
     }
     // A large object with no template (a stunt prop, a trainer's spawn) still
     // goes: the runtime reads its bound from GTA's physics level, never a box.
-    if (route == PropCollisionIndex::Route::None && (kind != EntityKind::Object || isDoor)) { ++stats_.missingBounds; return false; }
+    // Static map props (benches, bins) stay in the live world: the bake does
+    // not hold them (2026-10-24, undoing 275cff4's static-object drop).
+    if (route == PropCollisionIndex::Route::None && (kind != EntityKind::Object || isDoor) && !isFixed) { ++stats_.missingBounds; return false; }
     body.flags = PropCollisionIndex::AllowsBox(route) ? 1u : 0u; // Exact gaps must NEVER be filled by the fallback box.
+    // Never moves: the runtime builds it into the static area, rails included.
+    if (isFixed) body.flags |= 2u;
+    // A part broken off a vehicle (door, bumper) is an object with the car's
+    // model: the runtime reads its own bound, never the whole car's.
+    if (kind == EntityKind::Object && Call<BOOL>(gta::IS_MODEL_A_VEHICLE, model)) body.flags |= 4u;
     bodies_.push_back(body);
     if (exact) ++stats_.exactBounds;
     else if (kind == EntityKind::Object) ++stats_.missingBounds;
@@ -208,6 +223,7 @@ void DynamicWorld::Gather(int self, SvVec3 center, float radius, const std::vect
         for (int i = 0; i < n; ++i) {
             const int e = scratch_[i];
             if (e == self || std::find(presentation.begin(), presentation.end(), e) != presentation.end()) continue;
+            if (std::find(fixed_.begin(), fixed_.end(), e) != fixed_.end()) continue; // added below, wherever they are
             const Vector3 p = Position(e, positionCheck_, positionLog_);
             const float d2 = Dist2(p, center);
             if (d2 <= kindRadius2) nearby.push_back({d2, e, kind});
@@ -216,6 +232,12 @@ void DynamicWorld::Gather(int self, SvVec3 center, float radius, const std::vect
     collect(worldGetAllVehicles, EntityKind::Vehicle, r2);
     collect(worldGetAllPeds, EntityKind::Ped, r2 * 0.5f);
     collect(worldGetAllObjects, EntityKind::Object, r2 * 0.5f);
+    // The object dropper's props, all of them at any distance: a set that
+    // changed as the skater rode around rebuilt the static area again and
+    // again, and the props had no rails meanwhile (2026-10-19 log: 12, 11, 10,
+    // 9, 12 ... within seconds).
+    for (const int e : fixed_)
+        if (Call<BOOL>(gta::DOES_ENTITY_EXIST, e)) nearby.push_back({0.0f, e, EntityKind::Object});
     std::sort(nearby.begin(), nearby.end(), [](const Candidate& a, const Candidate& b) { return a.d2 < b.d2; });
     for (const Candidate& c : nearby) {
         // A ped Skate can read as its own ragdoll parts gets no box.
@@ -252,15 +274,36 @@ void DynamicWorld::KickDebris(SvVec3 board, SvVec3 v) {
 }
 
 void DynamicWorld::OpenDoors(SvVec3 skater) {
+    constexpr float kSwing = 4.0f;  // open ratio per second (fully open in 0.25 s)
+    static DWORD s_last = GetTickCount();
+    const DWORD tick = GetTickCount();
+    const float dt = (std::min)(0.1f, static_cast<float>(tick - s_last) / 1000.0f);
+    s_last = tick;
     for (const Door& d : doors_) {
         const float dx = skater.x - d.hinge.x, dy = skater.y - d.hinge.y, dz = skater.z - d.hinge.z;
-        if (dx * dx + dy * dy > 2.2f * 2.2f || std::fabs(dz) > 2.5f) continue;
+        if (dx * dx + dy * dy > 3.0f * 3.0f || std::fabs(dz) > 2.5f) continue;
         // Swing away from the skater: the side of the door's forward axis the
         // skater is on decides the sign.
         const float side = dx * d.forward.x + dy * d.forward.y;
+        // Pushed open as the skater comes through, like a GTA character does,
+        // not thrown wide in one frame (Manatros 2026-10-19: doors react a
+        // lot): open as far as the skater is close, at most kSwing per second,
+        // never pulled shut while near.
+        const float sign = side > 0.0f ? -1.0f : 1.0f;
+        const float wanted = (std::max)(0.0f, (std::min)(1.0f, (3.0f - std::sqrt(dx * dx + dy * dy)) / 1.5f));
+        const float ratio = Call<float>(gta::DOOR_SYSTEM_GET_OPEN_RATIO, d.hash);
+        const float current = std::isfinite(ratio) ? ratio * sign : 0.0f;  // opening side positive
+        if (wanted <= current) continue;
+        const float next = (std::min)(wanted, current + kSwing * dt);
         Call<void>(gta::DOOR_SYSTEM_SET_DOOR_STATE, d.hash, 0, 0, 1);
-        Call<void>(gta::DOOR_SYSTEM_SET_OPEN_RATIO, d.hash, side > 0.0f ? -1.0f : 1.0f, 0, 1);
+        Call<void>(gta::DOOR_SYSTEM_SET_OPEN_RATIO, d.hash, next * sign, 0, 1);
     }
+}
+
+bool DynamicWorld::IsDoor(int entity) const {
+    for (const Door& d : doors_)
+        if (d.entity == entity) return true;
+    return false;
 }
 
 void DynamicWorld::React(const SvDynamicHit* hits, std::uint32_t count, SvVec3 v) {
@@ -278,6 +321,7 @@ void DynamicWorld::React(const SvDynamicHit* hits, std::uint32_t count, SvVec3 v
         // solved impulses instead.
         if (exchange_ && (kind != EntityKind::Ped || pedParts_)) continue;
         if (!Call<BOOL>(gta::DOES_ENTITY_EXIST, entity) || speed < 1.5f) continue;
+        if (kind == EntityKind::Object && IsDoor(entity)) continue; // OpenDoors swings it
         // GTA-side consequence only; Skate already resolved the board's contact.
         const float k = kind == EntityKind::Ped ? 2.5f : 1.2f;
         if (kind == EntityKind::Ped && !Call<BOOL>(gta::IS_PED_RAGDOLL, entity)) {
@@ -285,7 +329,9 @@ void DynamicWorld::React(const SvDynamicHit* hits, std::uint32_t count, SvVec3 v
             Knocked(entity, 0.0f);
         }
         if (kind != EntityKind::Vehicle) {
-            Call<void>(gta::APPLY_FORCE_TO_ENTITY, entity, 1, v.x * k, v.y * k, 1.0f, 0.0f, 0.0f, 0.0f, 0, 0, 1, 1, 0, 1);
+            // Objects by ObjectPush as the solved impulses are (props too aggressive, rc4).
+            const float push = kind == EntityKind::Object ? objectPush_ : 1.0f;
+            Call<void>(gta::APPLY_FORCE_TO_ENTITY, entity, 1, v.x * k * push, v.y * k * push, push, 0.0f, 0.0f, 0.0f, 0, 0, 1, 1, 0, 1);
         }
     }
     if (cooldown_.size() > 512) cooldown_.clear();
@@ -300,6 +346,22 @@ void Report(int crime) {
     Call<void>(gta::REPORT_CRIME, Call<Player>(gta::PLAYER_ID), crime, Call<int>(gta::GET_WANTED_LEVEL_THRESHOLD, 1));
 }
 } // namespace crime
+
+void DynamicWorld::Bump(std::uint32_t tag, int ped, SvVec3 impulse, float massKg) {
+    const unsigned long now = GetTickCount();
+    auto it = bumped_.find(tag);
+    if (it != bumped_.end() && now - it->second < 1500) return;
+    bumped_[tag] = now;
+    if (bumped_.size() > 256) bumped_.clear();
+    // A shove along the push, at most 1.2 m/s, then GTA's own walk takes over.
+    const float mass = std::isfinite(massKg) && massKg > 40.0f ? massKg : 70.0f;
+    float vx = impulse.x / mass, vy = impulse.y / mass;
+    const float s = std::sqrt(vx * vx + vy * vy);
+    if (s > 1.2f) vx *= 1.2f / s, vy *= 1.2f / s;
+    const Vector3 v = Call<Vector3>(gta::GET_ENTITY_VELOCITY, ped);
+    Call<void>(gta::SET_ENTITY_VELOCITY, ped, v.x + vx, v.y + vy, v.z);
+    pedspeech::Say(ped, "BUMP,GENERIC_CURSE_MED,GENERIC_INSULT_MED,GENERIC_SHOCKED_MED");
+}
 
 void DynamicWorld::Knocked(int ped, float impulse) {
     for (const Knock& k : knocked_) if (k.ped == ped) return;
@@ -451,6 +513,7 @@ void DynamicWorld::ApplyImpulses(const SvDynamicImpulse* impulses, std::uint32_t
         const auto kind = static_cast<EntityKind>((j.tag >> 28) & 0x7u);
         const int entity = static_cast<int>(j.tag & 0x0FFFFFFFu);
         if (!Call<BOOL>(gta::DOES_ENTITY_EXIST, entity)) continue;
+        if (kind == EntityKind::Object && IsDoor(entity)) continue; // swung by OpenDoors, not shoved
         if (!(std::isfinite(j.impulse.x) && std::isfinite(j.impulse.y) && std::isfinite(j.impulse.z))) continue;
         if (kind == EntityKind::Ped) {
             if (!pedParts_) continue;
@@ -459,6 +522,14 @@ void DynamicWorld::ApplyImpulses(const SvDynamicImpulse* impulses, std::uint32_t
             // later frame and a push on the animated ped is lost, so the push
             // is held until the ragdoll is live and then goes to the struck part.
             const float magnitude = std::sqrt(j.impulse.x * j.impulse.x + j.impulse.y * j.impulse.y + j.impulse.z * j.impulse.z);
+            // A light touch bumps, as walking into someone in GTA does
+            // (Manatros 2026-10-20: "react as if bumped, not fall over on touch").
+            if (bumpImpulse_ > 0.0f && magnitude < bumpImpulse_ && !Call<BOOL>(gta::IS_PED_RAGDOLL, entity) &&
+                pedPushes_.find(j.tag) == pedPushes_.end()) {
+                Bump(j.tag, entity, j.impulse, j.mass_kg);
+                ++stats_.exchanged;
+                continue;
+            }
             auto& p = pedPushes_[j.tag];
             if (!p.entity) p = {entity, {0, 0, 0}, j.point, 0.0f, j.mass_kg, j.tick, 0, {0, 0, 0}};
             // Skate moves a ped it pushed itself until GTA has taken the push
@@ -490,8 +561,8 @@ void DynamicWorld::ApplyImpulses(const SvDynamicImpulse* impulses, std::uint32_t
         // entity's local frame; not mass-scaled. Not 4 (APPLY_TYPE_TORQUE): a
         // car took 0.136 of an expected 1.875 m/s. A real hit (not resting/rolling contact) also plays GTA's own
         // impact sound for the vehicle or prop (bPlayAudio).
-        if (kind == EntityKind::Vehicle && vehiclePush_ != 1.0f)
-            j.impulse = {j.impulse.x * vehiclePush_, j.impulse.y * vehiclePush_, j.impulse.z * vehiclePush_};
+        const float push = kind == EntityKind::Vehicle ? vehiclePush_ : kind == EntityKind::Object ? objectPush_ : 1.0f;
+        if (push != 1.0f) j.impulse = {j.impulse.x * push, j.impulse.y * push, j.impulse.z * push};
         const float strength = std::sqrt(j.impulse.x * j.impulse.x + j.impulse.y * j.impulse.y + j.impulse.z * j.impulse.z);
         Call<void>(gta::APPLY_FORCE_TO_ENTITY, entity, 1, j.impulse.x, j.impulse.y, j.impulse.z, ox, oy, oz, 0,
                    0 /*bLocalForce*/, 1 /*bLocalOffset*/, 0 /*bScaleByMass*/, strength >= 150.0f ? 1 : 0 /*bPlayAudio*/,
@@ -511,13 +582,37 @@ void DynamicWorld::ApplyImpulses(const SvDynamicImpulse* impulses, std::uint32_t
     for (std::uint32_t k = 0; k < hitCount; ++k) {
         const Hit& h = hits[k];
         const float total = std::sqrt(h.sum.x * h.sum.x + h.sum.y * h.sum.y + h.sum.z * h.sum.z);
-        if (total < damageMin_) continue;
+        if (total < damageMin_) {
+            // Too light for a dent: a scratch, like a melee hit (small damage,
+            // small radius), at most every 0.3 s per car.
+            constexpr float kScratchMin = 30.0f;
+            if (!scratches_ || !damage_ || total < kScratchMin) continue;
+            const unsigned long tick = GetTickCount();
+            auto at = scratched_.find(h.entity);
+            if (at != scratched_.end() && tick - at->second < 300) continue;
+            scratched_[h.entity] = tick;
+            if (scratched_.size() > 128) scratched_.clear();
+            if (!g_props.HasTemplate(Call<Hash>(gta::GET_ENTITY_MODEL, h.entity))) continue; // add-on cars: no deformation (crash 2026-10-17)
+            Call<void>(gta::SET_VEHICLE_DAMAGE, h.entity, h.ox, h.oy, h.oz, 8.0f, 12.0f, 1);
+            continue;
+        }
+        // Only GTA's own vehicles (they have a collision template): GTA crashed
+        // in its deformation pass right after a dent on an add-on car (IVPack
+        // model 2db8d1aa, no template, NaN bumper bone; 2026-10-17 23:20).
+        const Hash model = Call<Hash>(gta::GET_ENTITY_MODEL, h.entity);
+        if (!g_props.HasTemplate(model)) {
+            if (std::find(undentable_.begin(), undentable_.end(), static_cast<std::uint32_t>(model)) == undentable_.end()) {
+                undentable_.push_back(static_cast<std::uint32_t>(model));
+                logf("vehicle damage: model %08x not dented (no collision template: an add-on vehicle)", static_cast<unsigned>(model));
+            }
+            continue;
+        }
         const float before = Call<float>(gta::GET_VEHICLE_BODY_HEALTH, h.entity);
         Call<void>(gta::SET_VEHICLE_DAMAGE, h.entity, h.ox, h.oy, h.oz, total * damageScale_, damageRadius_, 1);
         if (damageLogs_ < 40) {
             ++damageLogs_;
-            logf("vehicle damage: entity %d impulse %.0f N s at local (%.2f, %.2f, %.2f): damage %.0f radius %.2f, body health %.0f -> %.0f",
-                 h.entity, total, h.ox, h.oy, h.oz, total * damageScale_, damageRadius_, before,
+            logf("vehicle damage: entity %d model %08x impulse %.0f N s at local (%.2f, %.2f, %.2f): damage %.0f radius %.2f, body health %.0f -> %.0f",
+                 h.entity, static_cast<unsigned>(model), total, h.ox, h.oy, h.oz, total * damageScale_, damageRadius_, before,
                  Call<float>(gta::GET_VEHICLE_BODY_HEALTH, h.entity));
         }
     }

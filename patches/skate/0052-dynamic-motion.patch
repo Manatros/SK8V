@@ -1,0 +1,54 @@
+--- a/crates/skate-core/src/physics/board_world.rs
++++ b/crates/skate-core/src/physics/board_world.rs
+@@ -237,6 +237,14 @@ impl BoardWorld {
+         self.refresh_dynamic_query_metadata();
+     }
+ 
++    /// SkateV: the same host triangles at their extrapolated places between
++    /// host samples. Bounds and query data are renewed; the entities and the
++    /// contacts touched since the last `set_dynamic` are kept.
++    pub fn move_dynamic(&mut self, triangles: Vec<WorldTriangle>, entities: Vec<u32>) {
++        let hits = std::mem::take(&mut self.dynamic_hits);
++        self.set_dynamic(triangles, entities);
++        self.dynamic_hits = hits;
++    }
+     /// Maps host entity tags to the solver bodies that represent them for the
+     /// next queries (replaces the previous map).
+     /// Each entry carries the entity's linear velocity: predictive contacts
+--- a/crates/skate-host/src/physics/bridge.rs
++++ b/crates/skate-host/src/physics/bridge.rs
+@@ -231,6 +231,23 @@ impl Session {
+ 
+     /// Entity identity and packed collision surface are independent.
+     pub fn set_dynamic_surfaces(&mut self, triangles: &[([[f32; 3]; 3], u32, u32)]) -> usize {
++        let (built, entities) = self.build_dynamic(triangles);
++        let n = built.len();
++        self.physics.world.set_dynamic(built, entities);
++        n
++    }
++
++    /// SkateV: the triangles of the last `set_dynamic_surfaces` moved
++    /// (extrapolated by their bodies' velocities between host samples); the
++    /// contacts touched since that call are kept for `dynamic_hits`.
++    pub fn move_dynamic_surfaces(&mut self, triangles: &[([[f32; 3]; 3], u32, u32)]) -> usize {
++        let (built, entities) = self.build_dynamic(triangles);
++        let n = built.len();
++        self.physics.world.move_dynamic(built, entities);
++        n
++    }
++
++    fn build_dynamic(&self, triangles: &[([[f32; 3]; 3], u32, u32)]) -> (Vec<skate_core::physics::board_world::WorldTriangle>, Vec<u32>) {
+         use skate_core::{math::Vector3, physics::board_world::WorldTriangle};
+         let material = self.physics.floor_material();
+         let edges = dynamic_edges(triangles);
+@@ -249,9 +266,7 @@ impl Session {
+                 .map(|t| (t, *tag))
+             })
+             .unzip();
+-        let n = built.len();
+-        self.physics.world.set_dynamic(built, entities);
+-        n
++        (built, entities)
+     }
+     /// SkateV skitching: the grab lines of nearby host vehicles (replaces the
+     /// previous set). Each becomes a LivingWorld vehicle object (provider

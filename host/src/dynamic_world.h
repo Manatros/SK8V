@@ -45,6 +45,10 @@ public:
     void ApplyImpulses(const SvDynamicImpulse* impulses, std::uint32_t count, void (*log)(const char*));
     // Peds keep the hit reaction; vehicles/objects use the exchange.
     void SetExchange(bool on) { exchange_ = on; }
+    // Entities that never move (the object dropper's props): sent without a
+    // velocity, so Skate meets their triangles as fixed ground, not as a
+    // movable proxy whose authored mass soaks up the board's momentum.
+    void SetFixed(std::vector<int> entities) { fixed_ = std::move(entities); }
     // Peds join the exchange with their own ragdoll parts (no box).
     void SetPedParts(bool on) { pedParts_ = on; }
     // Launch mode (PedLaunch=1): Skate's launch velocity is scaled and gets
@@ -56,6 +60,12 @@ public:
     // PedsSurvive: a ped the board knocks down cannot die until it is up again
     // (bowled over, not killed).
     void SetPedsSurvive(bool on) { survive_ = on; }
+    // PedBumpImpulse: a push weaker than this (N s) only bumps the ped (a
+    // shove and a line, as GTA's own bumps), stronger ones ragdoll it; 0: always ragdoll.
+    void SetPedBump(float impulse) { bumpImpulse_ = impulse; }
+    // BoardScratches: hits too light for a dent leave a scratch, as a melee
+    // hit does (Manatros 2026-10-20).
+    void SetScratches(bool on) { scratches_ = on; }
     // Knocked-over peds: pain grunt when struck, a line once back up.
     void SetPedVoices(int pain, const std::string& getUp) { pedPain_ = pain, pedGetUp_ = getUp; }
     // Once a frame: knocked-over peds back on their feet say their line.
@@ -66,6 +76,7 @@ public:
     // How much of Skate's impulse pushes vehicles (1: all; less: the car
     // bounces less when the skater lands on or hits it). Dents follow it.
     void SetVehiclePush(float push) { vehiclePush_ = push < 0.0f ? 0.0f : push; }
+    void SetObjectPush(float push) { objectPush_ = push < 0.0f ? 0.0f : push; }
     void SetVehicleDamage(bool on, float scale, float min, float radius) {
         damage_ = on, damageScale_ = scale, damageMin_ = min, damageRadius_ = radius;
     }
@@ -90,7 +101,8 @@ private:
     std::vector<Candidate> nearby_;
     std::vector<SvDynamicBody> bodies_;
     std::vector<Debris> debris_;
-    struct Door { std::uint32_t hash; SvVec3 hinge; SvVec3 forward; };
+    struct Door { std::uint32_t hash; SvVec3 hinge; SvVec3 forward; int entity; };
+    bool IsDoor(int entity) const;
     std::vector<Door> doors_;
     // Fixed per model: GTA's model bounds and the bumper_r bone (-1: none),
     // looked up once rather than every gather.
@@ -103,9 +115,15 @@ private:
     std::vector<int> scratch_;
     std::unordered_map<std::uint32_t, unsigned long> cooldown_;
     bool exchange_ = false;
+    std::vector<int> fixed_;
     bool pedParts_ = false;
     bool launch_ = false;
     bool survive_ = false;
+    float bumpImpulse_ = 0.0f;
+    bool scratches_ = true;
+    std::unordered_map<int, unsigned long> scratched_; // vehicle -> last scratch (ms)
+    std::unordered_map<std::uint32_t, unsigned long> bumped_; // tag -> last bump (ms)
+    void Bump(std::uint32_t tag, int ped, SvVec3 impulse, float massKg);
     float launchScale_ = 1.0f, launchLift_ = 0.0f, launchSpin_ = 1.0f;
     int pedPain_ = 0;
     std::string pedGetUp_;
@@ -116,7 +134,10 @@ private:
     bool damage_ = true;
     float damageScale_ = 0.5f, damageMin_ = 200.0f, damageRadius_ = 150.0f;
     float vehiclePush_ = 1.0f;
+    float objectPush_ = 0.25f; // ObjectPush: props (they took the full impulse, unscaled by mass)
     std::uint32_t damageLogs_ = 0;
+    // Vehicle models never dented (no collision template), logged once each.
+    std::vector<std::uint32_t> undentable_;
     std::vector<SvPedPart> parts_;
     // Ped pushes waiting for GTA to switch the ped to its ragdoll (a push on
     // the animated ped is lost): summed per ped, applied once it ragdolls.

@@ -93,7 +93,6 @@ impl Riding {
 }
 
 /// The boards a store shows: up to this many.
-pub const ON_SHOW: usize = 5;
 
 /// What an input did, for the host: it takes the money for a purchase.
 #[repr(C)]
@@ -312,6 +311,41 @@ impl BoardShop {
         if Self::is_default(&self.garage) { Vec::new() } else { self.models(&self.ridden()) }
     }
 
+    /// The ridden wheels' colour (the maintainer 2026-10-18: glowing wheels shine in
+    /// their own colour by default): a paint's colour, else the mean of the
+    /// wheel finish's opaque texture pixels.
+    pub fn wheel_colour(&self) -> Option<[u8; 3]> {
+        let part = self.garage.riding.get(Part::Wheels)?;
+        if let Some(paint) = skate_boards::paints::of(part) {
+            return Some(paint.rgb);
+        }
+        let texture = self.library.texture(&part.material, 64).ok()?;
+        let (mut sum, mut n) = ([0u64; 3], 0u64);
+        let (mut csum, mut cn) = ([0u64; 3], 0u64);
+        for p in texture.rgba.chunks_exact(4).filter(|p| p[3] >= 128) {
+            let [r, g, b, _] = [u64::from(p[0]), u64::from(p[1]), u64::from(p[2]), 0];
+            let max = r.max(g).max(b);
+            let min = r.min(g).min(b);
+            let chroma = max - min;
+            for c in 0..3 {
+                sum[c] += u64::from(p[c]);
+            }
+            n += 1;
+            if chroma >= 24 && max >= 40 {
+                let w = chroma * chroma;
+                for c in 0..3 {
+                    csum[c] += u64::from(p[c]) * w;
+                }
+                cn += w;
+            }
+        }
+        if cn > 0 {
+            Some(csum.map(|s| (s / cn) as u8))
+        } else {
+            (n > 0).then(|| sum.map(|s| (s / n) as u8))
+        }
+    }
+
     /// The ridden wheels' hardness when they are painted (the paint's
     /// finish: matte soft, gloss medium, metallic hard); none for Skate's own.
     pub fn wheel_hardness(&self) -> Option<f32> {
@@ -325,6 +359,29 @@ impl BoardShop {
             garage.ride(&offer.goods);
         }
         self.models(&garage)
+    }
+
+    /// Three rows each way in the active list, including its wraparound.
+    /// Forward then backward at each distance; group rows have no models.
+    /// Keep empty rows so the host can reduce the radius under session pressure.
+    pub fn neighbours(&self) -> String {
+        let Some(menu) = self.menu.as_ref() else { return String::new() };
+        let lines = menu.lines();
+        if lines.is_empty() { return String::new(); }
+        let mut out = String::new();
+        for distance in 1..=3 {
+            for row in [(menu.row + distance) % lines.len(), (menu.row + lines.len() - distance % lines.len()) % lines.len()] {
+                if row != menu.row {
+                    if let Line::Offer(offer) = &lines[row] {
+                        let mut garage = self.garage.clone();
+                        garage.ride(&offer.goods);
+                        out.push_str(&self.models(&garage).join(","));
+                    }
+                }
+                out.push('\n');
+            }
+        }
+        out
     }
 
     /// The store's part view: only the current offer's part (the deck with
@@ -385,6 +442,55 @@ impl BoardShop {
                     .all(|m| self.available.contains(m))
             }
         }
+    }
+
+    /// Today's stock of the store `store` (design 2026-10-26-shops-step1):
+    /// "Yours" (every owned board and part, to ride again), the complete
+    /// boards on show (Binco all of them, Suburban the first 3), then a
+    /// few of each part by store kind, different each game day.
+    pub fn stock_for(&self, tier: Tier, store: (i32, i32), day: u32) -> Vec<crate::shop::Section> {
+        let mut full = crate::shop::stock(&self.library, tier);
+        for section in &mut full {
+            section.offers.retain(|offer| self.sells(&offer.goods));
+        }
+        let mut out = Vec::new();
+        // Owned goods keep their price: riding one is free, buying the one
+        // ridden again is a new one and costs it (peer review 2026-10-26:
+        // at 0 it renewed worn parts for nothing). Skate's own grip is no
+        // possession of note.
+        let yours: Vec<crate::shop::Offer> = full.iter().flat_map(|s| s.offers.iter())
+            .filter(|o| self.garage.owns(&o.goods) && o.goods != Goods::Grip(crate::shop::DECK_GRIP.into()))
+            .cloned()
+            .collect();
+        if !yours.is_empty() {
+            out.push(crate::shop::Section { title: "Yours".into(), offers: yours });
+        }
+        for section in full {
+            let offers = if section.title == "Complete boards" {
+                // The first picks are the boards on show (one daily order):
+                // Suburban sells those and a few more (Manatros 2026-10-26).
+                let extra = if tier == Tier::Mid { crate::shop::MID_EXTRA } else { 0 };
+                crate::shop::picks_distinct(&section.offers, store, day, 0, crate::shop::on_show(tier) + extra)
+            } else {
+                let salt = section.title.bytes().fold(0u32, |h, b| h.wrapping_mul(31).wrapping_add(u32::from(b)));
+                crate::shop::picks_distinct(&section.offers, store, day, salt, crate::shop::section_count(tier, &section.title))
+            };
+            if !offers.is_empty() {
+                out.push(crate::shop::Section { title: section.title, offers });
+            }
+        }
+        out
+    }
+
+    /// Opens today's menu of store `store`; false where boards are not sold.
+    pub fn open_at(&mut self, tier: Tier, store: (i32, i32), day: u32) -> bool {
+        if !tier.sells_boards() {
+            return false;
+        }
+        let sections = self.stock_for(tier, store, day);
+        self.menu = (!sections.is_empty()).then(|| Menu::new(tier, sections));
+        self.message.clear();
+        self.menu.is_some()
     }
 
     /// Opens the store's menu; false where boards are not sold.
@@ -549,7 +655,7 @@ impl BoardShop {
                 _ => None,
             })
             .collect();
-        let boards = crate::shop::show_picks(&completes, store, day, ON_SHOW);
+        let boards = crate::shop::picks_distinct(&completes, store, day, 0, crate::shop::on_show(tier));
         let to_board = self.frame.inverse();
         show.places(boards.len())
             .into_iter()
@@ -627,17 +733,31 @@ pub unsafe extern "C" fn sv_shop_character(_rt: *mut c_void, who: *const c_char)
     })
 }
 
-/// Opens the store menu: tier 0 Binco / Discount Store, 1 Suburban, 2
-/// Ponsonbys (sells none). Returns 1 when open.
+/// Host store kinds: 0 Binco / Discount Store, 1 Suburban, 2 Ponsonbys
+/// (sells none), 3 a board shop.
+fn tier_of(tier: u32) -> Tier {
+    match tier {
+        0 => Tier::Low,
+        1 => Tier::Mid,
+        3 => Tier::Skate,
+        _ => Tier::High,
+    }
+}
+
+/// Opens the store menu with the whole catalog (older hosts). Returns 1 when open.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sv_shop_open(_rt: *mut c_void, tier: u32) -> u32 {
+    crate::guard(0, || with(0, |s| u32::from(s.open(tier_of(tier)))))
+}
+
+/// Opens today's menu of the store at GTA point (`x`, `y`) (the interior's
+/// location, or a board shop's anchor) on game day `day`: the same boards
+/// as its display. Returns 1 when open.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sv_shop_open_at(_rt: *mut c_void, tier: u32, x: f32, y: f32, day: u32) -> u32 {
     crate::guard(0, || {
-        let tier = match tier {
-            0 => Tier::Low,
-            1 => Tier::Mid,
-            _ => Tier::High,
-        };
-        with(0, |s| u32::from(s.open(tier)))
+        let store = crate::shop::store_key(bevy_math::Vec3::new(x, y, 0.0));
+        with(0, |s| u32::from(s.open_at(tier_of(tier), store, day)))
     })
 }
 
@@ -675,6 +795,8 @@ pub unsafe extern "C" fn sv_shop_input(_rt: *mut c_void, input: u32, cash: i64, 
 /// ridden painted wheels' hardness ("0.60"; empty for unpainted wheels), 5 the
 /// store preview's models in the part view (only the offer's part), 6 the side
 /// the preview shows ("top" for a griptape, "bottom" else, "" outside offers),
+/// 8 neighbour model lists: +1, -1, +2, -2, +3, -3 rows (one comma list
+/// per line, empty on group rows; wraps within the active list),
 /// 100 + slot (0..7) a complete board for crew member `slot` (models).
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sv_shop_text(_rt: *mut c_void, which: u32, buf: *mut u8, cap: u32) -> u32 {
@@ -688,8 +810,10 @@ pub unsafe extern "C" fn sv_shop_text(_rt: *mut c_void, which: u32, buf: *mut u8
             2 => s.preview().join(","),
             5 => s.preview_part().join(","),
             6 => s.preview_face().to_string(),
+            8 => s.neighbours(),
             100..=107 => s.crew_board(which - 100).join(","),
             4 => s.wheel_hardness().map(|h| format!("{h:.2}")).unwrap_or_default(),
+            7 => s.wheel_colour().map(|[r, g, b]| format!("{r},{g},{b}")).unwrap_or_default(),
             _ => String::new(),
         });
         give(&text, buf, cap)
@@ -757,11 +881,7 @@ pub unsafe extern "C" fn sv_shop_display(
         }
         let v3 = |p: *const f32| unsafe { bevy_math::Vec3::new(*p, *p.add(1), *p.add(2)) };
         let clerk = (!clerk.is_null()).then(|| (v3(clerk), v3(unsafe { clerk.add(3) })));
-        let tier = match tier {
-            0 => Tier::Low,
-            1 => Tier::Mid,
-            _ => Tier::High,
-        };
+        let tier = tier_of(tier);
         let cast = |a: bevy_math::Vec3, b: bevy_math::Vec3| {
             let (from, to, mut hit) = ([a.x, a.y, a.z], [b.x, b.y, b.z], [0.0f32; 3]);
             (unsafe { probe(ctx, from.as_ptr(), to.as_ptr(), hit.as_mut_ptr()) } != 0).then(|| bevy_math::Vec3::from(hit))
@@ -810,6 +930,40 @@ mod tests {
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();
         d
+    }
+
+    #[test]
+    fn neighbours_follow_the_active_list_and_close() {
+        let d = dir("neighbours");
+        let mut s = shop(&d);
+        assert!(s.neighbours().is_empty());
+        let offers = (0..9).map(|i| {
+            let id = format!("prefetch{i}");
+            s.available.insert(format!("skatev_d_{id}"));
+            crate::shop::Offer {
+                title: id.clone(), goods: Goods::Part(Part::Deck, PartRef::new("deckmodel", &id)),
+                price: 5, preview: id, group: None,
+            }
+        }).collect();
+        s.menu = Some(Menu::new(Tier::Low, vec![crate::shop::Section { title: "Test".into(), offers }]));
+        s.menu.as_mut().unwrap().row = 4;
+        let neighbours = s.neighbours();
+        let rows: Vec<_> = neighbours.lines().collect();
+        assert_eq!(rows.len(), 6);
+        for (row, index) in rows.iter().zip([5, 3, 6, 2, 7, 1]) {
+            assert_eq!(row.split(',').next().unwrap(), format!("skatev_d_prefetch{index}"));
+        }
+        s.menu.as_mut().unwrap().row = 0;
+        assert!(s.neighbours().lines().nth(1).unwrap().starts_with("skatev_d_prefetch8,"));
+        // Group headings are rows, not offers to register.
+        for offer in &mut s.menu.as_mut().unwrap().sections[0].offers {
+            offer.group = Some("Maker".into());
+        }
+        assert_eq!(s.neighbours(), "\n\n\n\n\n\n");
+        s.input(Input::Accept, 0);
+        assert!(s.neighbours().contains("skatev_d_prefetch1,"));
+        s.close();
+        assert!(s.neighbours().is_empty());
     }
 
     #[test]
@@ -889,15 +1043,16 @@ mod tests {
     }
 
     #[test]
-    fn a_kept_show_puts_five_boards_on_the_exporters_frame() {
+    fn a_kept_show_puts_its_boards_on_the_exporters_frame_without_repeats() {
         let d = dir("show");
         std::fs::write(d.join("SkateVDisplay.txt"), "show3 10 20  12.000 20.000 1.500  -1.0000 0.0000  0.500  wall\n").unwrap();
         let mut s = shop(&d);
         let v = bevy_math::Vec3::new;
         let shown = s.display(Tier::Low, v(10.0, 20.0, 1.0), v(10.0, 20.0, 1.5), None, 3, |_, _| None);
-        assert_eq!(shown.len(), ON_SHOW);
+        // One complete board in the test catalog: shown once, never repeated.
+        assert_eq!(shown.len(), 1);
         let places = crate::shop::ShowCase { store: (10, 20), at: v(12.0, 20.0, 1.5), normal: v(-1.0, 0.0, 0.0), floor: 0.5, till: false }
-            .places(ON_SHOW);
+            .places(1);
         // A point of the exported board lands where the place puts it.
         let w = v(0.02, 0.05, 0.4);
         let entity = bevy_math::Mat4::from_cols_array(&shown[0].0);
@@ -905,6 +1060,32 @@ mod tests {
         assert!((at - places[0].transform_point3(w)).length() < 1e-4, "{at:?}");
         assert!(!shown[0].1.is_empty());
         assert_eq!(s.display(Tier::High, v(10.0, 20.0, 1.0), v(10.0, 20.0, 1.5), None, 3, |_, _| None).len(), 0);
+    }
+
+    #[test]
+    fn binco_sells_its_display_and_owned_goods_stay_ridable() {
+        let d = dir("rotation");
+        std::fs::write(d.join("SkateVDisplay.txt"), "show3 10 20  12.000 20.000 1.500  -1.0000 0.0000  0.500  wall
+").unwrap();
+        let mut s = shop(&d);
+        let v = bevy_math::Vec3::new;
+        let shown = s.display(Tier::Low, v(10.0, 20.0, 1.0), v(10.0, 20.0, 1.5), None, 3, |_, _| None);
+        let stock = s.stock_for(Tier::Low, (10, 20), 3);
+        assert!(stock.iter().all(|sec| sec.title == "Complete boards" || sec.title == "Yours"), "Binco: complete boards only");
+        let sold: usize = stock.iter().filter(|sec| sec.title == "Complete boards").map(|sec| sec.offers.len()).sum();
+        assert_eq!(sold, shown.len(), "the boards on its wall");
+        // What is owned is listed under Yours whatever is stocked today.
+        let owned = s.stock_for(Tier::Mid, (10, 20), 3).into_iter().flat_map(|sec| sec.offers).next().unwrap();
+        s.garage.add(&owned.goods);
+        let yours = s.stock_for(Tier::Low, (99, 99), 400);
+        assert_eq!(yours[0].title, "Yours");
+        assert!(yours[0].offers.iter().any(|o| o.goods == owned.goods && o.price > 0), "listed, at this store's price");
+        assert!(!yours[0].offers.iter().any(|o| o.goods == Goods::Grip(crate::shop::DECK_GRIP.into())));
+        assert!(s.open_at(Tier::Skate, (-1303, -1369), 3));
+        // Suburban's first boards are the ones on its wall.
+        let wall = crate::shop::picks_distinct(&[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12], (10, 20), 3, 0, crate::shop::on_show(Tier::Mid));
+        let sold = crate::shop::picks_distinct(&[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12], (10, 20), 3, 0, crate::shop::on_show(Tier::Mid) + crate::shop::MID_EXTRA);
+        assert_eq!(&sold[..wall.len()], &wall[..]);
     }
 
     #[test]

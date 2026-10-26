@@ -34,9 +34,15 @@ diff --git a/crates/skate-host/src/physics/air_trajectory/world.rs b/crates/skat
 diff --git a/crates/skate-host/src/physics/offboard/contact_queries.rs b/crates/skate-host/src/physics/offboard/contact_queries.rs
 --- a/crates/skate-host/src/physics/offboard/contact_queries.rs
 +++ b/crates/skate-host/src/physics/offboard/contact_queries.rs
-@@ -41,17 +41,18 @@
-         .all(|m| m.local_to_world == RetailAffineTransform::IDENTITY)
-     {
+@@ -38,20 +38,27 @@
+-    let candidates: Vec<_> = if metadata
++    let identity = metadata
+         .meshes
+         .iter()
+-        .all(|m| m.local_to_world == RetailAffineTransform::IDENTITY)
+-    {
++        .all(|m| m.local_to_world == RetailAffineTransform::IDENTITY);
++    let candidates: Vec<_> = if identity {
          world
 -            .line_candidates(start, end, probe.radius)
 +            .scene_line_candidates(start, end, probe.radius)
@@ -46,7 +52,13 @@ diff --git a/crates/skate-host/src/physics/offboard/contact_queries.rs b/crates/
 -        (0..world.triangles().len()).collect()
 +        (0..world.triangles().len() + world.dynamic().len()).collect()
      };
-+    let meshes = world.scene_mesh_candidates(None).map_err(str::to_owned)?;
++    if candidates.is_empty() {
++        return Ok(None);
++    }
++    let bounds = identity
++        .then(|| skate_core::physics::board_world::query_metadata::Bounds::from_points([start, end]).map(|b| b.expanded(probe.radius)))
++        .flatten();
++    let meshes = world.scene_mesh_candidates(bounds).map_err(str::to_owned)?;
      for pool in [QueryPool::Ground, QueryPool::Island, QueryPool::Conditional] {
          if pool == QueryPool::Conditional && metadata.island_flags != 3 {
              continue;

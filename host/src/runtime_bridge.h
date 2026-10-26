@@ -72,6 +72,10 @@ public:
     bool ShopStart(const std::string& assets, const std::string& garages);
     bool ShopCharacter(const std::string& who);
     bool ShopOpen(int tier);
+    // Today's stock of the store at x, y (its display's boards); an older
+    // runtime without it opens the whole catalog (tiers 0 and 1 only).
+    bool ShopOpenAt(int tier, float x, float y, unsigned day);
+    bool HasShopOpenAt() const { return shopOpenAt_ != nullptr; }
     void ShopClose();
     SvShopResult ShopInput(int input, long long cash);
     std::string ShopText(int which);
@@ -142,6 +146,7 @@ private:
     SvShopStartFn shopStart_ = nullptr;
     SvShopCharacterFn shopCharacter_ = nullptr;
     SvShopOpenFn shopOpen_ = nullptr;
+    SvShopOpenAtFn shopOpenAt_ = nullptr;
     SvShopCloseFn shopClose_ = nullptr;
     SvShopInputFn shopInput_ = nullptr;
     SvShopTextFn shopText_ = nullptr;

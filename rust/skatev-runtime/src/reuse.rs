@@ -92,9 +92,31 @@ impl Dirty {
     }
 }
 
+/// Per-line answers, retained only while the input line remains in the area.
+/// The stage supplies the full reach of its geometry reads.
+#[derive(Default)]
+pub struct LineCache(FxHashMap<u64, Vec<Vec<Vec3>>>);
+impl LineCache {
+    pub fn apply(&mut self, lines: &[Vec<Vec3>], dirty: &Dirty, pad: f32, transform: impl Fn(&[Vec3]) -> Vec<Vec<Vec3>>) -> Vec<Vec<Vec3>> {
+        let mut next = FxHashMap::default();
+        let mut out = Vec::new();
+        for line in lines {
+            let key = line.iter().flat_map(|v| v.to_array()).fold(line.len() as u64, |h, x| mix(h ^ x.to_bits() as u64));
+            let (lo, hi) = line.iter().fold((Vec3::splat(f32::MAX), Vec3::splat(f32::MIN)), |(lo, hi), p| (lo.min(*p), hi.max(*p)));
+            let answer = if !dirty.touches(lo, hi, pad) { self.0.remove(&key) } else { None }
+                .unwrap_or_else(|| transform(line));
+            out.extend(answer.iter().cloned());
+            next.insert(key, answer);
+        }
+        self.0 = next;
+        out
+    }
+}
+
 /// What the last area build found, by item, for `Dirty`-clean reuse.
 #[derive(Default)]
 pub struct AreaCache {
+    options: u64,
     /// The last build's triangles: key -> box (for the area a gone one covered).
     pub boxes: FxHashMap<u64, (Vec3, Vec3)>,
     pub rails: crate::rails::RailCache,
@@ -103,9 +125,26 @@ pub struct AreaCache {
     pub interior: FxHashSet<u64>,
     pub caps: FxHashSet<u64>,
     pub buried: FxHashSet<u64>,
+    pub clearance_rails: Vec<Vec<Vec3>>,
+    pub clearance: FxHashMap<u64, bool>,
+    pub raw_rails: Option<(Vec<Vec<Vec3>>, crate::rails::RailCensus)>,
+    pub bevel_result: Option<crate::curbs::Bevels>,
+    pub step_tags: Vec<bool>,
+    pub rail_index: Option<(Vec<[Vec3; 3]>, crate::grid::XyGrid)>,
+    pub tops: LineCache,
+    pub tracks: LineCache,
+    pub uncovered: LineCache,
+    pub visual: LineCache,
 }
 
 impl AreaCache {
+    pub fn for_options(&mut self, version: u64) {
+        if self.options != version {
+            *self = Self::default();
+            self.options = version;
+        }
+    }
+
     /// The change from the last build to `now`, recording `now` for the next,
     /// and `now`'s keys (`tri_key`).
     pub fn diff(&mut self, now: &[[Vec3; 3]]) -> (Dirty, Vec<u64>) {
@@ -139,6 +178,37 @@ mod tests {
 
     fn tri(x: f32, y: f32) -> [Vec3; 3] {
         [Vec3::new(x, y, 0.0), Vec3::new(x + 1.0, y, 0.0), Vec3::new(x, y + 1.0, 0.0)]
+    }
+
+    #[test]
+    fn option_change_invalidates_unchanged_geometry_and_stage_answers() {
+        let mut cache = AreaCache::default();
+        let tris = [tri(0., 0.)];
+        cache.diff(&tris);
+        cache.clearance.insert(tri_key(&tris[0]), true);
+        cache.for_options(0);
+        assert!(!cache.diff(&tris).0.any(), "same setting retains work");
+        cache.for_options(1);
+        assert!(cache.clearance.is_empty());
+        assert!(!cache.diff(&tris).0.compared(), "changed setting forces full rebuild");
+        cache.for_options(1);
+        assert!(!cache.diff(&tris).0.any());
+    }
+
+    #[test]
+    fn line_answers_reuse_only_outside_changed_regions_and_drop_old_lines() {
+        let mut cache = LineCache::default();
+        let lines = vec![vec![Vec3::ZERO, Vec3::X], vec![Vec3::X * 100., Vec3::X * 101.]];
+        let calls = std::cell::Cell::new(0);
+        let transform = |r: &[Vec3]| { calls.set(calls.get() + 1); vec![r.to_vec()] };
+        cache.apply(&lines, &Dirty::everything(), 1., transform);
+        let mut area = AreaCache::default();
+        area.diff(&[tri(0., 0.)]);
+        let dirty = area.diff(&[tri(0., 0.), tri(1., 0.)]).0;
+        cache.apply(&lines, &dirty, 1., transform);
+        assert_eq!(calls.get(), 3, "only the nearby line recomputed");
+        cache.apply(&[], &dirty, 1., transform);
+        assert!(cache.0.is_empty(), "out-of-area answers are released");
     }
 
     #[test]

@@ -1,4 +1,4 @@
-﻿//! Loose GTA `.ybn` collision -> SkateV world cache (SVWC v2, see `rust/svwc`).
+//! Loose GTA `.ybn` collision -> SkateV world cache (SVWC v2, see `rust/svwc`).
 //!
 //!     skatev-world-cache OUT.svwc [--include-hi] [--census] [--layers DIR] INPUT.ybn|DIR [...]
 //!
@@ -19,6 +19,8 @@
 //! children a ped collides with are kept (no foliage, no weapon-, vehicle-,
 //! cover- or animal-only bounds). `--no-primitives` and `--all-flags` restore
 //! the old behaviour.
+mod tile_bake;
+mod bars;
 mod interiors;
 mod packs;
 mod primitives;
@@ -68,7 +70,7 @@ fn collect_ybn(
 /// millimetres apart straddle a grid line in one of nine coordinates.
 // ponytail: compared within 64 m blocks by centroid, so a pair straddling a
 // block edge survives; harmless (it is only a repeat).
-use svwc::clean::drop_repeats;
+use svwc::clean::{drop_coplanar_layers, drop_repeats};
 
 fn file_key(path: &Path) -> String {
     path.file_name()
@@ -158,6 +160,26 @@ impl Census {
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
+    match env::args().nth(1).as_deref() {
+        Some("--world-format") => { println!("SVWT-LIVE 1"); return Ok(()); },
+        // The bake gate (scripts/bake-world.ps1): tiles, runtime and floor
+        // map must come from one source; any rule edit changes these lines.
+        Some("--rules") => {
+            println!("{}", SkateVRuntime::tiles::rules_hash());
+            println!("floor-policy {:016x}", SkateVRuntime::baked::policy_source());
+            return Ok(());
+        },
+        Some("--verify-world") => return tile_bake::run_verify_world(env::args().skip(2).collect()),
+        Some("--bake-story-map") => return tile_bake::run_story_map(env::args().skip(2).collect()),
+        Some("--bake-world-box") => return tile_bake::run_box(env::args().skip(2).collect()),
+        Some("--bake-world-tiles") => return tile_bake::run_tiles(env::args().skip(2).collect()),
+        Some("--bake-world-along-tracks") => return tile_bake::run_tracks(env::args().skip(2).collect()),
+        _ => {}
+    }
+
+    if env::args().nth(1).as_deref() == Some("--bake-world") {
+        return tile_bake::run(env::args().skip(2).collect());
+    }
     // Collision coverage audit of every placement (no cache is written):
     //   skatev-world-cache --audit-props META [x y z radius]
     {
@@ -545,6 +567,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         println!("{} foliage mesh triangles over ground left out", vegetation::drop_over_ground(&mut triangles));
     }
     println!("{} repeated triangles left out", drop_repeats(&mut triangles));
+    println!("{} coplanar duplicate layers left out", drop_coplanar_layers(&mut triangles));
     let file = fs::File::create(&output)?;
     let mut out = BufWriter::new(file);
     let records = svwc::write(&mut out, &triangles, svwc::DEFAULT_TILE_SIZE)?;

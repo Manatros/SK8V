@@ -1,4 +1,4 @@
-// Compile with menu.cpp's SDK include path, /Gy, ScriptHookV.lib, user32.lib and /OPT:REF.
+// Compile with menu.cpp's SDK include path, /DNOMINMAX, /Gy, ScriptHookV.lib, user32.lib and /OPT:REF.
 // No GTA native is invoked; unused UI sections are discarded by the linker.
 #include "../src/menu.cpp"
 #include <cassert>
@@ -84,5 +84,40 @@ int wmain(int argc, wchar_t** argv) {
     menu::Start(missingIni, pages, {}, nullptr);
     assert(menu::ApplyPreset("First run", {}));
     assert(menu::Current().at("Hud") == "1");
+    // An old FirstPerson choice and snapshots without CameraFollow remain usable.
+    const auto cameraIni = std::wstring(argv[1]) + L"\\camera-presets.ini";
+    DeleteFileW(cameraIni.c_str());
+    WritePrivateProfileStringW(L"SkateV", L"CameraView", L"FirstPerson", cameraIni.c_str());
+    std::vector<menu::Page> cameras = {{"Camera", {
+        menu::Choice("View", "CameraView", {"Skate", "Near", "Middle", "Far", "Head"},
+                     {"Skate", "Near", "Middle", "Far", "Head"})}}};
+    menu::Start(cameraIni, cameras, {}, nullptr);
+    assert(menu::SaveCustomPreset());
+    assert(menu::ApplyPreset("Skate", {{"CameraView", "Skate"}}));
+    // Simulate upgrading: the old Custom/User snapshots have only CameraView.
+    cameras[0].items.push_back(menu::Flag("Follow", "CameraFollow", false));
+    menu::Start(cameraIni, cameras, {}, nullptr);
+    assert(menu::RestoreCustomPreset());
+    assert(menu::Current().at("CameraView") == "FirstPerson");
+    assert(menu::Current().at("CameraFollow") == "0");
+    assert(menu::Show(cameras[0].items[0], menu::Current().at("CameraView")) == "Head");
+    assert(menu::RestoreUserPreset());
+    assert(menu::Current().at("CameraView") == "FirstPerson");
+    assert(menu::Current().at("CameraFollow") == "0");
+    // Removing orbit-only menu rows must not invalidate old User/Custom snapshots.
+    cameras[0].items.push_back(menu::Choice("Focus", "CameraFocus", {"Skater", "Board"}, {"Skater", "Board"}));
+    menu::Start(cameraIni, cameras, {}, nullptr);
+    assert(menu::ApplyPreset("Legacy", {{"CameraView", "FirstPerson"}, {"CameraFollow", "1"}, {"CameraFocus", "Board"}}));
+    assert(menu::SaveCustomPreset());
+    cameras[0].items.resize(1);
+    menu::Start(cameraIni, cameras, {}, nullptr);
+    assert(menu::ApplyPreset("Skate", {{"CameraView", "Skate"}}));
+    assert(menu::RestoreCustomPreset());
+    assert(menu::Current().size() == 1 && menu::Current().at("CameraView") == "FirstPerson");
+    wchar_t legacy[32]{};
+    GetPrivateProfileStringW(L"SkateV", L"CameraFollow", L"", legacy, 32, cameraIni.c_str());
+    assert(std::wstring(legacy) == L"1");
+    GetPrivateProfileStringW(L"SkateV", L"CameraFocus", L"", legacy, 32, cameraIni.c_str());
+    assert(std::wstring(legacy) == L"Board");
     std::cout << "PASS: production preset validation, complete reset, User isolation, Custom persistence, duplicate callbacks, restart reporting and transactional failure\n";
 }

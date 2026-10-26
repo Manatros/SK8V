@@ -28,3 +28,5 @@ png = "0.17"
 skate-aems = { path = "../skate-aems" }
 # Keyboard and mouse as a controller (skate-input: keys, trick stick, one-key tricks).
 skate_input = { path = "../skate-input" }
+
+flate2 = { version = "1.1.10", default-features = false, features = ["rust_backend"] }

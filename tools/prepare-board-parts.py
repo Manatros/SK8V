@@ -41,9 +41,16 @@ WHEELS = ('w',)
 # grip its grain, the wood and metal their shine, the urethane its sheen.
 RETAIL = {'d': 'skateboard', 'g': 'skateboard', 't': 'skatetruck', 'tb': 'skatetruck', 'th': 'skatetruck',
           'w': 'skatewheel'}
-# The specular strength, falloff and fresnel the native board uses; a painted
-# part keeps its paint's own (matte, gloss, metallic).
 SHINE = ('specularIntensityMult', 'specularFalloffMult', 'specularFresnel')
+# Every part takes GTA's own shine for the same shader (the maintainer, 2026-10-17: all
+# board states lit alike, like other GTA objects): w_me_bat for wood, grip,
+# urethane and paint, rifle metal for trucks. Fresnel 0.97 at full strength
+# mirrored the sky in dark tunnels. The spec map still tells gloss from matte.
+GTA_SHINE = {'wood': (0.6, 20.0, 0.22), 'metal': (0.75, 40.0, 0.75)}
+
+
+def gta_shine(name):
+    return dict(zip(SHINE, GTA_SHINE['metal' if kind(name) in TRUCKS else 'wood']))
 
 
 def kind(name):
@@ -149,8 +156,8 @@ def convert(source_dir, name, out_name, offset, template, work):
                 # The exporter's flat placeholder spec map gives way to the retail one.
                 own = mine.find('Name').text
                 p.find('Name').text = spec if spec and p.get('name') == 'SpecSampler' and own.startswith('skate3board_') else own
-            elif p.get('name') in SHINE and spec and not painted:
-                continue  # the native board's shine
+            elif p.get('name') in SHINE:
+                p.set('x', repr(gta_shine(name)[p.get('name')]))
             else:
                 for axis in 'xyzw':
                     if mine.get(axis) is not None:

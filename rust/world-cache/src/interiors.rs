@@ -86,7 +86,7 @@ pub fn layered(
 }
 
 /// Every `_manifest.ymf` under `meta_dir` (base, then layers).
-fn manifests(meta_dir: &Path) -> Vec<rage_formats::Manifest> {
+fn manifest_files(meta_dir: &Path) -> Vec<PathBuf> {
     let mut files = Vec::new();
     walk(&meta_dir.join("base"), "ymf", &mut files);
     if let Ok(order) = crate::vfs::read_to_string(meta_dir.join("layers.txt")) {
@@ -99,6 +99,23 @@ fn manifests(meta_dir: &Path) -> Vec<rage_formats::Manifest> {
         }
     }
     files
+}
+
+/// A bake must not certify a state policy after silently losing a manifest.
+/// Legacy callers retain their best-effort lookup; final-world generation
+/// performs this strict preflight before either classification pass.
+pub fn validate_manifests(meta_dir: &Path) -> Result<usize, String> {
+    let files = manifest_files(meta_dir);
+    if files.is_empty() { return Err("no world manifests found; cannot determine live map states".to_owned()); }
+    for p in &files {
+        let bytes = crate::vfs::read(p).map_err(|e| format!("manifest {}: {e}", p.display()))?;
+        parse_ymf(&bytes).map_err(|e| format!("manifest {}: {e}", p.display()))?;
+    }
+    Ok(files.len())
+}
+
+fn manifests(meta_dir: &Path) -> Vec<rage_formats::Manifest> {
+    manifest_files(meta_dir)
         .iter()
         .filter_map(|p| crate::vfs::read(p).ok())
         .filter_map(|b| parse_ymf(&b).ok().map(|(_, m)| m))
@@ -122,6 +139,33 @@ pub fn script_toggled_ymaps(meta_dir: &Path) -> std::collections::HashSet<u32> {
     out
 }
 
+/// All map groups whose active state can change during play, including
+/// weather/hour groups. A static bake cannot choose the player's live state.
+pub fn state_dependent_maps(meta_dir: &Path) -> std::collections::HashSet<u32> {
+    manifests(meta_dir).into_iter().flat_map(|m| m.map_data_groups)
+        .flat_map(|g| std::iter::once(g.name.hash).chain(g.bounds.into_iter().map(|b| b.hash)))
+        .collect()
+}
+
+#[cfg(test)]
+mod manifest_tests {
+    use super::*;
+    #[test]
+    fn final_world_manifest_preflight_is_strict() {
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join(format!("../../out/tests/manifest-policy-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("base")).unwrap();
+        assert!(validate_manifests(&dir).is_err());
+        let file = dir.join("base/_manifest.ymf");
+        std::fs::write(&file, b"<CPackFileMetaData><MapDataGroups/></CPackFileMetaData>").unwrap();
+        assert_eq!(validate_manifests(&dir).unwrap(), 1);
+        std::fs::write(&file, b"unreadable manifest format").unwrap();
+        assert!(validate_manifests(&dir).is_err());
+        std::fs::remove_file(file).unwrap();
+        std::fs::remove_dir(dir.join("base")).unwrap();
+        std::fs::remove_dir(dir).unwrap();
+    }
+}
+
 /// Lowercase JOAAT of a file's stem.
 pub fn stem_hash(p: &Path) -> u32 {
     let name = key(p);
@@ -142,14 +186,24 @@ fn is_bound(p: &Path) -> bool {
 }
 
 /// Name hashes of every bound a manifest lists as interior (MLO-local)
-/// collision; the world pass must not read these as world space.
+/// collision, or that lives under `/interiors/` or `/props/` in GTA's archives;
+/// the world pass must not read these as world space.
 pub fn interior_bound_hashes(meta_dir: &Path) -> std::collections::HashSet<u32> {
-    manifests(meta_dir)
+    let mut out: std::collections::HashSet<u32> = manifests(meta_dir)
         .into_iter()
         .flat_map(|m| m.interiors)
         .flat_map(|i| i.bounds)
         .map(|b| b.hash)
-        .collect()
+        .collect();
+    let mut files = Vec::new();
+    walk(meta_dir, "ybn", &mut files);
+    for p in files {
+        let s = p.to_string_lossy().replace('\\', "/").to_ascii_lowercase();
+        if (s.contains("/interiors/") || s.contains("/props/")) && is_bound(&p) {
+            out.insert(stem_hash(&p));
+        }
+    }
+    out
 }
 
 /// MLO placement: the stored rotation is applied as stored (unlike plain
@@ -212,6 +266,14 @@ impl Shells {
             }
         }
         Shells { bounds, interior_named, by_mlo, local_cache: BTreeMap::new() }
+    }
+
+    /// Bound paths for one MLO, shared by the final-world bake.
+    pub fn bound_paths(&self, e: &YmapEntity) -> Vec<PathBuf> {
+        match self.by_mlo.get(&e.archetype_hash) {
+            Some(listed) => listed.iter().filter_map(|h| self.bounds.get(h).cloned()).collect(),
+            None => self.interior_named.get(&e.archetype_hash).cloned().into_iter().collect(),
+        }
     }
 
     /// The world-space shells of one ymap's MLO placements.

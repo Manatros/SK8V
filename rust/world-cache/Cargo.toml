@@ -8,3 +8,6 @@ publish = false
 rage-formats = { path = "../../upstream/rage-formats", default-features = false }
 svwc = { path = "../svwc" }
 gta-archives = { path = "../gta-archives" }
+anyhow = "1"
+skatev-runtime = { path = "../skatev-runtime" }
+bevy_math = "0.19"

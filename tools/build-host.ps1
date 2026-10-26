@@ -1,6 +1,18 @@
 param([ValidateSet('Debug','Release')][string]$Config='Release')
 $ErrorActionPreference='Stop'
 $Root=Split-Path -Parent $PSScriptRoot
+if (-not (Get-Command cmake -ErrorAction SilentlyContinue)) {
+    $cmakePaths = @(
+        'C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin',
+        'C:\Program Files\Microsoft Visual Studio\2022\Community\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin'
+    )
+    foreach ($p in $cmakePaths) {
+        if (Test-Path (Join-Path $p 'cmake.exe')) {
+            $env:PATH = "$p;$env:PATH"
+            break
+        }
+    }
+}
 if(-not (Test-Path (Join-Path $Root 'third_party/scripthookv/inc/main.h'))){throw 'Run tools/fetch-scripthookv.ps1 first.'}
 Push-Location $Root
 try {

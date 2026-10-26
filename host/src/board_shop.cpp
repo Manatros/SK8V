@@ -1,4 +1,5 @@
 #include "board_shop.h"
+#include "board_native.h"
 #include "board_parts.h"
 #include "host_util.h"
 #include "menu.h"
@@ -13,6 +14,7 @@
 #include <cstdio>
 #include <sstream>
 #include <vector>
+#include <utility>
 
 namespace boardshop {
 namespace {
@@ -30,9 +32,27 @@ bool g_ready = false, g_open = false;
 std::uint32_t g_model = 0;
 int g_tierShown = -1;
 bool g_partView = false;  // Tab: the offer's part alone, or the whole board
+bool g_scrollUp = false;
 
 void Log(const std::string& s) {
     if (g_log) g_log(s.c_str());
+}
+
+// The Vespucci boardwalk's closed skateboarding shop Manatros marked (2026-10-26
+// 19:21 recording, mark 1; it was the surfboard storefront at -1302.7 -1369.2 first,
+// prop_venice_board_01/02; design 2026-10-26-shops-step1): store kind 3.
+constexpr float kBeachShop[2] = {-1224.45f, -1442.68f};
+constexpr float kBeachReach = 4.0f, kBeachShow = 30.0f;
+// The boardwalk's height there when GTA has not streamed its ground yet.
+constexpr float kBeachGround = 4.3f;
+
+float BeachDistance(const Vector3& p) {
+    const float dx = p.x - kBeachShop[0], dy = p.y - kBeachShop[1];
+    return std::sqrt(dx * dx + dy * dy);
+}
+
+unsigned GameDay() {
+    return static_cast<unsigned>(Call<int>(GET_CLOCK_MONTH) * 31 + Call<int>(GET_CLOCK_DAY_OF_MONTH));
 }
 
 // Binco and the Discount Store (0), Suburban (1); Ponsonbys (2) sells no boards.
@@ -81,6 +101,7 @@ struct OnShow {
 std::vector<OnShow> g_onShow;
 std::uint32_t g_showStore = 0;  // the interior they are for
 DWORD g_showRetry = 0;
+unsigned g_showDay = 0;  // the game day the boards on show are for
 bool g_showMissed = false;  // "no place yet" logged for this store
 
 std::uint32_t __cdecl Probe(void* ctx, const float* from, const float* to, float* hit) {
@@ -119,25 +140,45 @@ void ClearShow() {
     g_showStore = 0;
 }
 
+// The store's point: its interior's location, or the board shop's anchor.
+Vector3 StorePoint(int ped, int tier) {
+    if (tier == 3) {
+        // The ground at the anchor, not the player's height (peer review
+        // 2026-10-26: the wall found first is kept for good).
+        Vector3 v = Call<Vector3>(GET_ENTITY_COORDS, ped, 0);
+        float ground = 0.0f;
+        v.x = kBeachShop[0], v.y = kBeachShop[1];
+        v.z = Call<BOOL>(GET_GROUND_Z_FOR_3D_COORD, v.x, v.y, 30.0f, &ground, FALSE, FALSE) ? ground : kBeachGround;
+        return v;
+    }
+    Vector3 place{};
+    std::uint32_t hash = 0;
+    Call<void>(GET_INTERIOR_LOCATION_AND_NAMEHASH, Call<int>(GET_INTERIOR_FROM_ENTITY, ped), &place, &hash);
+    return place;
+}
+
 // Boards on show: placed once, then kept posed at rest every frame.
 void ShowBoards(int ped, int tier) {
     const int interior = Call<int>(GET_INTERIOR_FROM_ENTITY, ped);
-    Vector3 place{};
-    std::uint32_t hash = 0;
-    Call<void>(GET_INTERIOR_LOCATION_AND_NAMEHASH, interior, &place, &hash);
-    const std::uint32_t key = static_cast<std::uint32_t>(interior);
-    if (key != g_showStore) ClearShow(), g_showStore = key, g_showRetry = 0, g_showMissed = false;
+    const Vector3 place = StorePoint(ped, tier);
+    // Outdoors there is no interior: the board shop keys on its own number.
+    const std::uint32_t key = tier == 3 ? 0xB0A4D5u : static_cast<std::uint32_t>(interior);
+    // A new game day while in the store: today's boards, as the menu sells
+    // (peer review 2026-10-26).
+    if (key != g_showStore || GameDay() != g_showDay) ClearShow(), g_showStore = key, g_showDay = GameDay(), g_showRetry = 0, g_showMissed = false;
     if (g_onShow.empty() && static_cast<LONG>(GetTickCount() - g_showRetry) >= 0) {
         g_showRetry = GetTickCount() + 1500;
         const Vector3 me = Call<Vector3>(GET_ENTITY_COORDS, ped, 0);
-        const float at[3] = {place.x, place.y, place.z}, eye[3] = {me.x, me.y, me.z + 0.3f};
+        const float at[3] = {place.x, place.y, place.z};
+        // The board shop's wall is searched from its anchor, not from wherever the player stands.
+        const float eye[3] = {tier == 3 ? kBeachShop[0] : me.x, tier == 3 ? kBeachShop[1] : me.y, tier == 3 ? place.z + 1.5f : me.z + 0.3f};
         float clerk[6];
-        const int c = Clerk(ped);
+        const int c = tier == 3 ? 0 : Clerk(ped);
         if (c) {
             const Vector3 p = Call<Vector3>(GET_ENTITY_COORDS, c, 0), f = Call<Vector3>(GET_ENTITY_FORWARD_VECTOR, c);
             clerk[0] = p.x, clerk[1] = p.y, clerk[2] = p.z, clerk[3] = f.x, clerk[4] = f.y, clerk[5] = f.z;
         }
-        const unsigned day = static_cast<unsigned>(Call<int>(GET_CLOCK_MONTH) * 31 + Call<int>(GET_CLOCK_DAY_OF_MONTH));
+        const unsigned day = GameDay();
         float out[8 * 16];
         std::vector<std::string> models;
         const int n = g_rt->ShopDisplay(tier, at, eye, c ? clerk : nullptr, day, Probe,
@@ -198,6 +239,10 @@ void Sound(const char* name, const char* set = "HUD_FRONTEND_DEFAULT_SOUNDSET") 
 
 void Ride() {
     boardparts::SetLoadout(Split(g_rt->ShopText(1), ','));
+    int r = 255, g = 255, b = 255;
+    const std::string colour = g_rt->ShopText(7);
+    if (!colour.empty()) std::sscanf(colour.c_str(), "%d,%d,%d", &r, &g, &b);
+    boardnative::SetWheelColour(r, g, b);
     if (g_wheels) {
         const std::string h = g_rt->ShopText(4);
         g_wheels(h.empty() ? -1.0f : static_cast<float>(std::atof(h.c_str())));
@@ -208,6 +253,7 @@ void Close() {
     g_rt->ShopClose();
     g_open = false;
     boardparts::Preview({}, SvBoardPose{});
+    boardparts::Prefetch({});
 }
 
 // The preview board's axes (rows: board X, Y, Z) in the camera's level frame
@@ -292,7 +338,8 @@ void ShowPreview() {
     at[14] = cam.z + fz * g_zoom - 0.2f * g_zoom / 1.6f;
     at[15] = 1.0f;
     SvBoardPose pose{};
-    if (g_rt->ShopRestPose(at, pose)) boardparts::Preview(Split(g_rt->ShopText(g_partView ? 5 : 2), ','), pose);
+    if (g_rt->ShopRestPose(at, pose) && boardparts::Preview(Split(g_rt->ShopText(g_partView ? 5 : 2), ','), pose))
+        boardnative::GlowWheels(pose);
 }
 
 void Menu(int ped) {
@@ -317,6 +364,7 @@ void Menu(int ped) {
         int cash = 0;
         if (stat) Call<BOOL>(STAT_GET_INT, stat, &cash, -1);
         const SvShopResult r = g_rt->ShopInput(k.input, stat ? cash : 0);
+        if (k.input == 0 || k.input == 1) g_scrollUp = k.input == 0;
         if (k.sound) Sound(k.sound);
         switch (r.kind) {
         case 1: Close(); return;
@@ -349,6 +397,15 @@ void Menu(int ped) {
     menu::DrawPanel("Boards", head.empty() ? "" : head[0], head.size() > 1 ? head[1] : "", rows,
                     lines[1] + (g_partView ? "  Tab: whole board" : "  Tab: the part alone") + "  Turn: hold left mouse + move, or W A S D  Zoom: mouse wheel");
     ShowPreview();
+    // Preview claims an arriving neighbour before the old prefetch set retires.
+    std::vector<std::vector<std::string>> neighbours;
+    std::istringstream in(g_rt->ShopText(8));
+    std::string line;
+    while (std::getline(in, line)) neighbours.push_back(Split(line, ','));
+    if (g_scrollUp)
+        for (std::size_t i = 0; i + 1 < neighbours.size(); i += 2)
+            std::swap(neighbours[i], neighbours[i + 1]);
+    boardparts::Prefetch(neighbours);
 }
 
 } // namespace
@@ -471,15 +528,21 @@ void Tick(bool busy, bool carryBoard) {
     }
     if (!busy && carryBoard) Carry(ped);
     else boardparts::Hand({}, SvBoardPose{});
-    const int tier = TierHere(ped);
+    const Vector3 me = Call<Vector3>(GET_ENTITY_COORDS, ped, 0);
+    int tier = TierHere(ped);
+    // The boardwalk's board shop: its boards within 30 m, the menu at its front.
+    const bool atBeach = tier < 0 && g_rt->HasShopOpenAt() && BeachDistance(me) <= kBeachShow;
+    if (atBeach) tier = 3;
+    const bool beachFront = atBeach && BeachDistance(me) <= kBeachReach;
     if (tier != g_tierShown) {
         g_tierShown = tier;
-        if (tier >= 0) Log("board shop: in a clothing store (tier " + std::to_string(tier) + (tier < 2 ? ", G opens the boards)" : ", sells no boards)"));
+        if (tier == 3) Log("board shop: at the Vespucci board shop (E at its front opens the boards)");
+        else if (tier >= 0) Log("board shop: in a clothing store (tier " + std::to_string(tier) + (tier < 2 ? ", G opens the boards)" : ", sells no boards)"));
     }
-    const bool can = !busy && (tier == 0 || tier == 1);
+    const bool can = !busy && (tier == 0 || tier == 1 || beachFront);
     // The boards on show stay while the player is in the store (on the
     // board too); they go when leaving it.
-    if (tier == 0 || tier == 1) ShowBoards(ped, tier);
+    if (tier == 0 || tier == 1 || tier == 3) ShowBoards(ped, tier);
     else ClearShow();
     if (g_open) {
         if (!can) {
@@ -492,17 +555,20 @@ void Tick(bool busy, bool carryBoard) {
     if (!can || menu::IsOpen() || Call<BOOL>(IS_PED_IN_ANY_VEHICLE, ped, false) ||
         Call<BOOL>(IS_PLAYER_WANTED_LEVEL_GREATER, Call<int>(PLAYER_ID), 0))
         return;
-    const bool atShow = LookingAtShow(ped);
+    const bool atShow = tier == 3 || LookingAtShow(ped);
     if (atShow) Call<void>(DISABLE_CONTROL_ACTION, 0, 51, 1);  // INPUT_CONTEXT: ours while looking at the boards
     // Looking at the boards: GTA's help box, as at the clothes. Elsewhere in
     // the store the box stays the store's own, and a line names G.
-    if (atShow) HelpBox("Press ~INPUT_CONTEXT~ to browse Skate 3 boards.");
+    if (tier == 3) HelpBox("Press ~INPUT_CONTEXT~ to browse the Skate Shop.");
+    else if (atShow) HelpBox("Press ~INPUT_CONTEXT~ to browse Skate 3 boards.");
     else Hint("G / D-pad left:  Skate 3 boards (complete or build your own)");
     // Skate mode disables GTA's controls; the key is read either way.
     const bool e = atShow && Call<BOOL>(IS_DISABLED_CONTROL_JUST_PRESSED, 0, 51);
+    const Vector3 store = StorePoint(ped, tier);
     if ((e || Call<BOOL>(IS_CONTROL_JUST_PRESSED, 0, kOpen) || Call<BOOL>(IS_DISABLED_CONTROL_JUST_PRESSED, 0, kOpen)) &&
-        g_rt->ShopOpen(tier)) {
+        g_rt->ShopOpenAt(tier, store.x, store.y, GameDay())) {
         g_open = true;
+        g_scrollUp = false;
         ResetOrient();
         Sound("SELECT");
         Log("board shop: opened");
@@ -519,6 +585,10 @@ void Riding(const char* state, float speed) {
 
 bool IsOpen() {
     return g_open;
+}
+
+bool BeachShopAvailable() {
+    return g_ready && g_rt && g_rt->HasShopOpenAt();
 }
 
 

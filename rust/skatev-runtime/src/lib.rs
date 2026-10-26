@@ -23,6 +23,17 @@ mod worker;
 mod crash;
 pub mod world;
 pub mod live;
+pub mod baked;
+pub mod tiles;
+
+/// Use offline static world tiles when compatible data is available (default on).
+pub static BAKED_WORLD: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+pub mod parks;
+pub mod tracks;
+pub mod tubes;
+pub mod visrails;
+pub mod visparks;
+mod probes;
 pub mod materials;
 pub mod surfaces;
 pub mod ground;
@@ -30,6 +41,9 @@ pub mod ground_at;
 pub mod grid;
 pub mod plies;
 pub mod reuse;
+mod stairs;
+pub mod collision_view;
+pub mod spot;
 #[cfg(windows)]
 mod private_heap;
 /// All runtime allocations use a private heap (no lock shared with GTA).
@@ -421,15 +435,20 @@ fn file_logger(path: Option<PathBuf>) -> worker::Log {
     });
     let file = Mutex::new(file);
     let start = std::time::Instant::now();
-    Arc::new(move |msg: &str| {
+    let log: worker::Log = Arc::new(move |msg: &str| {
         if let Ok(mut f) = file.lock()
             && let Some(f) = f.as_mut()
         {
             let line = format!("[{:>9.3}] {msg}\n", start.elapsed().as_secs_f64());
             let _ = f.write_all(line.as_bytes());
         }
-    })
+    });
+    let _ = RUNTIME_LOG.set(log.clone());
+    log
 }
+
+/// The runtime log, for exports without a runtime handle (`sv_describe_spot`).
+static RUNTIME_LOG: std::sync::OnceLock<worker::Log> = std::sync::OnceLock::new();
 
 /// Runs `f`, turning a panic into `fallback` so it never unwinds into C++.
 fn guard<T>(fallback: T, f: impl FnOnce() -> T) -> T {
@@ -945,6 +964,137 @@ pub unsafe extern "C" fn sv_get_status_text(
 }
 
 // Every export below is optional on the host (looked up with GetProcAddress).
+/// `sv_collision_view` triangle: GTA world space, `kind` as
+/// `collision_view::FLOOR..MOVING`.
+#[repr(C)]
+#[derive(Clone, Copy, Default, Debug)]
+pub struct SvViewTri {
+    pub a: SvVec3,
+    pub b: SvVec3,
+    pub c: SvVec3,
+    pub kind: u32,
+    /// Nonzero: a GTA entity handle; a, b, c are in its model space (the
+    /// host places them on the entity as it is this frame).
+    pub entity: u32,
+}
+
+/// `sv_collision_view` line: a grind rail segment, GTA world space.
+#[repr(C)]
+#[derive(Clone, Copy, Default, Debug)]
+pub struct SvViewLine {
+    pub a: SvVec3,
+    pub b: SvVec3,
+    pub kind: u32,
+}
+
+/// Developer collision view on or off (optional export; nothing is kept while off).
+#[unsafe(no_mangle)]
+pub extern "C" fn sv_set_collision_view(on: u32) {
+    guard((), || collision_view::set_on(on != 0))
+}
+
+/// Stair flights as steps (optional export, GTAxSkate DetailedStairs): used
+/// by the next collision build.
+#[unsafe(no_mangle)]
+pub extern "C" fn sv_set_detailed_stairs(on: u32) {
+    guard((), || live::DETAILED_STAIRS.store(on != 0, std::sync::atomic::Ordering::Relaxed))
+}
+
+/// GTAxSkate world switches (optional export): 0 stairs as steps, 1 skatepark
+/// surfaces, 2 train track rails, 3 rails onto tops, 4 rails on standing
+/// objects, 5 tube rails, 6 rails from GTA's visible models, 7 curb bevels,
+/// 8 offline world tiles. Used by the
+/// next collision build.
+#[unsafe(no_mangle)]
+pub extern "C" fn sv_set_world_option(id: u32, on: u32) {
+    guard((), || {
+        use std::sync::atomic::Ordering::Relaxed;
+        let on = on != 0;
+        let flag = match id {
+            0 => &live::DETAILED_STAIRS,
+            2 => &tracks::ENABLED,
+            3 => &world::RAIL_TOPS,
+            4 => &dynamic::OBJECT_RAILS,
+            5 => &tubes::ENABLED,
+            6 => &visrails::ENABLED,
+            7 => &world::CURB_BEVELS,
+            8 => &BAKED_WORLD,
+            9 => &stairs::ENABLED,
+            10 => &live::STEP_RAILS,
+            // 11 Fallbacks and 12 RailBoxes are gone (design 2026-10-26 4.4).
+            14 => &visparks::HIGH_RES_PARKS,
+            _ => return,
+        };
+        if flag.swap(on, Relaxed) != on {
+            world::OPTIONS_VERSION.fetch_add(1, std::sync::atomic::Ordering::Release);
+        }
+    })
+}
+
+/// The collision view's second legend line: which bake the installed tiles
+/// are from (design 2026-10-26 6.3). Writes a NUL-terminated UTF-8 line into
+/// `buf` (at most `cap` bytes) and returns its length; 0 before any area.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sv_world_status(buf: *mut u8, cap: u32) -> u32 {
+    guard(0, || {
+        if buf.is_null() || cap == 0 {
+            return 0;
+        }
+        let text = spot::status();
+        let n = text.len().min(cap as usize - 1);
+        let n = (0..=n).rev().find(|&k| text.is_char_boundary(k)).unwrap_or(0);
+        unsafe {
+            std::ptr::copy_nonoverlapping(text.as_ptr(), buf, n);
+            *buf.add(n) = 0;
+        }
+        n as u32
+    })
+}
+
+/// Developer > Mark this spot (design 2026-10-26 6.4): writes the faces,
+/// their origins, grind lines and bodies within `radius` of GTA point
+/// `centre` to the runtime log as a MARK-INFO block. Returns the face count.
+#[unsafe(no_mangle)]
+pub extern "C" fn sv_describe_spot(centre: SvVec3, radius: f32) -> u32 {
+    guard(0, || {
+        if !radius.is_finite() || ![centre.x, centre.y, centre.z].iter().all(|v| v.is_finite()) {
+            return 0;
+        }
+        let (text, n) = spot::describe(Vec3::new(centre.x, centre.y, centre.z), radius.clamp(0.1, 10.0));
+        if let Some(log) = RUNTIME_LOG.get() { log(&text); }
+        n as u32
+    })
+}
+
+/// What Skate collides with within `radius` of GTA point `centre`: up to
+/// `tri_cap` triangles (at most 300) into `tris` (returned) and up to
+/// `line_cap` rail segments (at most 150) into `lines` (count in `line_count`).
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sv_collision_view(
+    centre: SvVec3,
+    radius: f32,
+    tris: *mut SvViewTri,
+    tri_cap: u32,
+    lines: *mut SvViewLine,
+    line_cap: u32,
+    line_count: *mut u32,
+) -> u32 {
+    guard(0, || {
+        if tris.is_null() || lines.is_null() || line_count.is_null() || !radius.is_finite() {
+            return 0;
+        }
+        let (t, l) = collision_view::query(Vec3::new(centre.x, centre.y, centre.z), radius, (tri_cap as usize).min(300), (line_cap as usize).min(150));
+        for (i, (p, kind, entity)) in t.iter().enumerate() {
+            unsafe { *tris.add(i) = SvViewTri { a: v3(p[0]), b: v3(p[1]), c: v3(p[2]), kind: *kind, entity: *entity } };
+        }
+        for (i, (p, kind)) in l.iter().enumerate() {
+            unsafe { *lines.add(i) = SvViewLine { a: v3(p[0]), b: v3(p[1]), kind: *kind } };
+        }
+        unsafe { *line_count = l.len() as u32 };
+        t.len() as u32
+    })
+}
+
 pub mod lifecycle;
 
 /// Lifecycle phases published in `SvLifecycleState::phase`.
@@ -2047,5 +2197,125 @@ mod tests {
         let mut b = [0u8; 4];
         copy_str(&mut b, "a\u{e9}\u{20ac}");
         assert_eq!(&b, b"a\xc3\xa9\0");
+    }
+
+    #[test]
+    #[ignore = "production data on the developer PC; run explicitly"]
+    fn production_runtime_prepares_cleanly_at_vespucci() {
+        use std::ffi::CString;
+        use std::path::Path;
+        // SKATEV_TEST_GTA = the game folder of an installed GTAxSkate.
+        let Ok(gta) = std::env::var("SKATEV_TEST_GTA") else { return };
+        let (root, cache) = (Path::new(&gta).join(r"GTAxSkate\skate-data\assets"), Path::new(&gta).join(r"GTAxSkate\world\sk8v.svwc"));
+        let (root, cache) = (root.as_path(), cache.as_path());
+        if !root.exists() || !cache.exists() {
+            return;
+        }
+        let root_c = CString::new(root.to_str().unwrap()).unwrap();
+        let cache_c = CString::new(cache.to_str().unwrap()).unwrap();
+        let info = SvCreateInfo {
+            size: size_of::<SvCreateInfo>() as u32,
+            abi_version: SKATEV_ABI_VERSION,
+            reserved: [0; 32],
+            data_root_utf8: root_c.as_ptr(),
+            world_cache_utf8: cache_c.as_ptr(),
+            log_path_utf8: ptr::null(),
+            skater_triangle_budget: 3000,
+            presentation_flags: 1,
+        };
+        let rt = unsafe { sv_create(&info) };
+        assert!(!rt.is_null());
+        let track = SvLifecycleTrack {
+            size: size_of::<SvLifecycleTrack>() as u32,
+            flags: 0,
+            position: SvVec3 { x: -1210.0, y: -1485.0, z: 4.3 },
+            heading_degrees: 0.0,
+        };
+        assert_eq!(unsafe { sv_lifecycle_track(rt, &track) }, 1);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+        let mut state = SvLifecycleState::default();
+        let mut out = SvOutput::default();
+        loop {
+            unsafe {
+                sv_get_output(rt, &mut out);
+                sv_lifecycle_get_state(rt, &mut state);
+            }
+            if out.status == STATUS_ERROR {
+                let mut buf = [0 as c_char; 256];
+                unsafe { sv_get_status_text(rt, buf.as_mut_ptr(), 256) };
+                let msg = unsafe { std::ffi::CStr::from_ptr(buf.as_ptr()) }.to_string_lossy();
+                panic!("Runtime reported error: {msg}");
+            }
+            if state.prepared != 0 {
+                break;
+            }
+            if std::time::Instant::now() > deadline {
+                panic!("Timed out waiting for Skate to prepare: preparing={}, prepared={}", state.preparing, state.prepared);
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        assert_eq!(state.prepared, 1);
+        assert_eq!(state.preparing, 0);
+        unsafe { sv_destroy(rt) };
+    }
+
+    #[test]
+    #[ignore = "production data on the developer PC; run explicitly"]
+    fn production_runtime_prepares_cleanly_at_portola_metro() {
+        use std::ffi::CString;
+        use std::path::Path;
+        // SKATEV_TEST_GTA = the game folder of an installed GTAxSkate.
+        let Ok(gta) = std::env::var("SKATEV_TEST_GTA") else { return };
+        let (root, cache) = (Path::new(&gta).join(r"GTAxSkate\skate-data\assets"), Path::new(&gta).join(r"GTAxSkate\world\sk8v.svwc"));
+        let (root, cache) = (root.as_path(), cache.as_path());
+        if !root.exists() || !cache.exists() {
+            return;
+        }
+        let root_c = CString::new(root.to_str().unwrap()).unwrap();
+        let cache_c = CString::new(cache.to_str().unwrap()).unwrap();
+        let info = SvCreateInfo {
+            size: size_of::<SvCreateInfo>() as u32,
+            abi_version: SKATEV_ABI_VERSION,
+            reserved: [0; 32],
+            data_root_utf8: root_c.as_ptr(),
+            world_cache_utf8: cache_c.as_ptr(),
+            log_path_utf8: ptr::null(),
+            skater_triangle_budget: 3000,
+            presentation_flags: 1,
+        };
+        let rt = unsafe { sv_create(&info) };
+        assert!(!rt.is_null());
+        let track = SvLifecycleTrack {
+            size: size_of::<SvLifecycleTrack>() as u32,
+            flags: 0,
+            position: SvVec3 { x: -680.0, y: -220.0, z: 38.0 },
+            heading_degrees: 0.0,
+        };
+        assert_eq!(unsafe { sv_lifecycle_track(rt, &track) }, 1);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+        let mut state = SvLifecycleState::default();
+        let mut out = SvOutput::default();
+        loop {
+            unsafe {
+                sv_get_output(rt, &mut out);
+                sv_lifecycle_get_state(rt, &mut state);
+            }
+            if out.status == STATUS_ERROR {
+                let mut buf = [0 as c_char; 256];
+                unsafe { sv_get_status_text(rt, buf.as_mut_ptr(), 256) };
+                let msg = unsafe { std::ffi::CStr::from_ptr(buf.as_ptr()) }.to_string_lossy();
+                panic!("Runtime reported error: {msg}");
+            }
+            if state.prepared != 0 {
+                break;
+            }
+            if std::time::Instant::now() > deadline {
+                panic!("Timed out waiting for Skate to prepare: preparing={}, prepared={}", state.preparing, state.prepared);
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        assert_eq!(state.prepared, 1);
+        assert_eq!(state.preparing, 0);
+        unsafe { sv_destroy(rt) };
     }
 }

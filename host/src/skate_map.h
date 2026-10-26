@@ -7,7 +7,7 @@ namespace skatemap {
 
 // Once per script frame. `skating`: Skate mode is on. `gps`/`spots`: the
 // INI switches (GpsWhileSkating, SkateSpots).
-void Tick(bool skating, bool gps, bool spots);
+void Tick(bool skating, bool gps, bool spots, bool shop);
 
 // GPS destinations for the M menu (GTAxSkate's interaction page): the
 // nearest clothing store (GTA's own store blips; the board shop), the nearest

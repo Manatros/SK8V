@@ -34,5 +34,7 @@ void ClearCrewBoard(unsigned slot);
 
 // The store's menu is open (other menus and Skate's input stay out).
 bool IsOpen();
+// The Vespucci board shop works (board shop on, runtime with sv_shop_open_at).
+bool BeachShopAvailable();
 
 } // namespace boardshop

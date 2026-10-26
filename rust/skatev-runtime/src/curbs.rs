@@ -118,6 +118,45 @@ fn ground(grid: &XyGrid, floors: &Floors, tris: &[[Vec3; 3]], x: f32, y: f32, be
     best
 }
 
+/// Faces in a welded smooth surface. Coplanar triangulation is not
+/// curvature: require a real turn (0.1..25 degrees) across a shared edge.
+/// Include one coplanar neighbour for triangulated strips, but never flood
+/// through a whole street connected to the bowl.
+fn curved_faces(tris: &[[Vec3; 3]]) -> Vec<bool> {
+    let normals: Vec<_> = tris.iter().map(|t| (t[1] - t[0]).cross(t[2] - t[0]).normalize_or_zero()).collect();
+    let mut edges: HashMap<_, Vec<usize>> = HashMap::default();
+    let key = |p: Vec3| p.to_array().map(|v| (v * 200.0).round() as i32);
+    for (i, t) in tris.iter().enumerate() {
+        for j in 0..3 {
+            let (a, b) = (key(t[j]), key(t[(j + 1) % 3]));
+            edges.entry(if a < b { (a, b) } else { (b, a) }).or_default().push(i);
+        }
+    }
+    let mut curved = vec![false; tris.len()];
+    let mut coplanar = vec![Vec::new(); tris.len()];
+    for faces in edges.values() {
+        for (k, &a) in faces.iter().enumerate() {
+            for &b in &faces[k + 1..] {
+                let dot = normals[a].dot(normals[b]);
+                if dot > 25f32.to_radians().cos() {
+                    if dot < 0.1f32.to_radians().cos() {
+                        curved[a] = true;
+                        curved[b] = true;
+                    } else {
+                        coplanar[a].push(b);
+                        coplanar[b].push(a);
+                    }
+                }
+            }
+        }
+    }
+    let incident = curved.clone();
+    for (i, neighbours) in coplanar.iter().enumerate() {
+        curved[i] |= neighbours.iter().any(|&j| incident[j]);
+    }
+    curved
+}
+
 #[derive(Debug, Default, Clone, Copy)]
 pub struct BevelCensus {
     pub edges: usize,
@@ -175,6 +214,7 @@ impl Cover {
     }
 }
 
+#[derive(Clone)]
 pub struct Bevels {
     pub triangles: Vec<[Vec3; 3]>,
     /// Source top triangle for each bevel triangle (keeps contact material).
@@ -214,12 +254,25 @@ pub fn bevels_with_sources(tris: &[[Vec3; 3]], grid: &XyGrid) -> Bevels {
 /// As `bevels_with_sources`, keeping what edges `dirty` leaves untouched gave
 /// last build (`cache`, which then holds this build's).
 pub fn bevels_reusing(tris: &[[Vec3; 3]], grid: &XyGrid, dirty: &crate::reuse::Dirty, cache: &mut CurbCache) -> Bevels {
+    bevels_reusing_filtered(tris, grid, dirty, cache, |_, _| false)
+}
+
+/// Cache raw candidates, then suppress protected edges and their covers.
+/// Dropping triangles alone would leave their original risers buried.
+pub fn bevels_reusing_filtered(tris: &[[Vec3; 3]], grid: &XyGrid, dirty: &crate::reuse::Dirty, cache: &mut CurbCache, protected: impl Fn(&[Vec3; 3], usize) -> bool) -> Bevels {
     // Diagnostic A/B switch (harness and in-game): SKATEV_CURB_BEVELS=0.
     static OFF: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    if *OFF.get_or_init(|| std::env::var("SKATEV_CURB_BEVELS").is_ok_and(|v| v == "0")) {
+    if !crate::world::CURB_BEVELS.load(std::sync::atomic::Ordering::Relaxed) || *OFF.get_or_init(|| std::env::var("SKATEV_CURB_BEVELS").is_ok_and(|v| v == "0")) {
+        // Geometry may stream in while disabled. Re-enabling must not
+        // resurrect candidates cached against that older lower ground.
+        *cache = CurbCache::default();
         return Bevels { triangles: Vec::new(), sources: Vec::new(), buried: Vec::new(), census: BevelCensus::default() };
     }
     let floors = Floors::new(tris);
+    let curved = curved_faces(tris);
+    // A newly joined face can change a lower face's curvature at its far
+    // end, beyond REUSE_PAD. Invalidate candidates on geometry changes.
+    let geometry_changed = dirty.changed != 0;
     let key = |v: Vec3| v.to_array().map(|x| (x * 200.0).round() as i32);
     // Edges of flat tops, once (an edge shared by two tops is interior).
     let mut edges: HashMap<([i32; 3], [i32; 3]), (Vec3, Vec3, Vec3, u32, usize)> = HashMap::default();
@@ -260,7 +313,7 @@ pub fn bevels_reusing(tris: &[[Vec3; 3]], grid: &XyGrid, dirty: &crate::reuse::D
             .fold(0u64, |h, x| crate::reuse::mix(h ^ x));
         let (t0, c0) = (out.len(), covers.len());
         let before = [census.bevels, census.slopes, census.curbs];
-        let old = (!dirty.touches(a.min(b), a.max(b), REUSE_PAD)).then(|| cache.edges.get(&id).copied()).flatten();
+        let old = (!geometry_changed && !dirty.touches(a.min(b), a.max(b), REUSE_PAD)).then(|| cache.edges.get(&id).copied()).flatten();
         if let Some(g) = old {
             let (ts, tn) = g.triangles;
             out.extend_from_slice(&cache.triangles[ts as usize..(ts + tn) as usize]);
@@ -270,7 +323,7 @@ pub fn bevels_reusing(tris: &[[Vec3; 3]], grid: &XyGrid, dirty: &crate::reuse::D
             census.slopes += g.counts[1] as usize;
             census.curbs += g.counts[2] as usize;
         } else {
-            bevel_edge(tris, grid, &floors, a, b, centroid, source, &mut out, &mut sources, &mut covers, &mut census);
+            bevel_edge(tris, grid, &floors, &curved, a, b, centroid, source, &mut out, &mut sources, &mut covers, &mut census);
         }
         next.edges.insert(id, Gave {
             triangles: (next.triangles.len() as u32, (out.len() - t0) as u32),
@@ -279,6 +332,14 @@ pub fn bevels_reusing(tris: &[[Vec3; 3]], grid: &XyGrid, dirty: &crate::reuse::D
         });
         next.triangles.extend_from_slice(&out[t0..]);
         next.covers.extend_from_slice(&covers[c0..]);
+        // Suppress the whole candidate edge, including the faces it would
+        // bury, if any of its generated triangles enters rail clearance.
+        if out[t0..].iter().any(|t| protected(t, source)) {
+            out.truncate(t0);
+            sources.truncate(t0);
+            covers.truncate(c0);
+            [census.bevels, census.slopes, census.curbs] = before;
+        }
     }
     *cache = next;
     finish(tris, out, sources, covers, census)
@@ -291,6 +352,7 @@ fn bevel_edge(
     tris: &[[Vec3; 3]],
     grid: &XyGrid,
     floors: &Floors,
+    curved: &[bool],
     a: Vec3,
     b: Vec3,
     centroid: Vec3,
@@ -337,6 +399,17 @@ fn bevel_edge(
             if blocked(k) || blocked(k + 1) {
                 continue;
             }
+            // The lower ground belongs to a smoothly turning mesh, rather
+            // than a separate plane under a real ramp toe. Preserve it.
+            let curved_lower = |p: Vec3| {
+                let q = p.truncate() + out_xy * SAMPLE_OUT;
+                let z = ground(grid, &floors, tris, q.x, q.y, p.z - MAX_STEP - 0.01, p.z - MIN_STEP);
+                grid.at(q.x, q.y).iter().any(|&i| {
+                    curved[i as usize] && height(&tris[i as usize], q.x, q.y)
+                        .zip(z).is_some_and(|(a, b)| (a - b).abs() < 0.001)
+                })
+            };
+            if [p0, (p0 + p1) * 0.5, p1].into_iter().any(curved_lower) { continue; }
             let rise = ((p0.z - z0) + (p1.z - z1)) * 0.5;
             // Grade of the top going outward from this edge (negative: it
             // descends toward the edge, a ramp toe).
@@ -456,6 +529,47 @@ mod tests {
             Vec3::new(x0, 2.0, z),
         );
         [[a, b, c], [a, c, d]]
+    }
+
+    fn toe_over_curved_ground() -> Vec<[Vec3; 3]> {
+        let mut tris = Vec::new();
+        for (x0, z0, x1, z1) in [(-0.5, -0.025, 0.0, 0.0),
+            (-1.0, 0.025, -0.5, -0.025), (-1.5, 0.15, -1.0, 0.025),
+            (0.0, 0.1, 1.0, 0.1 + 15f32.to_radians().tan())] {
+            let (a, b, c, d) = (Vec3::new(x0, -2.0, z0), Vec3::new(x1, -2.0, z1),
+                Vec3::new(x1, 2.0, z1), Vec3::new(x0, 2.0, z0));
+            tris.extend([[a, b, c], [a, c, d]]);
+        }
+        tris
+    }
+
+    #[test]
+    fn bowl_like_curved_lower_surface_gets_no_bevel() {
+        let tris = toe_over_curved_ground();
+        assert!(curved_faces(&tris)[0]);
+        let result = bevels(&tris);
+        assert!(result.triangles.is_empty(), "{:?}", result.census);
+        assert!(result.buried.is_empty());
+        let plain: Vec<_> = tris[..2].iter().chain(&tris[6..]).copied().collect();
+        assert!(!bevels(&plain).triangles.is_empty());
+    }
+
+    #[test]
+    fn protected_bevels_restore_original_faces_on_cache_reuse() {
+        let mut tris = toe_over_curved_ground();
+        tris.drain(2..6);
+        let grid = XyGrid::triangles(CELL, &tris);
+        let mut cache = CurbCache::default();
+        let initial = bevels_reusing(&tris, &grid, &crate::reuse::Dirty::everything(), &mut cache);
+        assert!(!initial.triangles.is_empty());
+        let mut area_cache = crate::reuse::AreaCache::default();
+        area_cache.diff(&tris);
+        let (unchanged, _) = area_cache.diff(&tris);
+        let filtered = bevels_reusing_filtered(&tris, &grid, &unchanged, &mut cache, |_, _| true);
+        assert!(filtered.triangles.is_empty() && filtered.buried.is_empty());
+        assert_eq!(filtered.census.bevels, 0);
+        let restored = bevels_reusing(&tris, &grid, &unchanged, &mut cache);
+        assert_eq!(initial.triangles, restored.triangles);
     }
 
     #[test]

@@ -44,6 +44,8 @@ add_library(SkateVLegacy SHARED
   src/board_tracks.cpp
   src/thread_census.cpp
   src/skate_map.cpp
+  src/object_dropper.cpp
+  src/collision_view.cpp
 )
 target_compile_features(SkateVLegacy PRIVATE cxx_std_20)
 # Source provenance only: never carry a hard-coded release number into a future

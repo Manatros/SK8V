@@ -18,7 +18,7 @@
 
 namespace menu {
 
-enum class Kind { Flag, Number, Choice, Chord, Action, Key };
+enum class Kind { Flag, Number, Choice, Chord, Action, Key, Link, Heading };
 
 struct Item {
     Kind kind = Kind::Action;
@@ -32,6 +32,11 @@ struct Item {
     std::function<void()> run;                       // Action
     std::function<std::string()> show;               // Key: the key bound now
     std::function<void(int)> bindKey;                // Key: rebind to this virtual key
+    std::function<std::string()> labelText;            // evaluated each draw
+    std::function<std::string()> current;              // transient value, never saved
+    std::string help;                                // shown in the box under the rows when selected
+    std::string target;                              // Link: the title of the page it opens
+    std::function<bool()> visible;                   // unset: always; hidden rows keep their setting
 };
 
 // A keyboard key: Accept waits for the next key (Esc cancels) and hands its
@@ -42,9 +47,18 @@ inline Item Key(std::string label, std::function<std::string()> show, std::funct
     return i;
 }
 
+// A section title inside a page: not selectable, no INI key.
+inline Item Heading(std::string label) {
+    Item i;
+    i.kind = Kind::Heading, i.label = std::move(label);
+    return i;
+}
+
 struct Page {
     std::string title;
     std::vector<Item> items;
+    std::string parent;  // a sub-page: listed as a row on this page instead of in the categories
+    std::function<bool()> visible;  // unset: always (developer options, uninstalled components)
 };
 
 using Apply = std::function<void(const std::string&)>;
@@ -86,6 +100,8 @@ inline Item Action(std::string label, std::function<void()> run) {
     return i;
 }
 
+inline std::string Label(const Item& item) { return item.labelText ? item.labelText() : item.label; }
+
 // XInput button mask -> "LB + Back" (bit order of XINPUT_GAMEPAD_*).
 inline std::string ChordName(unsigned mask) {
     static const char* const kNames[16] = {"D-Up", "D-Down", "D-Left", "D-Right", "Start", "Back", "L3", "R3",
@@ -103,8 +119,10 @@ inline bool SameText(const std::string& a, const std::string& b) {
 }
 
 inline int ChoiceIndex(const Item& it, const std::string& cur) {
+    // Keep legacy INIs and User/Custom snapshots valid without a duplicate row.
+    const std::string value = it.key == "CameraView" && SameText(cur, "FirstPerson") ? "Head" : cur;
     for (std::size_t i = 0; i < it.values.size(); ++i)
-        if (SameText(it.values[i], cur)) return static_cast<int>(i);
+        if (SameText(it.values[i], value)) return static_cast<int>(i);
     return -1;
 }
 
@@ -184,13 +202,23 @@ constexpr const char* kHint = "Left/Right change   Back: categories   * restart 
 // Footer description for a category row, by page title.
 inline std::string PageHint(const std::string& title) {
     static const std::pair<const char*, const char*> kHints[] = {
-        {"Presets", "Apply complete play settings; User restores manual choices; Custom is explicitly saved. Keyboard bindings stay personal."},
-        {"Advanced", "Rare tuning, board placement and diagnostics. Defaults are recommended."},
+        {"Presets", "GTAxSkate is the recommended default. SK8V, RP, User and Custom apply other complete setups. Keyboard bindings stay personal."},
+        {"Board", "How the board looks and the marks it leaves; the board shop and the board in your hand."},
+        {"Controls", "Keyboard, controller buttons and the keyboard key list."},
+        {"World", "What the board hits (cars, objects, stairs), people, swimming and guns, the object dropper and GPS."},
+        {"Audio and radio", "The radio while skating and the Skate sound mix."},
+        {"Advanced", "Fine tuning in sub-pages: physics, peds and vehicles, Hall of Meat, board in hand, developer."},
         {"World and roleplay", "Gentle pedestrian collisions, vehicle damage, injuries and GTA integration."},
         {"Camera", "Choose the starting view, mouse camera and cinematic look."},
         {"Keyboard keys", "Choose a layout or press Enter on an action to bind its key."},
-        {"Interaction", "GPS routes to board shops and skate spots."},
-        {"Skating", "Skate on or off, stance and the core Skate rules."},
+        {"GPS", "GPS routes to board shops and skate spots."},
+        {"Controller", "Controller button combinations, missions and keyboard on/off."},
+        {"HUD", "What Skate shows on screen: trick display, key list, Hall of Meat."},
+        {"Skate physics", "Fine tuning of pushing, steering, grip and the Skate rules."},
+        {"Hall of Meat details", "Hall of Meat panels, x-ray and skater voice lines."},
+        {"Board in hand", "Where the carried board sits in the hand."},
+        {"Developer", "Diagnostics and test switches. Leave these alone unless testing."},
+        {"Skating", "Skate on or off, stance, difficulty, how the board feels, posture and emotes."},
         {"Hall of Meat and records", "Hall of Meat bail records and the records display."},
         {"Peds and vehicles", "Collision, launch and dent settings for pedestrians and vehicles."},
         {"BackwardsMan", "BackwardsMan trick model, direction and remount."},
@@ -215,12 +243,16 @@ void Toggle();
 void SetPresetDefaults(std::vector<std::pair<std::string, std::string>> defaults);
 bool ApplyPreset(const std::string& name, const std::vector<std::pair<std::string, std::string>>& overrides);
 bool ApplySettings(const std::string& name, const std::vector<std::pair<std::string, std::string>>& overrides);
+// ApplySettings without opening the menu, only when no User snapshot exists yet (a fresh install).
+bool FirstRunPreset(const std::string& name, const std::vector<std::pair<std::string, std::string>>& overrides);
 bool RestoreUserPreset();
 bool SaveCustomPreset();
 bool RestoreCustomPreset();
 // Opens the menu straight on the page titled `title` (closes it when open).
 void OpenPage(const std::string& title);
 bool IsOpen();
+// The INI key of the selected row on an open settings page ("" otherwise).
+std::string SelectedKey();
 // Feedback stays in the menu even when all Skate overlays are hidden.
 void Status(const std::string& text);
 // Script thread, once per frame: draws and handles navigation while open.

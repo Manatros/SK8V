@@ -69,6 +69,18 @@ fn open(path: &Path, keys: &GtaKeys) -> Option<Arc<Archive>> {
     }
 }
 
+fn require_patch_metadata(name: &str, archive: &Archive, keys: &GtaKeys) -> io::Result<()> {
+    if !name.starts_with("patch") { return Ok(()); }
+    let files = archive.files();
+    for name in ["content.xml", "setup2.xml"] {
+        let file = files.iter().find(|f| f.path.eq_ignore_ascii_case(name))
+            .ok_or_else(|| io::Error::other(format!("Story patch lacks {name}; refusing unfiltered world inputs")))?;
+        let bytes = archive.extract(file, keys).map_err(io::Error::other)?;
+        String::from_utf8(bytes).map_err(io::Error::other)?;
+    }
+    Ok(())
+}
+
 fn add(files: &mut HashMap<String, (String, File)>, dir: &str, archive: Arc<Archive>, keys: &GtaKeys, patterns: &[String]) {
     let mut failed = Vec::new();
     for e in walk(archive, keys, &|p| any_match(p, patterns), &mut failed) {
@@ -80,12 +92,16 @@ fn add(files: &mut HashMap<String, (String, File)>, dir: &str, archive: Arc<Arch
     }
 }
 
-fn install(keys: GtaKeys, files: HashMap<String, (String, File)>) {
+fn install(keys: GtaKeys, files: HashMap<String, (String, File)>, warm: bool) {
     eprintln!("{} files read in place from GTA's archives", files.len());
-    gta_archives::prefetch(files.values().filter_map(|(_, f)| match f {
-        File::Entry(e) => Some(e),
-        File::Text(_) => None,
-    }));
+    // A world inventory can span gigabytes. Leave those mapped pages cold;
+    // the bounded tile baker reads resources on demand.
+    if warm {
+        gta_archives::prefetch(files.values().filter_map(|(_, f)| match f {
+            File::Entry(e) => Some(e),
+            File::Text(_) => None,
+        }));
+    }
     if VFS.set(Vfs { keys, files }).is_err() {
         panic!("vfs mounted twice");
     }
@@ -99,7 +115,37 @@ const PLACEMENTS: [&str; 5] = ["*.ytyp", "*/props/*.ydr", "*/props/*.yft", "*/in
 /// their `content.xml` / `setup2.xml`), and `ROOT/layers.txt`: the `gta-meta`
 /// layout `--templates` reads.
 pub fn mount_placements(gta: &Path, keys: GtaKeys) -> io::Result<()> {
-    let patterns: Vec<String> = PLACEMENTS.iter().map(|p| p.to_string()).collect();
+    mount_patterns(gta, keys, &PLACEMENTS, true)
+}
+
+/// Static collision, placement metadata and authored drawable bounds.
+/// Drawable entries remain lazy: only placed models actually consulted by the
+/// bake are read, rather than extracting every visible mesh into memory.
+pub fn mount_world(gta: &Path, keys: GtaKeys) -> io::Result<()> {
+    mount_patterns(gta, keys, &["*.ybn", "*.ymap", "*.ytyp", "*.ymf", "*.ydr"], false)
+}
+
+/// The static Story Mode archive order, shared with the visible-rail exporter.
+/// Never enumerate every installed DLC: Online-only map variants must not
+/// become invisible Story Mode rail collision.
+pub fn story_archives(gta: &Path, keys: &GtaKeys) -> io::Result<Vec<(String, Arc<Archive>)>> {
+    let mut base: Vec<PathBuf> = std::fs::read_dir(gta)?.flatten().map(|e| e.path())
+        .filter(|p| p.is_file() && p.extension().is_some_and(|x| x.eq_ignore_ascii_case("rpf")))
+        .collect();
+    base.sort();
+    let mut out = Vec::new();
+    for path in base {
+        if let Some(a) = open(&path, keys) {
+            out.push((path.file_stem().unwrap_or_default().to_string_lossy().into_owned(), a));
+        }
+    }
+    let update = Arc::new(Archive::open(&gta.join("update/update.rpf"), keys).map_err(io::Error::other)?);
+    out.extend(layers(gta, &update, keys)?);
+    Ok(out)
+}
+
+fn mount_patterns(gta: &Path, keys: GtaKeys, patterns: &[&str], warm: bool) -> io::Result<()> {
+    let patterns: Vec<String> = patterns.iter().map(|p| p.to_string()).collect();
     let mut files = HashMap::new();
     let mut base: Vec<PathBuf> = std::fs::read_dir(gta)?
         .flatten()
@@ -117,6 +163,7 @@ pub fn mount_placements(gta: &Path, keys: GtaKeys) -> io::Result<()> {
     let root = Arc::new(Archive::open(&update, &keys).map_err(io::Error::other)?);
     let mut names = Vec::new();
     for (i, (name, archive)) in layers(gta, &root, &keys)?.into_iter().enumerate() {
+        require_patch_metadata(&name, &archive, &keys)?;
         let dir = format!("{ROOT}/layers/{i:02}_{name}");
         if i > 0 {
             // rage's non-recursive extract of 'content.xml' 'setup2.xml' (substring patterns).
@@ -133,7 +180,7 @@ pub fn mount_placements(gta: &Path, keys: GtaKeys) -> io::Result<()> {
     }
     let list = format!("{ROOT}/layers.txt");
     files.insert(list.clone(), (list, File::Text(names.join("\n") + "\n")));
-    install(keys, files);
+    install(keys, files, warm);
     Ok(())
 }
 
@@ -201,7 +248,7 @@ pub fn mount_vehicles(gta: &Path, keys: GtaKeys) -> io::Result<()> {
             files.insert(path.to_ascii_lowercase(), (path, File::Entry(e)));
         }
     }
-    install(keys, files);
+    install(keys, files, true);
     Ok(())
 }
 

@@ -170,6 +170,15 @@ using SvGetScoreStateFn = std::uint32_t(__cdecl*)(const void*, SvScoreState*);
 using SvGetStatusTextFn = std::uint32_t(__cdecl*)(const void*, char*, std::uint32_t);
 using SvGetDynamicHitsFn = std::uint32_t(__cdecl*)(const void*, SvDynamicHit*, std::uint32_t);
 using SvGetSkaterMeshFn = std::uint32_t(__cdecl*)(const void*, SvColorTri*, std::uint32_t);
+
+// Developer collision view (optional exports; collision_view.rs). Kinds:
+// 0 floor, 1 bank, 2 wall, 3 underside, 4 curb bevel (no grind), 5 moving
+// host body; lines: 0 grind rail. GTA world space.
+// entity != 0: a, b, c are in that GTA entity's model space (placed on it each frame).
+struct SvViewTri { SvVec3 a, b, c; std::uint32_t kind; std::uint32_t entity; };
+struct SvViewLine { SvVec3 a, b; std::uint32_t kind; };
+using SvSetCollisionViewFn = void(__cdecl*)(std::uint32_t);
+using SvCollisionViewFn = std::uint32_t(__cdecl*)(SvVec3, float, SvViewTri*, std::uint32_t, SvViewLine*, std::uint32_t, std::uint32_t*);
 using SvGetTrickHistoryFn = std::uint32_t(__cdecl*)(const void*, char*, std::uint32_t);
 using SvSetCharacterFn = std::uint32_t(__cdecl*)(void*, const SvCharacter*);
 using SvConfigureQuirkFn = std::uint32_t(__cdecl*)(void*, const SvQuirkConfig*);
@@ -722,6 +731,8 @@ struct SvShopResult {
 using SvShopStartFn = std::uint32_t(__cdecl*)(void*, const char* assets, const char* garages);
 using SvShopCharacterFn = std::uint32_t(__cdecl*)(void*, const char* who);
 using SvShopOpenFn = std::uint32_t(__cdecl*)(void*, std::uint32_t tier);
+// sv_shop_open_at(rt, tier, x, y, day): today's stock of the store at GTA x, y (tier 3: a board shop).
+using SvShopOpenAtFn = std::uint32_t(__cdecl*)(void*, std::uint32_t tier, float x, float y, std::uint32_t day);
 using SvShopCloseFn = void(__cdecl*)(void*);
 using SvShopInputFn = std::uint32_t(__cdecl*)(void*, std::uint32_t input, std::int64_t cash, SvShopResult* out);
 using SvShopTextFn = std::uint32_t(__cdecl*)(void*, std::uint32_t which, char* buf, std::uint32_t cap);

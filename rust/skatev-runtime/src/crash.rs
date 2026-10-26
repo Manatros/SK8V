@@ -345,8 +345,13 @@ fn watchdog() {
         }
         let private = private_bytes();
         if private > next_memory {
-            write_line(&format!("crash: process private bytes {} MB (at start {} MB)", private >> 20, base_private >> 20));
-            next_memory = private + (1 << 30);
+            write_line(&format!(
+                "crash: process private bytes {} MB (at start {} MB), SkateV runtime heap {} MB",
+                private >> 20,
+                base_private >> 20,
+                crate::private_heap::live_bytes() >> 20
+            ));
+            next_memory = private + (1 << 29);
         }
     }
 }

@@ -1,0 +1,75 @@
+--- a/crates/skate-host/src/physics/bridge.rs
++++ b/crates/skate-host/src/physics/bridge.rs
+@@ -662,22 +662,24 @@ pub struct GrabLine {
+ /// that took contacts: dropped ramps braked the board on any slope ("the
+ /// slightest slope slows you down"). Host triangles stay two-sided; an edge
+ /// with no neighbour keeps -1 (takes contacts, as before).
+-/// Host shapes are rigid templates, so each entity's result is kept while it
+-/// sends the same number of triangles (5580 triangles cost ~1.7 ms to build,
+-/// and batches arrive every frame).
++/// Host shapes are rigid, so each entity's result is kept while its shape
++/// holds: the same triangle count and the same sum of squared edge lengths
++/// (unchanged by moving or turning; a vehicle's own collision refreshed with
++/// a door gone or a panel bent changes it). 5580 triangles cost ~1.7 ms to
++/// build, and batches arrive every frame.
+ fn dynamic_edges(triangles: &[([[f32; 3]; 3], u32, u32)]) -> Vec<(u32, [f32; 3])> {
+     type Edges = Vec<(u32, [f32; 3])>;
+     thread_local! {
+-        static KEPT: std::cell::RefCell<std::collections::HashMap<u32, Edges>> = Default::default();
++        static KEPT: std::cell::RefCell<std::collections::HashMap<u32, (u64, Edges)>> = Default::default();
+     }
+     KEPT.with_borrow_mut(|kept| {
+         let mut seen = std::collections::HashMap::with_capacity(kept.len());
+-        let out = dynamic_edges_with(triangles, |tag, count, build| {
++        let out = dynamic_edges_with(triangles, |tag, shape, build| {
+             let edges = match kept.remove(&tag) {
+-                Some(e) if e.len() == count => e,
++                Some((s, e)) if s == shape => e,
+                 _ => build(),
+             };
+-            seen.insert(tag, edges.clone());
++            seen.insert(tag, (shape, edges.clone()));
+             edges
+         });
+         *kept = seen;
+@@ -687,14 +689,21 @@ fn dynamic_edges(triangles: &[([[f32; 3]; 3], u32, u32)]) -> Vec<(u32, [f32; 3])
+ 
+ fn dynamic_edges_with(
+     triangles: &[([[f32; 3]; 3], u32, u32)],
+-    mut entity: impl FnMut(u32, usize, &dyn Fn() -> Vec<(u32, [f32; 3])>) -> Vec<(u32, [f32; 3])>,
++    mut entity: impl FnMut(u32, u64, &dyn Fn() -> Vec<(u32, [f32; 3])>) -> Vec<(u32, [f32; 3])>,
+ ) -> Vec<(u32, [f32; 3])> {
+     const BASE: u32 = 0x1e1;
+     let mut out = vec![(BASE, [-1.; 3]); triangles.len()];
+     let mut order: Vec<usize> = (0..triangles.len()).collect();
+     order.sort_by_key(|&i| triangles[i].1);
+     for group in order.chunk_by(|&a, &b| triangles[a].1 == triangles[b].1) {
+-        let edges = entity(triangles[group[0]].1, group.len(), &|| entity_edges(triangles, group));
++        // Shape key: count and squared edge lengths in 5 cm² steps (world
++        // coordinates jitter far below that; a crossed step only rebuilds once).
++        let lengths: f64 = group.iter().map(|&i| {
++            let [a, b, c] = triangles[i].0.map(Vec3::from_array);
++            f64::from((b - a).length_squared() + (c - b).length_squared() + (a - c).length_squared())
++        }).sum();
++        let shape = ((group.len() as u64) << 40) ^ (lengths * 20.0).round() as u64;
++        let edges = entity(triangles[group[0]].1, shape, &|| entity_edges(triangles, group));
+         for (k, &i) in group.iter().enumerate() {
+             out[i] = edges[k];
+         }
+@@ -784,6 +793,16 @@ mod dynamic_edge_tests {
+         assert!(single[0].1.iter().all(|&c| c == -1.), "{single:?}");
+     }
+ 
++    #[test]
++    fn the_same_count_with_another_shape_is_built_anew() {
++        let flat = [([A, B, C], 11, 0), ([A, C, D], 11, 0)];
++        let e = edge_of(&flat[0].0, A, C);
++        assert_eq!(dynamic_edges(&flat)[0].1[e], 1.0, "flat: the diagonal's neighbour is coplanar");
++        // Same two triangles, D moved out of the plane: the diagonal folds.
++        let lifted = [0.0f32, -0.6, 1.0];
++        let folded = [([A, B, C], 11, 0), ([A, C, lifted], 11, 0)];
++        assert!(dynamic_edges(&folded)[0].1[e] < 0.99, "the kept flat result must not be reused");
++    }
+     #[test]
+     fn different_entities_are_never_joined() {
+         let tris = [([A, B, C], 1, 0), ([A, C, D], 2, 0)];
