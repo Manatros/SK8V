@@ -427,21 +427,18 @@ impl Templates {
             messages.push(format!("dynamic model {model:08x}: {} canopy triangles left out", before - tris.len()));
         }
         if model == 0x03154ddc {
-            // For the dropper rail (prop_skate_rail 0x03154ddc), physical collision and grind
-            // properties are confined strictly to the rideable top bar (centroid_z >= hi.z - 0.08).
-            // Diagonal leg braces, support struts and entry approach slopes are completely excluded
-            // so wheels, trucks and board never collide with invisible spider legs.
-            tris.retain(|t| {
-                let centroid_z = (t.v[0][2] + t.v[1][2] + t.v[2][2]) / 3.0;
-                centroid_z >= hi.z - 0.08
-            });
-        } else {
-            let slopes = entry_slopes(&tris);
-            if !slopes.is_empty() {
-                messages.push(format!("dynamic model {model:08x}: {} approach slope triangles onto a raised floor", slopes.len()));
-                tris.extend(slopes);
+            // Keep the complete authored top-bar component, not a height slice
+            // through its supports. That slice left sloping end fragments and
+            // an open underside; the finder merged them sideways under rotation.
+            if let Some(bar) = dropper_top_bar(&tris) {
+                tris = bar;
+            } else {
+                messages.push(format!("WARNING dynamic model {model:08x}: no unique closed top bar; preserving authored collision"));
             }
         }
+        // Use the authored bound outline. Invisible approach ramps previously
+        // extended beyond raised props (halfpipe: about 1.29 m at each end).
+        // Current user request / A50: collision must follow visible geometry.
         // Rail ends flush with the line (GTA's bent rail ends poke up 2.2 cm
         // through their rotated collision boxes; world::flush_rail_ends_gta).
         let rails = object_rails(&tris.iter().map(|t| t.v.map(Vec3::from_array)).collect::<Vec<_>>());
@@ -601,60 +598,71 @@ impl Templates {
     }
 }
 
-/// A raised floor this high (metres above the model's bottom) gets an
-/// approach slope where it ends at the model's outline (`entry_slopes`).
-const RAISED_FLOOR: std::ops::RangeInclusive<f32> = 0.03..=0.35;
-/// Rise over run of an approach slope (about 14 degrees).
-const ENTRY_GRADE: f32 = 0.25;
-
-/// Approach slopes (model space) onto a raised flat floor that ends at the
-/// model's outline: the half pipe's flat bottom stands 0.217 m on its base,
-/// a step the board ran into at both open ends (Manatros 2026-10-19). For
-/// each upward flat face edge 0.03..0.35 m up lying on the outline, a ramp
-/// down to the bottom, outward. Collision only.
-pub fn entry_slopes(tris: &[svwc::Tri]) -> Vec<svwc::Tri> {
-    let mut lo = [f32::MAX; 3];
-    let mut hi = [f32::MIN; 3];
-    for t in tris {
-        for p in t.v {
-            for k in 0..3 {
-                lo[k] = lo[k].min(p[k]);
-                hi[k] = hi[k].max(p[k]);
+/// The existing top-bar-only policy belongs only to prop_skate_rail. Select a
+/// whole closed source component; never manufacture a prism or move its faces.
+fn dropper_top_bar(tris: &[svwc::Tri]) -> Option<Vec<svwc::Tri>> {
+    // This quadratic topology check is for the measured 72-face GTA prop.
+    // A replacement asset must not make model loading run unbounded pairwise
+    // work. None preserves the input through install's existing warning path;
+    // this is a work budget, never permission to discard excess faces.
+    if tris.is_empty() || tris.len() > 512 || tris.iter().flat_map(|t| t.v).flatten().any(|p| !p.is_finite()) {
+        return None;
+    }
+    fn root(parent: &mut [usize], i: usize) -> usize {
+        if parent[i] != i { let next = parent[i]; parent[i] = root(parent, next); }
+        parent[i]
+    }
+    fn unite(parent: &mut [usize], a: usize, b: usize) {
+        let (a, b) = (root(parent, a), root(parent, b));
+        parent[a.max(b)] = a.min(b);
+    }
+    // Sort before unioning the full proximity graph. Greedy first-match
+    // welding would depend on face order when a vertex has two neighbours.
+    let mut vertices: Vec<_> = tris.iter().flat_map(|t| t.v).enumerate()
+        .map(|(i, p)| (Vec3::from_array(p), i)).collect();
+    vertices.sort_by(|(a, _), (b, _)| a.x.total_cmp(&b.x).then(a.y.total_cmp(&b.y)).then(a.z.total_cmp(&b.z)));
+    let mut parent: Vec<_> = (0..vertices.len()).collect();
+    for i in 0..vertices.len() {
+        for j in 0..i {
+            if vertices[i].0.distance_squared(vertices[j].0) <= 1e-10 {
+                unite(&mut parent, i, j);
             }
         }
     }
-    const ON: f32 = 0.06;
-    let mut out = Vec::new();
-    for t in tris {
-        let [a, b, c] = t.v;
-        let n = (Vec3::from_array(b) - Vec3::from_array(a)).cross(Vec3::from_array(c) - Vec3::from_array(a)).normalize_or_zero();
-        if n.z < 0.98 || !t.v.iter().all(|p| RAISED_FLOOR.contains(&(p[2] - lo[2]))) {
-            continue;
-        }
+    let mut canonical = vec![0; vertices.len()];
+    for (i, (_, original)) in vertices.iter().enumerate() { canonical[*original] = root(&mut parent, i); }
+    let mut edges: HashMap<(usize, usize), Vec<usize>> = HashMap::new();
+    let mut faces: Vec<_> = (0..tris.len()).collect();
+    for (i, ids) in canonical.chunks_exact(3).enumerate() {
+        if ids[0] == ids[1] || ids[1] == ids[2] || ids[2] == ids[0] { return None; }
         for k in 0..3 {
-            let (p, q) = (t.v[k], t.v[(k + 1) % 3]);
-            // The outline side both ends lie on, and its outward direction.
-            let side = [(0usize, lo[0], -1.0f32), (0, hi[0], 1.0), (1, lo[1], -1.0), (1, hi[1], 1.0)]
-                .into_iter()
-                .find(|&(axis, at, _)| (p[axis] - at).abs() < ON && (q[axis] - at).abs() < ON);
-            let Some((axis, _, sign)) = side else { continue };
-            let run = |z: f32| (z - lo[2]) / ENTRY_GRADE;
-            let mut p2 = p;
-            let mut q2 = q;
-            p2[axis] += sign * run(p[2]);
-            q2[axis] += sign * run(q[2]);
-            p2[2] = lo[2];
-            q2[2] = lo[2];
-            for mut tri in [[p, q, q2], [p, q2, p2]] {
-                let m = (Vec3::from_array(tri[1]) - Vec3::from_array(tri[0])).cross(Vec3::from_array(tri[2]) - Vec3::from_array(tri[0]));
-                if m.z < 0.0 {
-                    tri.swap(1, 2);
-                }
-                out.push(svwc::Tri { v: tri, material: t.material });
-            }
+            let (a, b) = (ids[k], ids[(k + 1) % 3]);
+            let own = edges.entry((a.min(b), a.max(b))).or_default();
+            for &other in own.iter() { unite(&mut faces, i, other); }
+            own.push(i);
         }
     }
-    out
+    let mut components: HashMap<usize, Vec<usize>> = HashMap::new();
+    for i in 0..tris.len() { components.entry(root(&mut faces, i)).or_default().push(i); }
+    let top = vertices.iter().map(|(p, _)| p.z).fold(f32::MIN, f32::max);
+    let mut selected = None;
+    for indices in components.values() {
+        if !edges.values().filter(|own| indices.contains(&own[0])).all(|own| own.len() == 2) { continue; }
+        let mut lo = Vec3::splat(f32::MAX);
+        let mut hi = Vec3::splat(f32::MIN);
+        for &i in indices {
+            for p in tris[i].v { let p = Vec3::from_array(p); lo = lo.min(p); hi = hi.max(p); }
+        }
+        let extent = hi - lo;
+        let (long, across) = (extent.x.max(extent.y), extent.x.min(extent.y));
+        if long >= 1.0 && across <= 0.15 && extent.z <= 0.15
+            && long >= 10.0 * across.max(extent.z) && top - hi.z <= 0.10
+        {
+            if selected.is_some() { return None; }
+            selected = Some(indices.iter().map(|&i| tris[i]).collect());
+        }
+    }
+    selected
 }
 
 /// GTAxSkate ObjectRails (World page, default on): standing objects get
@@ -1086,40 +1094,6 @@ mod dropper_shape_probe {
 }
 
 #[cfg(test)]
-mod entry_slope_tests {
-    use super::*;
-
-    #[test]
-    fn a_raised_floor_at_the_outline_gets_a_slope_down_to_the_bottom() {
-        // A 4 x 4 m box base with its flat top 0.2 m up: four sides, slopes outward.
-        let top = [[0., 0., 0.2], [4., 0., 0.2], [4., 4., 0.2], [0., 4., 0.2]];
-        let mut tris = vec![svwc::Tri { v: [top[0], top[1], top[2]], material: 3 }, svwc::Tri { v: [top[0], top[2], top[3]], material: 3 }];
-        tris.push(svwc::Tri { v: [[0., 0., 0.], [4., 0., 0.], [4., 4., 0.]], material: 3 }); // the bottom
-        let slopes = entry_slopes(&tris);
-        assert_eq!(slopes.len(), 8, "two triangles on each of the four outline edges");
-        for t in &slopes {
-            let lowest = t.v.iter().map(|p| p[2]).fold(f32::MAX, f32::min);
-            assert_eq!(lowest, 0.0, "each slope reaches the bottom");
-            assert!(t.v.iter().any(|p| p[0] < -0.5 || p[0] > 4.5 || p[1] < -0.5 || p[1] > 4.5), "outward");
-        }
-        // A floor at the bottom or a high seat gets none.
-        let flat = vec![svwc::Tri { v: [[0., 0., 0.], [4., 0., 0.], [4., 4., 0.]], material: 3 }];
-        assert!(entry_slopes(&flat).is_empty());
-    }
-
-    #[test]
-    #[ignore]
-    fn the_half_pipe_gets_slopes_at_its_open_ends() {
-        let dir = std::env::var_os("SKATEV_TEST_PROP_MODELS").expect("set SKATEV_TEST_PROP_MODELS to the local prop templates");
-        let path = std::path::Path::new(&dir).join("f66f582f.svwc");
-        let tris = svwc::Cache::open(&path).and_then(|mut c| c.read_all()).expect("half pipe template");
-        let slopes = entry_slopes(&tris);
-        println!("half pipe: {} slope triangles", slopes.len());
-        assert!(!slopes.is_empty());
-    }
-}
-
-#[cfg(test)]
 mod dropper_park_repro {
     use super::*;
 
@@ -1222,5 +1196,170 @@ mod dropper_regression_20261021 {
             for _ in 0..32 { assert_eq!(segments(&object_rails(&faces)), baseline, "{name}: unstable repeated rails"); }
             println!("{name}: {} source triangles, {} rails, {} segments; repeated rail extraction {:.3} ms/call", faces.len(),first.len(),baseline.len(),start.elapsed().as_secs_f64()*1000./32.);
         }
+    }
+}
+
+#[cfg(test)]
+mod dropper_alignment_20261027 {
+    use super::*;
+
+    fn prism(offset: f32) -> Vec<svwc::Tri> {
+        let p = [
+            [-0.035 + offset, -2.5, 0.30], [0.035 + offset, -2.5, 0.30],
+            [0.035 + offset, 2.5, 0.30], [-0.035 + offset, 2.5, 0.30],
+            [-0.035 + offset, -2.5, 0.38], [0.035 + offset, -2.5, 0.38],
+            [0.035 + offset, 2.5, 0.38], [-0.035 + offset, 2.5, 0.38],
+        ];
+        [[0,2,1],[0,3,2],[4,5,6],[4,6,7],[0,1,5],[0,5,4],
+         [1,2,6],[1,6,5],[2,3,7],[2,7,6],[3,0,4],[3,4,7]].into_iter()
+            .map(|ids| svwc::Tri { v: ids.map(|i| p[i]), material: 3 }).collect()
+    }
+
+    fn face_set(tris: &[svwc::Tri]) -> Vec<([u32; 9], u8)> {
+        let mut keys: Vec<_> = tris.iter().map(|t| {
+            let p: Vec<_> = t.v.into_iter().flatten().map(f32::to_bits).collect();
+            (p.try_into().unwrap(), t.material)
+        }).collect();
+        keys.sort();
+        keys
+    }
+
+    #[test]
+    fn unknown_or_ambiguous_top_bar_preserves_authored_shape_and_other_models_bypass() {
+        for source in [vec![prism(0.)[0]], prism(0.).into_iter().chain(prism(1.)).collect()] {
+            assert!(dropper_top_bar(&source).is_none());
+            let mut models = Templates::new(Path::new("unused-test-cache.svwc"));
+            let mut messages = Vec::new();
+            models.install(0x03154ddc, source.clone(), "test", &mut messages);
+            let installed: Vec<_> = models.models[&0x03154ddc].as_ref().unwrap().iter().map(|(t,_)| *t).collect();
+            assert_eq!(face_set(&installed), face_set(&source));
+            assert!(messages.iter().any(|m| m.contains("WARNING") && m.contains("preserving authored collision")));
+        }
+        let source: Vec<_> = prism(0.).into_iter().chain(prism(1.)).collect();
+        let mut models = Templates::new(Path::new("unused-test-cache.svwc"));
+        let mut messages = Vec::new();
+        models.install(0x12345678, source.clone(), "test", &mut messages);
+        let installed: Vec<_> = models.models[&0x12345678].as_ref().unwrap().iter().map(|(t,_)| *t).collect();
+        assert_eq!(face_set(&installed), face_set(&source));
+        assert!(!messages.iter().any(|m| m.contains("top bar")));
+    }
+
+    #[test]
+    fn top_bar_connectivity_is_closed_and_independent_of_face_order() {
+        let source = prism(0.);
+        assert_eq!(face_set(&dropper_top_bar(&source).unwrap()), face_set(&source));
+        let reversed: Vec<_> = source.iter().copied().rev().collect();
+        assert_eq!(face_set(&dropper_top_bar(&reversed).unwrap()), face_set(&source));
+        let mut open = source.clone();
+        open.pop();
+        assert!(dropper_top_bar(&open).is_none(), "open source component must not be selected");
+        let mut collapsed = source.clone();
+        collapsed[0].v[1] = collapsed[0].v[0];
+        assert!(dropper_top_bar(&collapsed).is_none(), "collapsed source triangle must not be selected");
+    }
+
+    #[test]
+    fn oversized_replacement_skips_pairwise_selection_and_preserves_its_faces() {
+        let mut source = prism(0.);
+        // The valid bar is still uniquely selectable among isolated details.
+        // Verify the work limit rather than relying on invalid topology to fail.
+        for i in 0..501 {
+            let x = 20.0 + i as f32;
+            source.push(svwc::Tri { v: [[x, 0., 0.3], [x + 0.1, 0., 0.3], [x, 0.1, 0.3]], material: 3 });
+        }
+        assert!(dropper_top_bar(&source[..512]).is_some());
+        assert!(dropper_top_bar(&source).is_none());
+        let mut models = Templates::new(Path::new("unused-test-cache.svwc"));
+        let mut messages = Vec::new();
+        models.install(0x03154ddc, source.clone(), "test", &mut messages);
+        let installed: Vec<_> = models.models[&0x03154ddc].as_ref().unwrap().iter().map(|(t, _)| *t).collect();
+        assert_eq!(face_set(&installed), face_set(&source));
+        assert!(messages.iter().any(|m| m.contains("WARNING") && m.contains("preserving authored collision")));
+    }
+
+
+    #[test]
+    #[ignore = "requires locally installed GTA collision templates"]
+    fn narrow_dropper_rail_stays_on_its_centre() {
+        let directory = std::env::var_os("SKATEV_TEST_PROP_MODELS").expect("set SKATEV_TEST_PROP_MODELS");
+        let path = Path::new(&directory).join("03154ddc.svwc");
+        let tris = svwc::Cache::open(&path).and_then(|mut c| c.read_all()).expect("dropper rail template");
+        let mut models = Templates::new(Path::new("unused-test-cache.svwc"));
+        let selected = dropper_top_bar(&tris).expect("unique closed authored top bar");
+        assert_eq!(selected.len(), 12);
+        assert!(selected.iter().all(|t| tris.contains(t)), "bar faces must come bit-exact from source");
+        let bottom_faces = selected.iter().filter(|t| t.v.iter().all(|p| (p[2] - 0.30128205).abs() < 1e-6)).count();
+        assert_eq!(bottom_faces, 2, "closed bar must retain underside");
+        let reversed: Vec<_> = tris.iter().copied().rev().collect();
+        assert_eq!(face_set(&dropper_top_bar(&reversed).unwrap()), face_set(&selected));
+        models.install(0x03154ddc, tris, "test", &mut Vec::new());
+        let installed: Vec<_> = models.models[&0x03154ddc].as_ref().unwrap().iter().map(|(t,_)| *t).collect();
+        assert_eq!(face_set(&installed), face_set(&selected), "installation moved or changed authored bar faces");
+        // Match worker::run: fixed bodies contribute gta_triangles, with
+        // packed audio surfaces, to the static area alongside nearby ground.
+        let mut bad = Vec::new();
+        for yaw in [0.0f32, 0.37, 1.57, 2.31] {
+            let rotation = Quat::from_rotation_z(yaw);
+            let position = Vec3::new(3.25, -4.5, 0.02);
+            let body = HostBody {
+                model: 0x03154ddc, position,
+                axes: [rotation * Vec3::X, rotation * Vec3::Y, Vec3::Z],
+                fallback: HostBox { tag: 0x20000001, center: position, rotation, half_extents: Vec3::ONE },
+                allow_box: false, velocity: None, grab_point: None, fixed: true, vehicle_part: false,
+            };
+            let prop = models.gta_triangles(&body).expect("installed fixed prop");
+            let ground = [[[-20., -20., 0.], [20., -20., 0.], [20., 20., 0.]], [[-20., -20., 0.], [20., 20., 0.], [-20., 20., 0.]]];
+            let build = || crate::world::build_area_tagged(position, ground.into_iter().map(|t| (t, 0)).chain(prop.iter().copied()));
+            let model_rails = |area: &crate::world::Area| -> Vec<Vec<Vec3>> {
+                area.rails.iter().map(|r| r.iter().map(|p| rotation.inverse() * (coords::from_skate(Vec3::from_array(*p)) - position)).collect()).collect()
+            };
+            let rails = model_rails(&build());
+            println!("actual fixed dropper rail yaw {yaw}: {rails:?}");
+            assert_eq!(rails.len(), 1, "expected exactly one top-bar line");
+            let line = &rails[0];
+            let (low, high) = line.iter().map(|p| p.y).fold((f32::MAX, f32::MIN), |(lo,hi), y| (lo.min(y),hi.max(y)));
+            if (low + 2.46521).abs() > 0.005 || (high - 2.46521).abs() > 0.005
+                || !line.iter().all(|p| (p.z - 0.38392276).abs() < 0.005 && p.x.abs() < 0.005) { bad.push(yaw); }
+            for _ in 0..3 {
+                assert_eq!(model_rails(&build()), rails, "fixed-prop rail extraction changed on repeat");
+            }
+        }
+        assert!(bad.is_empty(), "shifted or low top-bar lines at yaw {bad:?}");
+    }
+}
+
+#[cfg(test)]
+mod source_shape_20261027 {
+    use super::*;
+
+    #[test]
+    fn installing_a_raised_prop_does_not_add_invisible_approach_geometry() {
+        let top = [[0., 0., 0.2], [4., 0., 0.2], [4., 4., 0.2], [0., 4., 0.2]];
+        let source = vec![
+            svwc::Tri { v: [top[0], top[1], top[2]], material: 3 },
+            svwc::Tri { v: [top[0], top[2], top[3]], material: 3 },
+            svwc::Tri { v: [[0., 0., 0.], [4., 4., 0.], [4., 0., 0.]], material: 3 },
+        ];
+        let mut models = Templates::new(Path::new("unused-test-cache.svwc"));
+        models.install(0x12345678, source.clone(), "test", &mut Vec::new());
+        let installed: Vec<_> = models.models[&0x12345678].as_ref().unwrap().iter().map(|(t,_)| *t).collect();
+        assert_eq!(installed.len(), source.len(), "source faces must not gain invisible outward ramps");
+        assert!(installed.iter().flat_map(|t| t.v).all(|p| (0.0..=4.0).contains(&p[0]) && (0.0..=4.0).contains(&p[1])), "collision extends outside the source outline");
+    }
+
+    #[test]
+    #[ignore = "requires locally installed GTA collision templates"]
+    fn halfpipe_keeps_its_authored_outline() {
+        let directory = std::env::var_os("SKATEV_TEST_PROP_MODELS").expect("set SKATEV_TEST_PROP_MODELS");
+        let path = Path::new(&directory).join("f66f582f.svwc");
+        let source = svwc::Cache::open(&path).and_then(|mut c| c.read_all()).expect("halfpipe template");
+        let mut models = Templates::new(Path::new("unused-test-cache.svwc"));
+        models.install(0xf66f582f, source.clone(), "test", &mut Vec::new());
+        let installed = models.models[&0xf66f582f].as_ref().unwrap();
+        println!("halfpipe authored {} faces; installed {}", source.len(), installed.len());
+        assert_eq!(installed.len(), source.len(), "halfpipe gained invisible approach geometry");
+        let lo = source.iter().flat_map(|t| t.v).map(Vec3::from_array).fold(Vec3::splat(f32::MAX), Vec3::min);
+        let hi = source.iter().flat_map(|t| t.v).map(Vec3::from_array).fold(Vec3::splat(f32::MIN), Vec3::max);
+        assert!(installed.iter().flat_map(|(t,_)| t.v).map(Vec3::from_array).all(|p| p.cmpge(lo).all() && p.cmple(hi).all()), "halfpipe collision left source extent");
     }
 }

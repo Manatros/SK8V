@@ -20,8 +20,8 @@ namespace {
 // `sink`: metres the object goes into the ground beyond its bounding box, so
 // the board rolls onto it instead of hitting a corner (Manatros 2026-10-19:
 // "slightly above ground so I hit the corner"). A raised floor (the half
-// pipe's stands 0.217 m on its base) gets a collision approach slope in the
-// runtime instead (dynamic.rs entry_slopes): sunk, the ground showed through it.
+// pipe's stands 0.217 m on its base) keeps its authored outline: invisible
+// approach ramps extended past the model; sinking it exposed the ground.
 constexpr float kSink = 0.02f;
 struct Offer { const char* name; const char* models[2]; float sink; };
 constexpr Offer kOffers[] = {
