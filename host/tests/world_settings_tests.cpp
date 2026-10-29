@@ -2,6 +2,11 @@
 #include "../src/main.cpp"
 #include <cassert>
 #include <iostream>
+#include <fstream>
+#include <set>
+#ifdef EXPECTED_TEST_WORLD_BASELINE
+static_assert(kTestWorldBaseline == (EXPECTED_TEST_WORLD_BASELINE != 0));
+#endif
 int wmain(int argc, wchar_t** argv) {
     assert(argc == 2);
     g_gameDir = std::wstring(argv[1]) + L"\\";
@@ -11,6 +16,53 @@ int wmain(int argc, wchar_t** argv) {
     for (const auto* key : {L"BakedWorld", L"Fallbacks", L"RailBoxes", L"PlainGtaCompare"})
         WritePrivateProfileStringW(L"SkateV", key, L"1", ini.c_str());
     assert(WorldAtBest(LoadConfig()));
+
+    // Saved diagnostic switches must not leak into an enforced local test.
+    // Normalization is pure: it preserves both personal fields and the file.
+    WritePrivateProfileStringW(L"SkateV", L"StepRails", L"1", ini.c_str());
+    WritePrivateProfileStringW(L"SkateV", L"UnflaggedStairs", L"1", ini.c_str());
+    WritePrivateProfileStringW(L"SkateV", L"HighResParks", L"0", ini.c_str());
+    WritePrivateProfileStringW(L"SkateV", L"DynamicWorld", L"0", ini.c_str());
+    auto bytes = [&] {
+        std::ifstream f(std::filesystem::path(ini), std::ios::binary);
+        return std::string(std::istreambuf_iterator<char>(f), {});
+    };
+    const auto before = bytes();
+    Config custom = LoadConfig();
+    custom.objectPush = 0.75f;
+    custom.fovScale = 1.35f;
+    custom.keyboard = false;
+    const auto changed = SavedWorldState(custom, true);
+    assert(!WorldAtBest(custom));
+    NormalizeTestWorldConfig(custom, false);
+    assert(SavedWorldState(custom, true) == changed);
+    g_plainGtaCompare = true;
+    NormalizeTestWorldConfig(custom, true);
+    assert(WorldAtBest(custom) && g_plainGtaCompare); // helper never changes global state
+    assert(custom.objectPush == 0.75f && custom.fovScale == 1.35f && !custom.keyboard);
+    assert(bytes() == before);
+    auto startup = LoadConfig();
+    NormalizeTestWorldConfig(startup, kTestWorldBaseline);
+    assert(WorldAtBest(startup) == kTestWorldBaseline);
+    assert(SavedWorldState(LoadConfig(), true) == changed);
+    g_plainGtaCompare = false;
+    DeleteFileW(ini.c_str());
+    for (const auto* key : {L"BakedWorld", L"Fallbacks", L"RailBoxes", L"PlainGtaCompare"})
+        WritePrivateProfileStringW(L"SkateV", key, L"1", ini.c_str());
+
+    assert(BestWorldSettings().size() == std::size(kWorldSwitches));
+    std::map<std::string, std::string> best;
+    for (const auto& value : BestWorldSettings()) assert(best.emplace(value).second);
+    for (const auto& w : kWorldSwitches) assert(best.at(w.key) == (w.best ? "1" : "0"));
+    std::set<std::string> presetKeys;
+    for (const auto& [key, value] : GtaxSkatePreset()) {
+        assert(presetKeys.insert(key).second);
+        if (best.count(key)) assert(best.at(key) == value);
+    }
+    Config noObjects;
+    noObjects.dynamicWorld = false;
+    assert(!WorldAtBest(noObjects));
+    assert(WorldState(noObjects) == "custom: Nearby entities collide");
 
     Config saved{};
     assert(WorldAtBest(saved));
@@ -25,6 +77,10 @@ int wmain(int argc, wchar_t** argv) {
     SendWorldOptions(saved, capture);
     const auto original = options;
     assert(options.size() == 11 && options.at(8) && options.at(10) && !options.at(14));
+    assert(!options.count(kHostOnlyWorldSwitch));
+    std::set<unsigned> ids;
+    for (const auto& [id, on] : options) ids.insert(id);
+    assert((ids == std::set<unsigned>{0,2,3,4,5,6,7,8,9,10,14}));
     assert(!options.count(11) && !options.count(12));
     g_plainGtaCompare = true;
     SendWorldOptions(saved, capture);
@@ -54,7 +110,11 @@ int wmain(int argc, wchar_t** argv) {
         assert(dev->items[4 + i].key == kWorldSwitches[i].key);
         assert(dev->items[4 + i].help.find("best:") != std::string::npos);
     }
-    assert(dev->items[14].label == "Reset all settings to GTAxSkate defaults");
+    assert(dev->items[4 + std::size(kWorldSwitches)].label == "Reset all settings to GTAxSkate defaults");
+    unsigned nearbyRows = 0;
+    for (const auto& page : pages) for (const auto& item : page.items)
+        if (item.key == "DynamicWorld") { ++nearbyRows; assert(page.title == "World"); }
+    assert(nearbyRows == 1);
     g_config = saved;
     compare.apply("1");
     assert(g_plainGtaCompare && g_config.stepRails && !g_config.highResParks);
@@ -74,5 +134,5 @@ int wmain(int argc, wchar_t** argv) {
     compare.apply("1");
     dev->items[1].run();
     assert(WorldAtBest(g_config) && !g_plainGtaCompare);
-    std::cout << "world settings tests passed\n";
+    std::cout << "world settings tests passed; local test baseline=" << kTestWorldBaseline << "\n";
 }

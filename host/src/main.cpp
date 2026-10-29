@@ -3588,8 +3588,10 @@ std::string VirtualKeyName(unsigned vk) {
 // landings, GTA's own cameras, radio, stamina, injuries and ragdolls, no
 // arcade overlays, developer views off. Applied once on a fresh install (no
 // saved User snapshot) and from Presets; only these keys change.
+const std::vector<std::pair<std::string, std::string>>& BestWorldSettings();
 const std::vector<std::pair<std::string, std::string>>& GtaxSkatePreset() {
-    static const std::vector<std::pair<std::string, std::string>> settings = {
+    static const auto settings = [] {
+      std::vector<std::pair<std::string, std::string>> values = {
         // Riding: Skate 3's, forgiving (Easy: wide grind lock, assisted flips).
         {"Difficulty", "Easy"}, {"Posture", "Normal"}, {"RidingStyle", "Default"}, {"TruckTightness", "0.7"},
         {"WheelHardness", "0.7"}, {"Pop", "1"}, {"GrindPop", "1"}, {"PushSpeed", "1"}, {"PushPower", "1"}, {"Braking", "1"},
@@ -3602,12 +3604,10 @@ const std::vector<std::pair<std::string, std::string>>& GtaxSkatePreset() {
         {"CinemaFilter", "NG_filmic01"}, {"FilmerFilter", "NG_filmic06"}, {"FilmFilterStrength", "0.85"},
         // GTA's world: stamina skill, injuries, ragdolls, dents, its radio.
         {"Stamina", "1"}, {"Injuries", "1"}, {"GtaDelegation", "1"}, {"SwimDepth", "1"}, {"BoardAim", "1"},
-        {"DynamicWorld", "1"}, {"DynamicRadius", "35"}, {"PedHitboxes", "1"}, {"PedLaunch", "0"}, {"PedsSurvive", "1"},
+        {"DynamicRadius", "35"}, {"PedHitboxes", "1"}, {"PedLaunch", "0"}, {"PedsSurvive", "1"},
         {"PedLaunchScale", "1"}, {"PedLaunchLift", "0.3"}, {"PedLaunchSpin", "1"}, {"VehicleDamage", "1"},
         {"VehicleDamageScale", "0.3"}, {"VehicleDamageRadius", "60"}, {"PedBumpImpulse", "180"}, {"BoardScratches", "1"},
-        {"VehiclePush", "1"}, {"ObjectPush", "0.25"}, {"DetailedStairs", "1"}, {"TubeRails", "1"}, {"VisualRails", "1"}, {"UnflaggedStairs", "0"}, {"CurbBevels", "1"},
-        {"TrackRails", "1"}, {"RailTops", "1"}, {"ObjectRails", "1"},
-        {"StepRails", "0"}, {"HighResParks", "1"}, {"DevOptions", "0"},
+        {"VehiclePush", "1"}, {"ObjectPush", "0.25"}, {"DevOptions", "0"},
         {"SkateRadio", ""}, {"RadioControls", "1"}, {"AudioGtaGainDb", "1.4"}, {"BoardActionInMissions", "0"},
         {"BoardTracks", "1"}, {"Snow", "0"}, {"WheelGlow", "0"}, {"BoardMaterial", "Off"}, {"CarryBoard", "0"},
         {"GpsWhileSkating", "1"}, {"SkateSpots", "1"}, {"WheelsFromPaint", "1"}, {"BailPain", "13"},
@@ -3617,27 +3617,19 @@ const std::vector<std::pair<std::string, std::string>>& GtaxSkatePreset() {
         // Developer views and logs are for testing, not play.
         {"ShowInputs", "0"}, {"ShowDebug", "0"}, {"VerboseLog", "0"}, {"CollisionView", "0"}, {"ThreadCensus", "0"},
         {"GunProbe", "0"}, {"StallSampler", "0"}, {"GtaCamera", "0"},
-    };
+      };
+      const auto& world = BestWorldSettings();
+      values.insert(values.end(), world.begin(), world.end());
+      return values;
+    }();
     return settings;
 }
 
 // Best-case world collision settings (Manatros 2026-10-25: every test runs with
 // the best settings; a changed setting warns that collision can break and the
 // reset restores these). Same values as the GTAxSkate preset.
-const std::vector<std::pair<std::string, std::string>>& BestWorldSettings() {
-    static const std::vector<std::pair<std::string, std::string>> best = {
-        {"DetailedStairs", "1"}, {"UnflaggedStairs", "0"}, {"CurbBevels", "1"},
-        {"TubeRails", "1"}, {"VisualRails", "1"}, {"TrackRails", "1"}, {"RailTops", "1"}, {"ObjectRails", "1"},
-        {"StepRails", "0"}, {"HighResParks", "1"}};
-    return best;
-}
-
-bool WorldAtBest(const Config& c) {
-    return c.detailedStairs && !c.unflaggedStairs && c.curbBevels && c.tubeRails && c.visualRails
-        && c.trackRails && c.railTops && c.objectRails && !c.stepRails && c.highResParks;
-}
-
 bool g_plainGtaCompare = false;
+constexpr unsigned kHostOnlyWorldSwitch = ~0u;
 struct WorldSwitch { const char* key; const char* name; bool Config::*value; unsigned id; bool best; };
 const WorldSwitch kWorldSwitches[] = {
     {"DetailedStairs", "Stairs as steps", &Config::detailedStairs, 0, true},
@@ -3650,9 +3642,23 @@ const WorldSwitch kWorldSwitches[] = {
     {"CurbBevels", "Curb bevels", &Config::curbBevels, 7, true},
     {"HighResParks", "High-res skateparks", &Config::highResParks, 14, true},
     {"UnflaggedStairs", "Unmarked stairs as steps (test)", &Config::unflaggedStairs, 9, false},
+    {"DynamicWorld", "Nearby entities collide", &Config::dynamicWorld, kHostOnlyWorldSwitch, true},
 };
-std::string WorldState(const Config& c, bool values = false) {
-    if (g_plainGtaCompare) return "COMPARE (plain GTA)";
+const std::vector<std::pair<std::string, std::string>>& BestWorldSettings() {
+    static const auto best = [] {
+        std::vector<std::pair<std::string, std::string>> values;
+        for (const auto& w : kWorldSwitches) values.emplace_back(w.key, w.best ? "1" : "0");
+        return values;
+    }();
+    return best;
+}
+bool WorldAtBest(const Config& c) {
+    for (const auto& w : kWorldSwitches) if (c.*(w.value) != w.best) return false;
+    return true;
+}
+// Pure saved-state description: stale comparison state must not obscure what
+// a test start is overriding. WorldState describes the active session instead.
+std::string SavedWorldState(const Config& c, bool values = false) {
     std::string changed;
     for (const auto& w : kWorldSwitches) if (c.*(w.value) != w.best) {
         if (!changed.empty()) changed += ", ";
@@ -3660,6 +3666,16 @@ std::string WorldState(const Config& c, bool values = false) {
         if (values) changed += c.*(w.value) ? "=1" : "=0";
     }
     return changed.empty() ? "best" : "custom: " + changed;
+}
+std::string WorldState(const Config& c, bool values = false) {
+    return g_plainGtaCompare ? "COMPARE (plain GTA)" : SavedWorldState(c, values);
+}
+#ifndef GTAXSKATE_TEST_WORLD_BASELINE
+#define GTAXSKATE_TEST_WORLD_BASELINE 0
+#endif
+constexpr bool kTestWorldBaseline = GTAXSKATE_TEST_WORLD_BASELINE != 0;
+void NormalizeTestWorldConfig(Config& c, bool enabled) {
+    if (enabled) for (const auto& w : kWorldSwitches) c.*(w.value) = w.best;
 }
 std::string WorldLabel() { return "World collision: " + WorldState(g_config); }
 
@@ -3770,7 +3786,6 @@ std::vector<menu::Page> MenuPages(Session& s) {
     }});
 
     pages.push_back({"Peds and vehicles", {
-        Flag("Nearby entities collide", "DynamicWorld", D.dynamicWorld, Bound("DynamicWorld")),
         Number("Collision radius", "DynamicRadius", D.dynamicRadius, 10, 80, 5, Fixed("%.0f m"), Bound("DynamicRadius")),
         Flag("Peds as body parts", "PedHitboxes", D.pedHitboxes, Bound("PedHitboxes")),
         Flag("Launch peds", "PedLaunch", D.pedLaunch, Bound("PedLaunch")),
@@ -3988,6 +4003,8 @@ std::vector<menu::Page> MenuPages(Session& s) {
                "Uses visible skatepark surfaces (best: on). Off: GTA collision."),
         Helped(Flag("Unmarked stairs as steps (test)", "UnflaggedStairs", D.unflaggedStairs, Bound("UnflaggedStairs", [&s] { WorldChanged(s, "UnflaggedStairs"); })),
                "Treats unmarked stairs as steps for testing (best: off)."),
+        Helped(Flag("Nearby entities collide", "DynamicWorld", D.dynamicWorld, Bound("DynamicWorld", [&s] { WorldChanged(s, "DynamicWorld"); })),
+               "Vehicles, people and props near you collide with the board (best: on)."),
         Action("Reset all settings to GTAxSkate defaults", [&s] {
             ApplyBulk("GTAxSkate", GtaxSkatePreset());
             Notify(s, "All settings reset to the GTAxSkate defaults.", 5000);
@@ -4066,7 +4083,8 @@ std::vector<menu::Page> MenuPages(Session& s) {
             // All world collision rows in one place at the top of World
             // (Manatros 2026-10-26: "idk what the settings do anymore and what
             // settings are best"); the technical ones only with DevOptions.
-            if (any({"DetailedStairs", "TrackRails", "ObjectRails", "StepRails", "UnflaggedStairs", "TubeRails", "VisualRails", "CurbBevels", "RailTops", "HighResParks"})) return "World";
+            if (std::any_of(std::begin(kWorldSwitches), std::end(kWorldSwitches),
+                            [&k](const WorldSwitch& w) { return k == w.key; })) return "World";
             if (k.empty()) for (const char* label : {"World collision:", "Compare: plain GTA", "Mark this spot", "Reset all settings"})
                 if (item.label.rfind(label, 0) == 0) return "World";
             if (any({"GpsWhileSkating", "SkateSpots"})) return "World";
@@ -4206,8 +4224,8 @@ std::vector<menu::Page> MenuPages(Session& s) {
         {"HUD", {{"On screen", {"SkateHud", "Hud", "TrickAnalyzer", "KeyboardHints"}},
                  {"Hall of Meat", {"HallOfMeat", "Show records"}}}},
         {"World", {{"World collision", {"World collision:", "Compare: plain GTA", "Mark this spot", "DetailedStairs", "StepRails", "TrackRails", "ObjectRails",
-                                        "TubeRails", "VisualRails", "RailTops", "CurbBevels", "HighResParks", "UnflaggedStairs", "Reset all settings"}},
-                   {"What the board hits", {"DynamicWorld", "VehiclePush", "ObjectPush", "VehicleDamage", "BoardScratches"}},
+                                        "TubeRails", "VisualRails", "RailTops", "CurbBevels", "HighResParks", "UnflaggedStairs", "DynamicWorld", "Reset all settings"}},
+                   {"What the board hits", {"VehiclePush", "ObjectPush", "VehicleDamage", "BoardScratches"}},
                    {"People", {"PedsSurvive", "PedLaunch", "PedBumpImpulse", "Injuries"}},
                    {"On foot", {"GtaDelegation", "SwimDepth", "BoardAim", "Stamina"}},
                    {"Build a park", {"Object dropper"}},
@@ -4303,7 +4321,8 @@ void SetWorldOption(std::uint32_t id, bool on) {
 
 template <class Set>
 void SendWorldOptions(const Config& c, Set set) {
-    for (const auto& w : kWorldSwitches) set(w.id, !g_plainGtaCompare && c.*(w.value));
+    for (const auto& w : kWorldSwitches) if (w.id != kHostOnlyWorldSwitch)
+        set(w.id, !g_plainGtaCompare && c.*(w.value));
     set(8, !g_plainGtaCompare);
 }
 
@@ -4328,7 +4347,8 @@ bool LoadRuntime(const Config& cfg, std::string& error) {
 
 DWORD WINAPI EarlyRuntime(void*) {
     if (!IsSupportedLegacy(ReadHostVersion())) return 0;
-    const Config cfg = LoadConfig();
+    Config cfg = LoadConfig();
+    NormalizeTestWorldConfig(cfg, kTestWorldBaseline);
     if (!cfg.loadRuntime) return 0;
     Log("SkateV Legacy: runtime loading early (during GTA's loading screen)");
     g_earlyLoaded = LoadRuntime(cfg, g_earlyError);
@@ -4369,6 +4389,14 @@ void ScriptMain() {
     }
 
     g_config = LoadConfig();
+    if (kTestWorldBaseline) {
+        const std::string saved = SavedWorldState(g_config, true);
+        const bool compared = g_plainGtaCompare;
+        NormalizeTestWorldConfig(g_config, true);
+        g_plainGtaCompare = false;
+        Logf("test world baseline: best at startup; saved world settings: %s; previous comparison: %s",
+             saved.c_str(), compared ? "on" : "off");
+    }
     const Config& cfg = g_config;
     util::g_verbose = cfg.verboseLog;
     std::string error;
