@@ -29,8 +29,11 @@ baked cells and 200 state-dependent live cells.
   and floor-swap safeguards. Reuse individual proven fixes; do not reset again.
 - The favourable 20 October park test used live collision, while later tests
   used archive-baked inputs. It does not establish one universally good bake.
-- The 25 October time-machine tests rejected v0.6.0, `742dfda`, `84fc009` and the
-  Gemini build; several comparisons were also confounded by plain-GTA switches.
+- Primary reassessment: the 25 October v0.6.0/`742dfda`/`84fc009` replays had
+  world corrections disabled; the assistant acknowledged the invalid comparison.
+  Their negative outcomes cannot reject the original scoped positive fixes.
+  The Gemini combined replay does not independently reject each constituent fix.
+  See MAP-HISTORY-REASSESSMENT-2026-10-28.md for original evidence and true k data.
 - Duplicate walking/vehicle collision, mixed bake generations, state-variant
   contamination, generated rail boxes and duplicated park datasets are recorded
   failed approaches. They must not be reintroduced as cleanup shortcuts.
@@ -115,6 +118,21 @@ Before any whole-map change: box bake, visible overlay, floor-hole/overlap/rail
 diff, positive controls, track coverage, deterministic rerun, segment budget
 below 52,000, then one complete verified generation. The user's gameplay test
 decides acceptance.
+
+## Connected park support & adjacent partner candidate (`0eb21e5711ea49fb`)
+
+See `docs/designs/2026-10-28-connected-park-surfaces.md` and
+`docs/designs/2026-10-29-park-partner-ownership.md` for the full design,
+Goldfish reviews, peer-review record, and progression across snapshots `v1`–`v5`:
+
+- **Mechanism**:
+  1. Small upward GTA bowl facets (`area < 0.25 m2`, `source_n.z > 0.5`, `visible_n.z > 0.5`) qualify when their connected manifold neighbourhood within the canonical `1 m` cube has clipped area `>= 0.25 m2` and minimum caliper breadth `>= 0.30 m` (`SurfaceSupport::qualifies`).
+  2. When a visible triangle's nearest GTA face is a small upward chord tilted slightly past `CURVE_FACING` by chord displacement (`dot < 0.766`), `SurfaceSupport::adjacent_partner` resolves ownership across a shared manifold edge within `MATCH` (`0.25 m`) and `d + PARTNER_SLACK` (`+0.05 m`) to a qualified upward neighbour, while keeping the displaced chord's plane deviation (`dev(i).max(dev(partner))`) and keying `deviates` by the original chord so flat neighbours are not dragged into `used`.
+- **Measured diagnostic box outcome (`0eb21e5711ea49fb` vs control `31c00a7`)**:
+  - Restores both M2 bowl transition witnesses (`M2a = 3.311486 m`, `M2b = 3.423688 m`) to exact visible heights.
+  - Closes the `0.19 m` M2 residual chord seam at `(-1379.55, -1382.95)` (`new_uncovered_cells: 7 -> 6`, all 6 remaining cells `<= 8.7 mm` from a shown triangle edge) and eliminates the `1.008 m` unwanted grind line on that residual chord (`raildiff.py` `lost = 0.0 m`, `gained: 1.4 m -> 0.4 m`; `segments.log`: `2523` total, worst 5x5 `2523 < 52000`).
+  - Preserves `current_better` (`4.629261 m` single surface) and `M4_coping` (`3.314798 m`), passes all 320 `skatev-runtime` unit tests and all 9 safeguard mutations (`mutation_checks.py`), and produces 11/11 byte-identical `.svwt` tiles on deterministic repeat bake (`partner-determinism.json`).
+  - Remains staged offline in `work/reassessment-20261028/box`; whole-map generation across all parks and user in-game testing are still required before any installation or acceptance claim.
 
 ## Shop evidence and limit
 

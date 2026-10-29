@@ -21,6 +21,9 @@ const SAMPLE: f32 = 0.10;
 const CURVE: f32 = 0.03;
 /// ... and GTA's face is a surface this large (m2), not a rail or trim.
 const SURFACE: f32 = 0.25;
+/// Minimum local breadth (m) of an additionally admitted small bowl surface.
+/// Actual coping strips reach 0.255 m; measured M2 support is 0.323/0.642 m.
+const SUPPORT_WIDTH: f32 = 0.30;
 /// A visible face of a curve lies within 40 deg of its GTA chord (a 45 deg
 /// chamfer does not; the M2 hump between the bowls does).
 const CURVE_FACING: f32 = 0.766;
@@ -188,6 +191,8 @@ fn samples(t: &[[f32; 3]; 3]) -> Vec<Vec3> {
 /// What replacing did in one area.
 #[derive(Default)]
 pub struct Replacement {
+    #[cfg(test)]
+    support_work: (usize, usize, usize), // queries, total visited, worst query
     /// GTA triangles replaced (kept as the HighResParks-off variant).
     pub removed: Vec<Tri>,
     /// Visible triangles added, then the cut GTA pieces and moved copies.
@@ -229,6 +234,200 @@ const PARTNER_SLACK: f32 = 0.05;
 /// triangle) and how far from it a GTA surface still is the same surface.
 struct Used { v: [[f32; 3]; 3], partner: usize, limit: f32 }
 
+/// Local surface support, independent of source triangulation size. Only full
+/// manifold edges connect; quantization identifies topology, never moves a face.
+/// See docs/designs/2026-10-28-connected-park-surfaces.md.
+struct SurfaceSupport {
+    faces: Vec<[Vec3; 3]>,
+    normals: Vec<Vec3>,
+    links: Vec<Vec<(usize, [Vec3; 2])>>,
+    indices: HashMap<usize, usize>,
+    seen: Vec<u32>,
+    epoch: u32,
+    stack: Vec<usize>,
+    points: Vec<Vec2>,
+    hull: Vec<Vec2>,
+    #[cfg(test)]
+    work: (usize, usize, usize),
+}
+
+impl SurfaceSupport {
+    fn new(tris: &[Tri], park: &[usize]) -> Self {
+        type Point = [i32; 3];
+        let faces: Vec<_> = park.iter().map(|&i| tris[i].v.map(v3)).collect();
+        let normals: Vec<_> = park.iter().map(|&i| normal(&tris[i].v)).collect();
+        let mut edges = std::collections::BTreeMap::<(Point, Point), Vec<(usize, [Vec3; 2])>>::new();
+        for (i, face) in faces.iter().enumerate() {
+            if normals[i] == Vec3::ZERO || !face.iter().all(|p| p.is_finite()) { continue; }
+            let q = face.map(|p| p.to_array().map(|c| (c * 1e4).round() as i32));
+            for k in 0..3 {
+                let j = (k + 1) % 3;
+                if q[k] == q[j] { continue; }
+                let key = if q[k] < q[j] { (q[k], q[j]) } else { (q[j], q[k]) };
+                edges.entry(key).or_default().push((i, [face[k], face[j]]));
+            }
+        }
+        let mut links = vec![Vec::new(); faces.len()];
+        for owners in edges.values() {
+            if let [(a, edge_a), (b, edge_b)] = owners.as_slice() {
+                if a != b {
+                    links[*a].push((*b, *edge_a));
+                    links[*b].push((*a, *edge_b));
+                }
+            }
+        }
+        Self { seen: vec![0; faces.len()], faces, normals, links,
+            indices: park.iter().enumerate().map(|(local, &global)| (global, local)).collect(),
+            epoch: 0, stack: Vec::new(), points: Vec::new(), hull: Vec::new(),
+            #[cfg(test)] work: (0, 0, 0) }
+    }
+
+    fn qualifies(&mut self, global: usize, visible_centre: Vec3) -> bool {
+        #[cfg(test)] { self.work.0 += 1; }
+        #[cfg(test)] let mut visited = 0;
+        let seed = self.indices[&global];
+        let n = self.normals[seed];
+        if n == Vec3::ZERO || !n.is_finite() { return false; }
+        let centre = crate::world::closest_on_triangle(visible_centre, &self.faces[seed]);
+        let a = n.abs();
+        let axis = if a.x <= a.y && a.x <= a.z { Vec3::X } else if a.y <= a.z { Vec3::Y } else { Vec3::Z };
+        let u = n.cross(axis).normalize();
+        let frame = [u, n.cross(u), n];
+        let local = |p: Vec3| { let d = p - centre; Vec3::new(d.dot(frame[0]), d.dot(frame[1]), d.dot(frame[2])) };
+        self.epoch = self.epoch.wrapping_add(1);
+        if self.epoch == 0 { self.seen.fill(0); self.epoch = 1; }
+        self.stack.clear();
+        self.points.clear();
+        self.hull.clear();
+        self.stack.push(seed);
+        self.seen[seed] = self.epoch;
+        let mut total = 0.0f64;
+        let half = SURFACE.sqrt();
+        while let Some(i) = self.stack.pop() {
+            #[cfg(test)] { visited += 1; self.work.1 += 1; self.work.2 = self.work.2.max(visited); }
+            let (poly, len) = clipped_support_polygon(self.faces[i].map(&local), half);
+            let area = support_polygon_area(&poly[..len]);
+            if area <= 0.0 { continue; }
+            total += area as f64;
+            self.points.extend(poly[..len].iter().map(|p| p.truncate()));
+            if total >= SURFACE as f64 && support_min_width(&mut self.points, &mut self.hull) >= SUPPORT_WIDTH { return true; }
+            for &(j, edge) in &self.links[i] {
+                // An unsuccessful edge must not prevent a later valid route.
+                if self.seen[j] == self.epoch || self.normals[j].dot(n) < CURVE_FACING
+                    || self.normals[j].dot(self.normals[i]) < CURVE_FACING
+                    || !support_edge_intersects(edge.map(&local), half) { continue; }
+                self.seen[j] = self.epoch;
+                self.stack.push(j);
+            }
+        }
+        false
+    }
+
+    fn adjacent_partner(&mut self, global: usize, d: f32, visible_centre: Vec3, visible_n: Vec3, park: &[usize]) -> Option<usize> {
+        let seed = *self.indices.get(&global)?;
+        let mut best: Option<(f32, usize)> = None;
+        for &(j, edge) in &self.links[seed] {
+            let nj = self.normals[j];
+            if nj.z <= 0.5 || visible_n.dot(nj) < CURVE_FACING { continue; }
+            let dj = crate::world::closest_on_triangle(visible_centre, &self.faces[j]).distance(visible_centre);
+            if dj > MATCH || dj > d + PARTNER_SLACK || segment_distance(visible_centre, edge) > MATCH { continue; }
+            let candidate = (dj, park[j]);
+            if best.is_none_or(|b| candidate.0.total_cmp(&b.0).then(candidate.1.cmp(&b.1)).is_lt()) {
+                best = Some(candidate);
+            }
+        }
+        let (_, partner) = best?;
+        self.qualifies(partner, visible_centre).then_some(partner)
+    }
+}
+
+fn segment_distance(p: Vec3, [a, b]: [Vec3; 2]) -> f32 {
+    let e = b - a;
+    let len2 = e.length_squared();
+    let t = if len2 > 1e-12 { ((p - a).dot(e) / len2).clamp(0.0, 1.0) } else { 0.0 };
+    (a + e * t).distance(p)
+}
+
+fn support_edge_intersects([a, b]: [Vec3; 2], half: f32) -> bool {
+    let d = b - a;
+    let (mut lo, mut hi) = (0.0f32, 1.0f32);
+    for k in 0..3 {
+        if d[k].abs() < 1e-12 {
+            if a[k].abs() > half { return false; }
+        } else {
+            let (s, t) = ((-half - a[k]) / d[k], (half - a[k]) / d[k]);
+            lo = lo.max(s.min(t)); hi = hi.min(s.max(t));
+            if lo > hi { return false; }
+        }
+    }
+    true
+}
+
+fn clipped_support_polygon(face: [Vec3; 3], half: f32) -> ([Vec3; 12], usize) {
+    // A triangle clipped by six planes has at most nine corners.
+    let mut poly = [Vec3::ZERO; 12];
+    poly[..3].copy_from_slice(&face);
+    let mut len = 3;
+    for k in 0..3 {
+        for sign in [-1.0f32, 1.0] {
+            if len < 3 { return (poly, 0); }
+            let mut next = [Vec3::ZERO; 12];
+            let mut count = 0;
+            for j in 0..len {
+                let (a, b) = (poly[j], poly[(j + 1) % len]);
+                let (fa, fb) = (half - sign * a[k], half - sign * b[k]);
+                if fa >= 0.0 { next[count] = a; count += 1; }
+                if (fa >= 0.0) != (fb >= 0.0) {
+                    next[count] = a + (b - a) * (fa / (fa - fb)); count += 1;
+                }
+            }
+            poly = next; len = count;
+        }
+    }
+    (poly, len)
+}
+
+fn support_polygon_area(poly: &[Vec3]) -> f32 {
+    (1..poly.len().saturating_sub(1)).map(|i| (poly[i] - poly[0]).cross(poly[i + 1] - poly[0]).length() * 0.5).sum()
+}
+
+#[cfg(test)]
+fn clipped_support_area(face: [Vec3; 3], half: f32) -> f32 {
+    let (poly, len) = clipped_support_polygon(face, half);
+    support_polygon_area(&poly[..len])
+}
+
+/// Minimum caliper width of the projected clipped support. Area alone admits
+/// long coping strips, especially along the cube's diagonal.
+fn support_min_width(points: &mut Vec<Vec2>, hull: &mut Vec<Vec2>) -> f32 {
+    points.sort_unstable_by(|a,b| a.x.total_cmp(&b.x).then(a.y.total_cmp(&b.y)));
+    points.dedup();
+    hull.clear();
+    if points.len() < 3 { return 0.0; }
+    let cross = |a: Vec2,b: Vec2,c: Vec2| (b-a).perp_dot(c-a);
+    for &p in points.iter() {
+        while hull.len() >= 2 && cross(hull[hull.len()-2],hull[hull.len()-1],p) <= 0.0 { hull.pop(); }
+        hull.push(p);
+    }
+    let lower = hull.len();
+    for &p in points.iter().rev().skip(1) {
+        while hull.len() > lower && cross(hull[hull.len()-2],hull[hull.len()-1],p) <= 0.0 { hull.pop(); }
+        hull.push(p);
+    }
+    hull.pop(); // repeated first point
+    if hull.len() < 3 { return 0.0; }
+    let mut width = f32::MAX;
+    for i in 0..hull.len() {
+        let e = hull[(i+1)%hull.len()] - hull[i];
+        if e.length_squared() == 0.0 { continue; }
+        let axis = Vec2::new(-e.y,e.x).normalize();
+        let (mut lo, mut hi) = (f32::MAX,f32::MIN);
+        for &p in hull.iter() { let d = p.dot(axis); lo = lo.min(d); hi = hi.max(d); }
+        width = width.min(hi-lo);
+    }
+    if width == f32::MAX { 0.0 } else { width }
+}
+
 fn replace_park(tris: &mut Vec<Tri>, stairs: &[Tri], visible: &[[[f32; 3]; 3]], centre: Vec2, radius: f32, id: &'static str, out: &mut Replacement) {
     let inside = |t: &[[f32; 3]; 3]| centroid(t).truncate().distance(centre) <= radius;
     let park: Vec<usize> = (0..tris.len()).filter(|&i| inside(&tris[i].v)).collect();
@@ -251,21 +450,40 @@ fn replace_park(tris: &mut Vec<Tri>, stairs: &[Tri], visible: &[[[f32; 3]; 3]], 
     // Candidates: near a GTA park surface facing nearly the same way (40
     // deg: a curve's facets do, a ledge's 45 deg chamfer does not), clear of
     // stairs, not facing down.
-    let candidates: Vec<Used> = near.iter().filter_map(|t| {
+    let mut support = None;
+    let candidates: Vec<(Used, usize)> = near.iter().filter_map(|t| {
         let c = centroid(t);
         let (d, i) = nearest_gta(c)?;
-        let partner = normal(&tris[i].v);
-        if d > MATCH || normal(t).dot(partner) < CURVE_FACING || normal(t).z < -0.2 { return None; }
+        let partner_n = normal(&tris[i].v);
+        if d > MATCH || normal(t).z < -0.2 { return None; }
+        if normal(t).dot(partner_n) < CURVE_FACING {
+            let gta = tris[i].v.map(v3);
+            let area = (gta[1] - gta[0]).cross(gta[2] - gta[0]).length() / 2.0;
+            if area >= SURFACE || partner_n.z <= 0.5 || normal(t).z <= 0.5 { return None; }
+        }
         let by_stairs = samples(t).into_iter()
             .any(|p| stair_grid.at(p).iter().any(|&k| distance(p, &stairs[k as usize].v) <= MATCH));
         if by_stairs { return None; }
+        let partner = if normal(t).dot(partner_n) >= CURVE_FACING {
+            i
+        } else {
+            support.get_or_insert_with(|| SurfaceSupport::new(tris, &park))
+                .adjacent_partner(i, d, c, normal(t), &park)?
+        };
         // How far this visible triangle lies from its own GTA surface: only
         // GTA surfaces that close (plus PARTNER_SLACK) are the same surface.
         // A ground 20 cm under a visible ledge top is not (its partner is
-        // the GTA ledge top a few centimetres off).
-        let a = v3(tris[i].v[0]);
-        let deviation = t.iter().map(|&p| (v3(p) - a).dot(partner).abs()).fold(0.0f32, f32::max);
-        Some(Used { v: **t, partner: i, limit: (deviation + PARTNER_SLACK).min(MATCH) })
+        // the GTA ledge top a few centimetres off). When `partner` was
+        // transferred across a shared edge from a tilted small chord `i`, use
+        // the larger of the two plane deviations so the displaced chord still
+        // qualifies as a curve and is cut by the visible surface.
+        let dev = |k: usize| {
+            let a = v3(tris[k].v[0]);
+            let n = normal(&tris[k].v);
+            t.iter().map(|&p| (v3(p) - a).dot(n).abs()).fold(0.0f32, f32::max)
+        };
+        let deviation = dev(i).max(dev(partner));
+        Some((Used { v: **t, partner, limit: (deviation + PARTNER_SLACK).min(MATCH) }, i))
     }).collect();
     // GTA's collision is the base (Manatros 2026-10-26 19:03 recording:
     // "plain GTA collision is a solid basis that just needs fine-tuning like
@@ -275,20 +493,31 @@ fn replace_park(tris: &mut Vec<Tri>, stairs: &[Tri], visible: &[[[f32; 3]; 3]], 
     // railings stay GTA's (their visible copies cut GTA's into dense
     // fragments, marks 5, 7, 8).
     let mut deviates: HashMap<usize, f32> = HashMap::default();
-    for u in &candidates {
-        let e = deviates.entry(u.partner).or_insert(0.0);
+    for &(ref u, chord) in &candidates {
+        let e = deviates.entry(chord).or_insert(0.0);
         *e = e.max(u.limit - PARTNER_SLACK);
     }
-    let used: Vec<Used> = candidates.into_iter().filter(|u| {
-        let gta = tris[u.partner].v.map(v3);
-        let area = (gta[1] - gta[0]).cross(gta[2] - gta[0]).length() / 2.0;
-        area >= SURFACE && deviates.get(&u.partner).is_some_and(|&d| d >= CURVE)
-    }).map(|u| {
+    let used: Vec<Used> = candidates.into_iter().filter_map(|(u, chord)| {
+        let d = deviates[&chord].max(deviates.get(&u.partner).copied().unwrap_or(0.0));
+        if d < CURVE { return None; }
+        // Rescue upward bowl facets only. Admitting small sidewall details
+        // exposes old cut/snap remnants as sloping phantom surfaces (native
+        // witnesses in the design); their boundary ownership needs its own fix.
+        if u.partner == chord {
+            let gta = tris[u.partner].v.map(v3);
+            let area = (gta[1] - gta[0]).cross(gta[2] - gta[0]).length() / 2.0;
+            if area < SURFACE && !(normal(&tris[u.partner].v).z > 0.5 && normal(&u.v).z > 0.5
+                && support.get_or_insert_with(|| SurfaceSupport::new(tris, &park))
+                    .qualifies(u.partner, centroid(&u.v))) {
+                return None;
+            }
+        }
         // The whole face's deviation is the limit: the parts of the chord
         // close to the curve go with it.
-        let d = deviates[&u.partner];
-        Used { limit: (d + PARTNER_SLACK).min(MATCH), ..u }
+        Some(Used { limit: (d + PARTNER_SLACK).min(MATCH), ..u })
     }).collect();
+    #[cfg(test)]
+    if let Some(support) = &support { out.support_work = support.work; }
     if used.is_empty() { return; }
     let vis_grid = Grid::new(used.iter().map(|u| &u.v), MATCH);
     // 1.2/1.4: GTA triangles near a used visible one facing the same way are
@@ -559,6 +788,345 @@ mod tests {
             }
         }
         hits
+    }
+
+    #[test]
+    fn support_hull_measures_breadth_without_counting_duplicates_or_collinear_points() {
+        let mut hull = Vec::new();
+        for mut points in [vec![],vec![Vec2::ZERO],vec![Vec2::ZERO,Vec2::X,Vec2::X*2.,Vec2::X]] {
+            assert_eq!(support_min_width(&mut points, &mut hull),0.0);
+        }
+        for angle in [0.0f32,0.37,std::f32::consts::FRAC_PI_4,1.2] {
+            let rotate = |p: Vec2| Vec2::new(p.x*angle.cos()-p.y*angle.sin(),p.x*angle.sin()+p.y*angle.cos());
+            let mut points = vec![Vec2::new(-2.,-0.1),Vec2::new(2.,-0.1),Vec2::new(2.,0.1),Vec2::new(-2.,0.1),Vec2::ZERO].into_iter().map(rotate).collect::<Vec<_>>();
+            points.push(points[0]);
+            assert!((support_min_width(&mut points,&mut hull)-0.2).abs()<1e-5);
+            points.extend([rotate(Vec2::new(-1.,-0.4)),rotate(Vec2::new(1.,0.4))]);
+            assert!(support_min_width(&mut points,&mut hull)>SUPPORT_WIDTH, "later support adds breadth");
+        }
+    }
+
+    #[test]
+    fn connected_support_can_reach_a_broad_patch_after_a_narrow_neck() {
+        let xs=[-1.0f32,-0.3,0.0,0.45,1.0];
+        let ys=[-0.4f32,-0.12,0.12,0.4];
+        let mut faces=Vec::new();
+        let s=std::f32::consts::FRAC_1_SQRT_2;
+        for x in 0..4 { for y in 0..3 {
+            if y!=1 && x!=3 { continue; }
+            for t in square(xs[x],xs[x+1],ys[y],ys[y+1],0.) {
+                faces.push(Tri { v: t.map(|[x,y,z]| [s*(x-y),s*(x+y),z]), material: 1 });
+            }
+        }}
+        let park:Vec<_>=(0..faces.len()).collect();
+        let seed=faces.iter().position(|t| distance(Vec3::ZERO,&t.v)<1e-6).unwrap();
+        for reverse in [false,true] {
+            let mut support=SurfaceSupport::new(&faces,&park);
+            if reverse { for links in &mut support.links { links.reverse(); } }
+            assert!(support.qualifies(seed,Vec3::ZERO), "reverse={reverse}");
+        }
+    }
+
+    #[test]
+    fn local_support_uses_clipped_area_and_survives_subdivision_and_rotation() {
+        for n in [1, 4, 20] {
+            for angle in [0.0f32, 0.37, std::f32::consts::FRAC_PI_4, 1.2] {
+                for (width, expected) in [(2.0, true), (0.05, false), (0.2, false), (0.29, false), (0.35, true)] {
+                    let mut faces = Vec::new();
+                    for k in 0..n {
+                        let x0 = -10.0 + 20.0 * k as f32 / n as f32;
+                        let x1 = -10.0 + 20.0 * (k + 1) as f32 / n as f32;
+                        for t in square(x0, x1, -width / 2.0, width / 2.0, 0.0) {
+                            faces.push(Tri { v: t.map(|[x,y,z]| [x * angle.cos() - y * angle.sin(), x * angle.sin() + y * angle.cos(), z]), material: 1 });
+                        }
+                    }
+                    let park: Vec<_> = (0..faces.len()).collect();
+                    let seed = faces.iter().position(|t| distance(Vec3::ZERO, &t.v) < 1e-5).unwrap();
+                    let mut support = SurfaceSupport::new(&faces, &park);
+                    assert_eq!(support.qualifies(seed, Vec3::ZERO), expected, "n={n} angle={angle} width={width}");
+                    assert_eq!(support.qualifies(seed, Vec3::ZERO), expected, "repeat");
+                    faces.reverse();
+                    let seed = faces.iter().position(|t| distance(Vec3::ZERO, &t.v) < 1e-5).unwrap();
+                    assert_eq!(SurfaceSupport::new(&faces, &park).qualifies(seed, Vec3::ZERO), expected, "reverse");
+                }
+            }
+        }
+        // A very large face contributes only its clipped square, not its full area.
+        let t = [Vec3::new(-10.,-10.,0.),Vec3::new(10.,-10.,0.),Vec3::new(0.,10.,0.)];
+        assert!((clipped_support_area(t, 0.5) - 1.0).abs() < 1e-6);
+        assert!(!support_edge_intersects([Vec3::new(2.,-1.,0.),Vec3::new(2.,1.,0.)], 0.5));
+        assert!(support_edge_intersects([Vec3::new(-2.,0.,0.),Vec3::new(2.,0.,0.)], 0.5));
+    }
+
+    #[test]
+    fn support_cannot_wrap_a_thin_tube() {
+        for radius in [0.025, 0.05, 0.18] {
+          for sides in [8, 32, 128] {
+            let mut faces = Vec::new();
+            for k in 0..sides {
+                let p = |j: usize, y: f32| {
+                    let angle = std::f32::consts::TAU * (j % sides) as f32 / sides as f32;
+                    [radius * angle.cos(), y, radius * angle.sin()]
+                };
+                for v in [[p(k,-10.),p(k,10.),p(k+1,10.)],[p(k,-10.),p(k+1,10.),p(k+1,-10.)]] {
+                    faces.push(Tri { v, material: 1 });
+                }
+            }
+            let park: Vec<_> = (0..faces.len()).collect();
+            assert!(!SurfaceSupport::new(&faces, &park).qualifies(0, Vec3::new(radius,0.,0.)), "radius={radius} sides={sides}");
+          }
+        }
+    }
+
+    #[test]
+    fn disconnected_corner_nonmanifold_and_external_edges_do_not_donate_support() {
+        let seed = Tri { v: [[0.,0.,0.],[0.1,0.,0.],[0.,0.1,0.]], material: 1 };
+        for other in [
+            // Nearby disconnected sheet; corner contact; a shared edge outside cube.
+            [[-1.,-1.,0.01],[1.,-1.,0.01],[0.,1.,0.01]],
+            [[0.,0.,0.],[-1.,0.,0.],[0.,-1.,0.]],
+        ] {
+            let faces = vec![seed, Tri { v: other, material: 2 }];
+            assert!(!SurfaceSupport::new(&faces, &[0,1]).qualifies(0, Vec3::ZERO));
+        }
+        let broad = Tri { v: [[0.1,0.,0.],[0.,0.,0.],[0.,-10.,0.]], material: 2 };
+        let faces = vec![seed, broad, broad];
+        assert!(!SurfaceSupport::new(&faces, &[0,1,2]).qualifies(0, Vec3::ZERO), "three edge owners");
+        let a = Tri { v: [[2.,-1.,0.],[2.,1.,0.],[-0.1,0.,0.]], material: 1 };
+        let b = Tri { v: [[2.,-1.,0.],[2.,1.,0.],[-10.,0.,0.]], material: 2 };
+        let faces = vec![a,b];
+        assert!(normal(&a.v).dot(normal(&b.v)) > 0.99);
+        assert!(clipped_support_area(a.v.map(v3), 0.5) + clipped_support_area(b.v.map(v3), 0.5) > SURFACE);
+        assert!(!SurfaceSupport::new(&faces, &[0,1]).qualifies(0, Vec3::ZERO), "edge outside cube");
+    }
+
+    #[test]
+    #[ignore = "local reconstructed park fixture and verified visible sidecar required"]
+    fn reconstructed_park_support_work() {
+        let path = std::env::var("SKATEV_SUPPORT_FIXTURE").expect("fixture path");
+        let bytes = std::fs::read(path).unwrap();
+        let input: Vec<Tri> = bytes.chunks_exact(36).map(|raw| {
+            let f = |i: usize| f32::from_le_bytes(raw[4*i..4*i+4].try_into().unwrap());
+            Tri { v: [[f(0),f(1),f(2)],[f(3),f(4),f(5)],[f(6),f(7),f(8)]], material: 1 }
+        }).collect();
+        let visible = decode(&std::fs::read(std::env::var("SKATEV_SUPPORT_VISIBLE").expect("sidecar path")).unwrap()).unwrap();
+        let visible = &visible.iter().find(|(id,_)| id == "vespucci").unwrap().1;
+        for _ in 0..3 {
+            let mut gta = input.clone();
+            let start = std::time::Instant::now();
+            let out = run(&mut gta, &[], visible);
+            eprintln!("reconstructed park: input={} removed={} added={} support queries/visited/worst={:?} elapsed={:?}", input.len(), out.removed.len(), out.added.len(), out.support_work, start.elapsed());
+            if let Ok(path) = std::env::var("SKATEV_SUPPORT_OUTPUT") {
+                let parents: HashMap<_, _> = input.iter().map(|t| (svwc::surfaces::key(&t.v), t.v)).collect();
+                let mut bytes = Vec::new();
+                for ((t, &key), &cut) in out.added.iter().zip(&out.surface_from).zip(&out.cut) {
+                    bytes.push(u8::from(cut));
+                    for v in t.v.into_iter().chain(parents[&key]).flatten() { bytes.extend(v.to_le_bytes()); }
+                }
+                std::fs::write(path, bytes).unwrap();
+            }
+            assert!(out.support_work.0 > 0);
+        }
+    }
+
+    #[test]
+    fn small_sidewall_support_does_not_admit_vertical_visible_details() {
+        for nz in [0.0f32, 0.25, 0.75, 1.0] {
+            let nx = (1.0 - nz * nz).sqrt();
+            let p = |[x,y,z]: [f32;3]| [-1355.0 + nz*x + nx*z, -1396.0 + y, 2.0 - nx*x + nz*z];
+            let mut gta = Vec::new();
+            for x in 0..10 {
+                for y in 0..10 {
+                    for t in square(x as f32*0.2,(x+1) as f32*0.2,y as f32*0.2,(y+1) as f32*0.2,0.) {
+                        gta.push(Tri { v: t.map(p), material: 1 });
+                    }
+                }
+            }
+            let original = gta.clone();
+            let visible: Vec<_> = square(0.,2.,0.,2.,0.05).into_iter().map(|t| t.map(p)).collect();
+            let out = run(&mut gta, &[], &visible);
+            if nz <= 0.5 {
+                assert!(out.added.is_empty(), "small sidewall nz={nz} must keep GTA ownership");
+                assert_eq!(gta.iter().map(|t| t.v).collect::<Vec<_>>(), original.iter().map(|t| t.v).collect::<Vec<_>>());
+                let mut large: Vec<Tri> = square(0.,2.,0.,2.,0.).into_iter().map(|t| Tri { v: t.map(p), material: 1 }).collect();
+                assert!(!run(&mut large, &[], &visible).added.is_empty(), "legacy large sidewall nz={nz} stays eligible");
+            } else {
+                assert!(!out.added.is_empty(), "upward bank nz={nz} must be eligible");
+            }
+        }
+    }
+
+    #[test]
+    fn small_upward_rescue_requires_both_source_and_visible_to_face_up() {
+        for (source_z, visible_z) in [(0.25f32,0.75f32),(0.75,0.25)] {
+            let source_x = (1.0 - source_z*source_z).sqrt();
+            let visible_x = (1.0 - visible_z*visible_z).sqrt();
+            let source_n = Vec3::new(source_x,0.,source_z);
+            let source_u = Vec3::new(source_z,0.,-source_x);
+            let visible_u = Vec3::new(visible_z,0.,-visible_x);
+            let centre = Vec3::new(-1355.,-1396.,2.);
+            let p = |x: f32,y: f32| (centre + source_u*x + Vec3::Y*y).to_array();
+            let mut gta = Vec::new();
+            for x in 0..10 { for y in 0..10 {
+                for t in square(-1.+x as f32*0.2,-1.+(x+1) as f32*0.2,-1.+y as f32*0.2,-1.+(y+1) as f32*0.2,0.) {
+                    gta.push(Tri { v: t.map(|[x,y,_]| p(x,y)), material: 1 });
+                }
+            }}
+            let original = gta.iter().map(|t| t.v).collect::<Vec<_>>();
+            let visible: Vec<_> = square(-1.,1.,-1.,1.,0.).into_iter().map(|t| t.map(|[x,y,_]| (centre + visible_u*x + Vec3::Y*y + source_n*0.05).to_array())).collect();
+            let out = run(&mut gta, &[], &visible);
+            assert!(out.added.is_empty(), "source z={source_z}, visible z={visible_z}");
+            assert_eq!(gta.iter().map(|t| t.v).collect::<Vec<_>>(), original);
+        }
+    }
+
+    #[test]
+    fn small_connected_wall_facets_still_receive_the_visible_curve() {
+        let (_, visible) = wall();
+        let mut gta = Vec::new();
+        // Each source facet is 0.186 m2, on the original broad chord.
+        for k in 0..6 {
+            let y0 = -1396.0 + 2.0 * k as f32 / 6.0;
+            let y1 = -1396.0 + 2.0 * (k + 1) as f32 / 6.0;
+            for v in [
+                [[-1355.,y0,0.],[-1354.,y0,0.5],[-1354.,y1,0.5]],
+                [[-1355.,y0,0.],[-1354.,y1,0.5],[-1355.,y1,0.]],
+            ] { gta.push(Tri { v, material: 1 }); }
+        }
+        assert!(gta.iter().all(|t| area(&t.v) < SURFACE));
+        let out = run(&mut gta, &[], &visible);
+        assert_eq!(out.removed.len(), 12);
+        assert_eq!(out.cut.iter().filter(|&&c| !c).count(), visible.len());
+        assert_eq!(layered(&gta, &out.added, &out.cut), 0);
+    }
+
+    #[test]
+    fn adjacent_upward_partner_rescues_chord_seam_and_keeps_flat_neighbour_untouched() {
+        let (x0, y0) = (-1379.3f32, -1383.9f32);
+        // Closer small GTA chord i (material 1): outer corner at x0-0.28 raised by 0.21 m,
+        // tilting its normal >40 deg away from the visible bank (dot < CURVE_FACING).
+        let chord = Tri {
+            v: [[x0 - 0.28, y0 + 1.1, 3.61], [x0, y0, 3.40], [x0, y0 + 1.1, 3.50]],
+            material: 1,
+        };
+        // Shared-edge compatible bank j (material 7) and its connected broad support (material 7).
+        let bank = Tri {
+            v: [[x0 + 0.26, y0, 3.50], [x0, y0 + 1.1, 3.50], [x0, y0, 3.40]],
+            material: 7,
+        };
+        let bank_pair = Tri {
+            v: [[x0 + 0.26, y0, 3.50], [x0 + 0.26, y0 + 1.1, 3.55], [x0, y0 + 1.1, 3.50]],
+            material: 7,
+        };
+        let support_ext = Tri {
+            v: [[x0 + 0.26, y0, 3.50], [x0 + 0.70, y0 + 0.55, 3.52], [x0 + 0.26, y0 + 1.1, 3.55]],
+            material: 7,
+        };
+        let vis_seam = [[x0, y0 + 1.1, 3.50], [x0 - 0.28, y0 + 1.1, 3.40], [x0, y0, 3.40]];
+        // Flat visible triangle over `bank` (within 1 mm): must NOT be dragged into `used`.
+        let vis_flat = [[x0, y0, 3.4005], [x0 + 0.26, y0, 3.5005], [x0, y0 + 1.1, 3.5005]];
+        assert!(area(&chord.v) < SURFACE && area(&bank.v) < SURFACE);
+        assert!(normal(&vis_seam).dot(normal(&chord.v)) < CURVE_FACING);
+        assert!(normal(&vis_seam).dot(normal(&bank.v)) >= CURVE_FACING);
+        let bank_key = svwc::surfaces::key(&bank.v);
+        for reverse in [false, true] {
+            let mut gta = vec![chord, bank, bank_pair, support_ext];
+            if reverse { gta.reverse(); }
+            let out = run(&mut gta, &[], &[vis_seam, vis_flat]);
+            let added_vis: Vec<_> = out.added.iter().zip(&out.cut).zip(&out.surface_from)
+                .filter(|((_, c), _)| !**c).collect();
+            assert_eq!(added_vis.len(), 1, "only the displaced seam triangle is admitted (reverse={reverse})");
+            assert_eq!(added_vis[0].0.0.v, vis_seam);
+            assert_eq!(added_vis[0].0.0.material, 7, "inherits adjacent bank material");
+            assert_eq!(*added_vis[0].1, bank_key, "inherits adjacent bank surface key");
+            assert_eq!(layered(&gta, &out.added, &out.cut), 0);
+        }
+    }
+
+    #[test]
+    fn adjacent_partner_rejects_disconnected_nonmanifold_steep_large_and_distant_neighbours() {
+        let (x0, y0) = (-1379.3f32, -1383.9f32);
+        let chord = Tri {
+            v: [[x0 - 0.28, y0 + 1.1, 3.61], [x0, y0, 3.40], [x0, y0 + 1.1, 3.50]],
+            material: 1,
+        };
+        let bank = Tri {
+            v: [[x0 + 0.26, y0, 3.50], [x0, y0 + 1.1, 3.50], [x0, y0, 3.40]],
+            material: 7,
+        };
+        let bank_pair = Tri {
+            v: [[x0 + 0.26, y0, 3.50], [x0 + 0.26, y0 + 1.1, 3.55], [x0, y0 + 1.1, 3.50]],
+            material: 7,
+        };
+        let support_ext = Tri {
+            v: [[x0 + 0.26, y0, 3.50], [x0 + 0.70, y0 + 0.55, 3.52], [x0 + 0.26, y0 + 1.1, 3.55]],
+            material: 7,
+        };
+        let vis_seam = [[x0, y0 + 1.1, 3.50], [x0 - 0.28, y0 + 1.1, 3.40], [x0, y0, 3.40]];
+        // 1. Disconnected compatible layer (shifted 1 mm in X so no manifold edge is shared).
+        let shift = |t: Tri, dx: f32| Tri { v: t.v.map(|[x, y, z]| [x + dx, y, z]), ..t };
+        let mut disconnected = vec![chord, shift(bank, 0.001), shift(bank_pair, 0.001), shift(support_ext, 0.001)];
+        assert!(run(&mut disconnected, &[], &[vis_seam]).added.is_empty(), "disconnected layer");
+        // 2. Corner-only contact (1 shared vertex at [x0, y0, 3.40]).
+        let corner_only = Tri {
+            v: [[x0 + 0.26, y0, 3.50], [x0 + 0.01, y0 + 1.1, 3.50], [x0, y0, 3.40]],
+            material: 7,
+        };
+        let mut corner_gta = vec![chord, corner_only, bank_pair, support_ext];
+        assert!(run(&mut corner_gta, &[], &[vis_seam]).added.is_empty(), "corner contact");
+        // 3. Non-manifold shared edge (3 incident faces on the shared edge).
+        let mut nonmanifold = vec![chord, bank, bank, bank_pair, support_ext];
+        assert!(run(&mut nonmanifold, &[], &[vis_seam]).added.is_empty(), "non-manifold edge");
+        // 4. Steep/vertical nearest source (normal.z <= 0.5).
+        let steep_chord = Tri {
+            v: [[x0 - 0.05, y0 + 1.1, 3.90], [x0, y0, 3.40], [x0, y0 + 1.1, 3.50]],
+            material: 1,
+        };
+        assert!(normal(&steep_chord.v).z <= 0.5);
+        let mut steep_gta = vec![steep_chord, bank, bank_pair, support_ext];
+        assert!(run(&mut steep_gta, &[], &[vis_seam]).added.is_empty(), "steep nearest source");
+        // 5. Large nearest source (area >= SURFACE = 0.25 m2).
+        let large_chord = Tri {
+            v: [[x0 - 0.60, y0 + 1.1, 3.85], [x0, y0, 3.40], [x0, y0 + 1.1, 3.50]],
+            material: 1,
+        };
+        assert!(area(&large_chord.v) >= SURFACE && normal(&large_chord.v).z > 0.5);
+        let mut large_gta = vec![large_chord, bank, bank_pair, support_ext];
+        assert!(run(&mut large_gta, &[], &[vis_seam]).added.is_empty(), "large nearest source");
+        // 6. Neighbour distance > nearest + PARTNER_SLACK (0.05 m).
+        let vis_close_to_chord = [[x0 - 0.02, y0 + 1.0, 3.51], [x0 - 0.26, y0 + 1.05, 3.42], [x0 - 0.08, y0 + 0.2, 3.42]];
+        let d_chord = distance(centroid(&vis_close_to_chord), &chord.v);
+        let d_bank = distance(centroid(&vis_close_to_chord), &bank.v);
+        assert!(d_bank > d_chord + PARTNER_SLACK && d_bank <= MATCH);
+        let mut slack_gta = vec![chord, bank, bank_pair, support_ext];
+        assert!(run(&mut slack_gta, &[], &[vis_close_to_chord]).added.is_empty(), "exceeds partner slack");
+        // 7. Nearest compatible neighbour lacks support breadth (<0.30 m): must not skip to a farther neighbour.
+        let mut narrow_gta = vec![chord, bank];
+        assert!(run(&mut narrow_gta, &[], &[vis_seam]).added.is_empty(), "insufficient neighbour support");
+        // 8. Direct unit checks for `adjacent_partner` distance bounds (`dj > MATCH` and `segment_distance > MATCH`).
+        let park: Vec<usize> = (0..4).collect();
+        let gta = vec![chord, bank, bank_pair, support_ext];
+        let mut sup = SurfaceSupport::new(&gta, &park);
+        let c = centroid(&vis_seam);
+        let vn = normal(&vis_seam);
+        assert_eq!(sup.adjacent_partner(0, distance(c, &chord.v), c, vn, &park), Some(1));
+        let wrap_bank = Tri {
+            v: [[x0 - 0.50, y0 + 0.55, 3.30], [x0, y0, 3.40], [x0, y0 + 1.1, 3.50]],
+            material: 7,
+        };
+        let wrap_ext = Tri {
+            v: [[x0 - 0.50, y0 + 0.55, 3.30], [x0 - 0.80, y0, 3.30], [x0, y0, 3.40]],
+            material: 7,
+        };
+        let mut wrap_sup = SurfaceSupport::new(&vec![chord, wrap_bank, wrap_ext], &[0, 1, 2]);
+        let far_edge_c = Vec3::new(x0 - 0.35, y0 + 0.55, 3.45);
+        assert!(wrap_sup.qualifies(1, far_edge_c));
+        assert!(distance(far_edge_c, &wrap_bank.v) <= 0.24 && distance(far_edge_c, &wrap_bank.v) <= MATCH);
+        assert!(segment_distance(far_edge_c, [Vec3::new(x0, y0, 3.40), Vec3::new(x0, y0 + 1.1, 3.50)]) > MATCH);
+        assert_eq!(wrap_sup.adjacent_partner(0, 0.24, far_edge_c, vn, &[0, 1, 2]), None, "shared edge outside MATCH");
+        let far_face_c = Vec3::new(x0, y0 - 0.30, 3.40);
+        assert!(distance(far_face_c, &bank.v) > MATCH);
+        assert_eq!(sup.adjacent_partner(0, 0.24, far_face_c, vn, &park), None, "neighbour outside MATCH");
     }
 
     #[test]
