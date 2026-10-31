@@ -965,8 +965,8 @@ fn bake(
     for p in used {
         sources.insert(p.display().to_string(), hash(prop_models[&p].as_deref().unwrap()));
     }
-    eprintln!("Authored prop collision: {} exterior + {} interior static placements; {prop_triangles} invariant triangles; {} object-pool placements left live; {} door leaves retained by dynamic collision",
-        prop_stats.placed, prop_stats.mlo_furniture, prop_stats.live_owned, prop_stats.dynamic_doors);
+    eprintln!("Authored prop collision: {} exterior + {} interior static placements; {prop_triangles} invariant triangles; {} object-pool placements left live; {} with embedded collision disabled; {} door leaves retained by dynamic collision",
+        prop_stats.placed, prop_stats.mlo_furniture, prop_stats.live_owned, prop_stats.no_collision, prop_stats.dynamic_doors);
     drop(prop_library);
     for p in vfs::files_under(meta, "ymf").unwrap_or_default() {
         sources.insert(p.display().to_string(), hash(&vfs::read(&p)?));

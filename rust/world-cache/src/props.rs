@@ -29,6 +29,8 @@ pub struct Stats {
     pub dynamic_doors: usize,
     /// Static-only placements left to the live path (object-pool archetypes).
     pub live_owned: usize,
+    /// Placements whose entity disables its embedded collision (flag 0x4).
+    pub no_collision: usize,
     pub instances: Vec<BakedInstance>,
     /// Owned model-space geometry keyed by GTA archetype/model identity.
     pub templates: BTreeMap<u32, Vec<Triangle>>,
@@ -200,6 +202,10 @@ impl Library {
     /// baked: named entity sets can be toggled by scripts at any time.
     pub fn require_static_placements(&mut self) { self.static_only = true; }
 
+    /// CEntityDef flag 0x4, "Disable embedded collisions" (CodeWalker.exe entity
+    /// flag list): GTA gives such a placement no collision, so neither do we.
+    const NO_EMBEDDED_COLLISION: u32 = 0x4;
+
     /// Whether the static-only bake leaves this placement to the live path.
     fn live_owned(&self, e: &YmapEntity) -> bool {
         self.static_only && self.object_archetypes.contains(&e.archetype_hash)
@@ -209,6 +215,10 @@ impl Library {
     fn drawable_for(&self, e: &YmapEntity, entity_door: bool, stats: &mut Stats) -> Option<(f32, PathBuf)> {
         if entity_door || self.door_archetypes.contains(&e.archetype_hash) {
             stats.dynamic_doors += 1;
+            return None;
+        }
+        if e.flags & Self::NO_EMBEDDED_COLLISION != 0 {
+            stats.no_collision += 1;
             return None;
         }
         if self.live_owned(e) {
@@ -634,7 +644,7 @@ mod tests {
         use rage_formats::resource::build_rsc7;
         let put32=|b:&mut [u8],o:usize,v:u32| b[o..o+4].copy_from_slice(&v.to_le_bytes());
         let model=rage_joaat("fixture_door");
-        for (flags,live) in [(0x2000_0020u32,false),(0x2002_0000,true)] {
+        for (flags,live,entity_flags) in [(0x2000_0020u32,false,0u32),(0x2002_0000,true,0),(0x2000_0020,true,4)] {
             let dir=std::env::temp_dir().join(format!("skatev-static-fixture-{}-{flags:x}",std::process::id()));
             let base=dir.join("base");std::fs::create_dir_all(&base).unwrap();
             let mut ytyp=interiors::doors::tests::fixture();
@@ -647,12 +657,16 @@ mod tests {
             put64_test(&mut ymap,0x160,2);ymap[0x168]=2;
             put32(&mut ymap,0x84,16);put64_test(&mut ymap,0x180,3);put64_test(&mut ymap,0x188,(128<<12)|3);
             put32(&mut ymap,0x208,model);put32(&mut ymap,0x288,model);
+            put32(&mut ymap,0x28c,entity_flags); // the non-door entity's CEntityDef flags
             let mut lib=Library::load(&dir);
             lib.require_static_placements();
             let mut stats=Stats::default();
             let placed=lib.static_placements(&build_rsc7(2,&ymap,&[]),&base.join("fixture.ymap"),&mut stats);
             assert_eq!(stats.dynamic_doors,1,"the linked door stays dynamic first");
-            if live {
+            if entity_flags & 4 != 0 {
+                assert!(placed.is_empty());
+                assert_eq!(stats.no_collision,1,"GTA disables this placement's embedded collision");
+            } else if live {
                 assert!(placed.is_empty());
                 assert_eq!(stats.live_owned,1,"bench-like archetype left to the live path");
             } else {
