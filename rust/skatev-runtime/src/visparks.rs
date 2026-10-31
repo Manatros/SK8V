@@ -1315,6 +1315,30 @@ mod tests {
         }
     }
 
+    /// 2026-10-31 test (Little Seoul halfpipe): a baked prop's flat deck 4.5 cm
+    /// over the ground, with the visible ground under both. Passed as
+    /// protected (like stairs, `clean_static`'s `exact`), the deck stays whole.
+    #[test]
+    fn a_protected_prop_deck_is_never_cut_down_to_the_ground() {
+        let (x0, y0) = (-1360.0, -1400.0);
+        let deck: Vec<Tri> = square(x0 + 0.5, x0 + 1.5, y0 + 0.5, y0 + 1.5, 0.045).into_iter().map(|v| Tri { v, material: 7 }).collect();
+        // GTA's coarse ground 5 cm under the visible ground (so the visible one is used).
+        let ground: Vec<Tri> = square(x0, x0 + 2., y0, y0 + 2., -0.05).into_iter().map(|v| Tri { v, material: 3 }).collect();
+        let visible = square(x0, x0 + 2., y0, y0 + 2., 0.0);
+        // Unprotected, the deck is replaced (the defect).
+        let mut unprotected: Vec<Tri> = ground.iter().chain(&deck).copied().collect();
+        let _ = run(&mut unprotected, &[], &visible);
+        assert!(deck.iter().any(|d| !unprotected.iter().any(|t| t.v == d.v)), "fixture reproduces the cut");
+        // Protected: both deck triangles come back exactly.
+        let mut protected: Vec<Tri> = ground.iter().chain(&deck).copied().collect();
+        let out = run(&mut protected, &deck, &visible);
+        for d in &deck {
+            assert!(protected.iter().any(|t| t.v == d.v), "deck kept: {:?}", d.v);
+        }
+        assert!(out.added.iter().zip(&out.cut).filter(|(_, c)| !**c).all(|(t, _)|
+            !samples(&t.v).into_iter().any(|p| deck.iter().any(|d| distance(p, &d.v) <= MATCH))), "no visible face over the deck");
+    }
+
     #[test]
     fn an_uncut_triangle_comes_back_exactly() {
         let t = [[0., 0., 0.], [1., 0., 0.], [0., 1., 0.]];

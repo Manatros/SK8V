@@ -1219,6 +1219,11 @@ fn bake(
         // Face origins by vertex key, before the cleanup reorders and drops.
         let input_origin: std::collections::HashMap<u64, u32> = data.tris.iter().zip(&data.origins)
             .map(|(t, &o)| (svwc::surfaces::key(&t.v), o)).collect();
+        // Baked static props (origin: their ymap) are exact authored surfaces:
+        // the high-res park pass must not cut or replace them.
+        let exact: std::collections::HashSet<u64> = data.tris.iter().zip(&data.origins)
+            .filter(|(_, o)| spool.names[**o as usize].to_ascii_lowercase().ends_with(".ymap"))
+            .map(|(t, _)| svwc::surfaces::key(&t.v)).collect();
         let mut census = SkateVRuntime::live::Census::default();
         // Both stair variants: the game's settings pick (SkateVRuntime::live::shown).
         let cleaned = SkateVRuntime::live::clean_static(
@@ -1228,6 +1233,7 @@ fn bake(
             data.spare,
             &mut census,
             true,
+            &exact,
         );
         ramps.fetch_add(census.stair_ramps, std::sync::atomic::Ordering::Relaxed);
         step_count.fetch_add(census.steps, std::sync::atomic::Ordering::Relaxed);

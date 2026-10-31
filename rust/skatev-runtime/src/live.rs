@@ -588,7 +588,7 @@ impl Level {
             });
         }
         census.tube_rails = crate::tubes::set(&tubes);
-        let cleaned = clean_static(&mut tris, &stairs, &tubes, extra, &mut census, false);
+        let cleaned = clean_static(&mut tris, &stairs, &tubes, extra, &mut census, false, &Default::default());
         Ok((tris, census, found.iter().map(Bvh::seen).collect(), cleaned))
     }
 }
@@ -758,7 +758,11 @@ impl Cleaned {
 /// The same static cleanup for live bounds and offline resources. `variants`
 /// (the bake): both stair variants and every gap fill, marked; otherwise the
 /// current settings apply directly.
-pub fn clean_static(tris: &mut Vec<Tri>, stairs: &[bool], tubes: &[(svwc::bounds::V3, svwc::bounds::V3, f32)], mut extra: Vec<Tri>, census: &mut Census, variants: bool) -> Cleaned {
+/// `exact`: vertex keys of authored surfaces that already match the visible
+/// model (baked static props); the high-res park pass treats them like stairs:
+/// never cut, and no visible triangle near them is used (2026-10-31 test:
+/// the Little Seoul halfpipe's flat deck was cut down to the ground below).
+pub fn clean_static(tris: &mut Vec<Tri>, stairs: &[bool], tubes: &[(svwc::bounds::V3, svwc::bounds::V3, f32)], mut extra: Vec<Tri>, census: &mut Census, variants: bool, exact: &std::collections::HashSet<u64>) -> Cleaned {
     use std::sync::atomic::Ordering::Relaxed;
     let mut cleaned = Cleaned::default();
     let no_grind = skate_host::bridge::NO_GRIND_TAG;
@@ -795,7 +799,9 @@ pub fn clean_static(tris: &mut Vec<Tri>, stairs: &[bool], tubes: &[(svwc::bounds
     // Live cells need DetailedStairs on: only then are the stair ramps and
     // steps known and kept out (peer review 2026-10-26).
     if variants || (detailed && crate::visparks::HIGH_RES_PARKS.load(Relaxed)) {
-        let stairs: Vec<Tri> = ramps.iter().chain(&steps).chain(&unflagged_steps).chain(&unflagged_ramps).copied().collect();
+        let stairs: Vec<Tri> = ramps.iter().chain(&steps).chain(&unflagged_steps).chain(&unflagged_ramps).copied()
+            .chain(tris.iter().filter(|t| exact.contains(&svwc::surfaces::key(&t.v))).copied())
+            .collect();
         let parks = crate::visparks::replace(tris, &stairs);
         census.park_replaced = parks.removed.len();
         census.park_added = parks.added.len();
@@ -1197,7 +1203,7 @@ mod provenance_tests {
         let (a, b, c, d) = ([0., 0., 0.18], [2., 0., 0.18], [2., 1.2, 0.72], [0., 1.2, 0.72]);
         let mut tris = vec![Tri { v: [a, b, c], material: 1 }, Tri { v: [a, c, d], material: 1 },
             Tri { v: [[5., 5., 0.], [6., 5., 0.], [5., 6., 0.]], material: 2 }];
-        let cleaned = clean_static(&mut tris, &[true, true, false], &[], Vec::new(), &mut Census::default(), true);
+        let cleaned = clean_static(&mut tris, &[true, true, false], &[], Vec::new(), &mut Census::default(), true, &Default::default());
         let ramps: Vec<_> = cleaned.alternatives.iter().filter(|(_, t)| t & RAMP_TAG != 0).collect();
         assert_eq!(ramps.len(), 2, "both ramp triangles kept as the other variant");
         let steps = tris.iter().filter(|t| cleaned.tag_of(t) & STEP_TAG != 0).count();
