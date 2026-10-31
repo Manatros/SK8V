@@ -33,6 +33,7 @@ pub fn rules_hash() -> String {
             include_bytes!("plies.rs").as_slice(),
             include_bytes!("tracks.rs").as_slice(),
             include_bytes!("visrails.rs").as_slice(),
+            include_bytes!("visbars.rs").as_slice(),
             include_bytes!("visparks.rs").as_slice(),
             include_bytes!("tubes.rs").as_slice(),
             include_bytes!("materials.rs").as_slice(),
@@ -100,7 +101,7 @@ pub fn live_policy(cells: &BTreeSet<Cell>) -> String {
     format!("live-policy {:016x}", hash_rule_bytes(0xcbf29ce484222325, live_cells_body(cells).as_bytes()))
 }
 
-fn read_live_cells(dir: &Path, size: f32) -> Option<(String, String, BTreeSet<Cell>)> {
+pub(crate) fn read_live_cells(dir: &Path, size: f32) -> Option<(String, String, BTreeSet<Cell>)> {
     let text = std::fs::read_to_string(dir.join("live-cells.txt")).ok()?;
     let mut lines = text.lines();
     if lines.next()? != "SVWT-LIVE 1" || !rules_compatible(lines.next()?) { return None; }

@@ -147,6 +147,9 @@ pub struct Census {
     /// High-res parks: GTA triangles replaced, visible triangles added.
     pub park_replaced: usize,
     pub park_added: usize,
+    /// Visible railings: GTA railing triangles replaced, mesh triangles added.
+    pub visbars_removed: usize,
+    pub visbars_added: usize,
     /// Faces dropped as hidden layers (`svwc::clean::drop_hidden_layers`).
     pub hidden: usize,
     pub steps: usize,
@@ -166,9 +169,9 @@ impl std::fmt::Display for Census {
         write!(
             f,
             "live physics level: {} slots ({} stale), {} BVH bounds, {} in reach: {} bounds used ({} static composites, {} children used, {} left out by flags), {} left out by include flags, {} unreadable; \
-             {} triangles + {} primitive polygons, {} vegetation volumes, {} repeats and {} foliage-over-ground dropped; {} bullet/camera-only bounds (stairs only); {} hidden layers dropped; high-res parks {} GTA triangles replaced by {}; {} STAIRS-flagged triangles, {} stair ramp triangles replaced by {} step triangles; {} tube rails",
+             {} triangles + {} primitive polygons, {} vegetation volumes, {} repeats and {} foliage-over-ground dropped; {} bullet/camera-only bounds (stairs only); {} hidden layers dropped; high-res parks {} GTA triangles replaced by {}; visible railings {} GTA triangles replaced by {}; {} STAIRS-flagged triangles, {} stair ramp triangles replaced by {} step triangles; {} tube rails",
             self.slots, self.stale, self.bvh, self.in_range, self.bounds, self.composites, self.children_used, self.children_filtered, self.filtered, self.failed, self.triangles, self.primitives,
-            self.vegetation, self.repeats, self.over_ground, self.spare, self.hidden, self.park_replaced, self.park_added, self.stair_flagged, self.stair_ramps, self.steps, self.tube_rails
+            self.vegetation, self.repeats, self.over_ground, self.spare, self.hidden, self.park_replaced, self.park_added, self.visbars_removed, self.visbars_added, self.stair_flagged, self.stair_ramps, self.steps, self.tube_rails
         )
     }
 }
@@ -712,18 +715,28 @@ pub const PARKGTA_TAG: u32 = 1 << 18;
 /// With PARKMESH: the uncovered piece of a GTA park triangle the visible
 /// model cut (design 2026-10-26-one-source-collision 1.3), not a visible one.
 pub const PARKCUT_TAG: u32 = 1 << 17;
-pub const PROVENANCE_TAGS: u32 = PARKMESH_TAG | PARKGTA_TAG | PARKCUT_TAG | URAMP_TAG | USTEP_TAG | FALLBACK_TAG | STEP_TAG | RAMP_TAG | LIVE_TAG;
+/// A triangle of a railing's visible mesh (VisibleRailings on, visbars.rs).
+pub const VISBAR_TAG: u32 = 1 << 21;
+/// A GTA railing box the visible mesh replaces (shown with VisibleRailings off).
+pub const SLAB_TAG: u32 = 1 << 20;
+pub const PROVENANCE_TAGS: u32 = VISBAR_TAG | SLAB_TAG | PARKMESH_TAG | PARKGTA_TAG | PARKCUT_TAG | URAMP_TAG | USTEP_TAG | FALLBACK_TAG | STEP_TAG | RAMP_TAG | LIVE_TAG;
 /// GTAxSkate StepRails (World page, default off): every stair nose grindable.
 pub static STEP_RAILS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 /// Whether a static triangle with these provenance bits belongs to the world
 /// under the current settings.
 pub fn shown(tag: u32) -> bool {
+    shown_with_railings(tag, crate::visbars::VISIBLE_RAILINGS.load(std::sync::atomic::Ordering::Relaxed))
+}
+
+pub(crate) fn shown_with_railings(tag: u32, railings: bool) -> bool {
     use std::sync::atomic::Ordering::Relaxed;
     let detailed = DETAILED_STAIRS.load(Relaxed);
     let unflagged = detailed && crate::stairs::ENABLED.load(Relaxed);
     let parks = crate::visparks::HIGH_RES_PARKS.load(Relaxed);
-    !((tag & PARKMESH_TAG != 0 && !parks)
+    !((tag & VISBAR_TAG != 0 && !railings)
+        || (tag & SLAB_TAG != 0 && railings)
+        || (tag & PARKMESH_TAG != 0 && !parks)
         || (tag & PARKGTA_TAG != 0 && parks)
         || (tag & STEP_TAG != 0 && !detailed)
         || (tag & RAMP_TAG != 0 && detailed)
@@ -740,6 +753,8 @@ pub struct Cleaned {
     pub alternatives: Vec<(Tri, u32)>,
     /// Added park triangles: the GTA triangle whose surface record they take.
     pub surface_from: rustc_hash::FxHashMap<u64, u64>,
+    /// Railing components and what happened to them (bake report).
+    pub visbars: Vec<crate::visbars::Report>,
 }
 
 impl Cleaned {
@@ -792,6 +807,20 @@ pub fn clean_static(tris: &mut Vec<Tri>, stairs: &[bool], tubes: &[(svwc::bounds
     } else {
         (Vec::new(), Vec::new())
     };
+    // Railings from the visible bars (design 2026-10-25-visible-bar-collision):
+    // GTA's closed railing-material boxes become the railing's own visible
+    // mesh, before the park pass so it neither cuts nor replaces them.
+    let bars = if variants || crate::visbars::VISIBLE_RAILINGS.load(Relaxed) {
+        crate::visbars::replace(tris, exact)
+    } else {
+        crate::visbars::Replacement::default()
+    };
+    if variants {
+        cleaned.alternatives.extend(bars.removed.iter().map(|t| (*t, SLAB_TAG)));
+    }
+    census.visbars_removed = bars.removed.len();
+    census.visbars_added = bars.added.len();
+    cleaned.visbars = bars.reports;
     // High-res parks (design 2026-10-25-park-surfaces-from-visible): GTA's
     // coarse park collision replaced like for like by the visible model;
     // stairs (ramps, steps, ramp pieces) never take part.
@@ -801,6 +830,7 @@ pub fn clean_static(tris: &mut Vec<Tri>, stairs: &[bool], tubes: &[(svwc::bounds
     if variants || (detailed && crate::visparks::HIGH_RES_PARKS.load(Relaxed)) {
         let stairs: Vec<Tri> = ramps.iter().chain(&steps).chain(&unflagged_steps).chain(&unflagged_ramps).copied()
             .chain(tris.iter().filter(|t| exact.contains(&svwc::surfaces::key(&t.v))).copied())
+            .chain(bars.added.iter().copied())
             .collect();
         let parks = crate::visparks::replace(tris, &stairs);
         census.park_replaced = parks.removed.len();
@@ -855,6 +885,11 @@ pub fn clean_static(tris: &mut Vec<Tri>, stairs: &[bool], tubes: &[(svwc::bounds
     // (a GTA face must stay for HighResParks off), covered by anything.
     tris.extend(park_added);
     census.hidden += svwc::clean::drop_hidden_layers(tris, |t| tag(t) & PARKMESH_TAG != 0, |t| !switchable(t));
+    // The railing meshes last: no cleanup pass may change or drop them.
+    for t in &bars.added {
+        cleaned.tags.insert(svwc::surfaces::key(&t.v), VISBAR_TAG);
+    }
+    tris.extend(bars.added);
     cleaned
 }
 

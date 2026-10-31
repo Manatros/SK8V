@@ -645,6 +645,7 @@ pub fn run_verify_world(args: Vec<String>) -> Result<(), Box<dyn Error>> {
     if !SkateVRuntime::visrails::verified_policy(&world.join("sk8v.visrails")) {
         return Err("unverified Story visual rails".into());
     }
+    SkateVRuntime::visbars::load(&world.join("sk8v.visbars"))?;
     let bounds = [args[1].parse()?,args[2].parse()?,args[3].parse()?,args[4].parse()?];
     let (baked,live,triangles,rails) = verify_coverage(&world.join("tiles"),bounds)?;
     println!("Verified world: {baked} invariant cells + {live} live cells, {triangles} triangles, {rails} rail records");
@@ -1092,7 +1093,14 @@ fn bake(
         // the HighResParks switch silently do nothing (peer review 2026-10-26).
         Err(e) => return Err(format!("{e}; regenerate it with visual-rails").into()),
     }
-    for p in [&tracks, &visual, &parks] {
+    // Visible railings (visbars.rs, design 2026-10-25-visible-bar-collision):
+    // without them the VisibleRailings switch would silently do nothing.
+    let bars = cache.with_extension("visbars");
+    match SkateVRuntime::visbars::load(&bars) {
+        Ok(n) => eprintln!("visible railings: {n} map cells"),
+        Err(e) => return Err(format!("{e}; regenerate it with visual-rails").into()),
+    }
+    for p in [&tracks, &visual, &parks, &bars] {
         if p.is_file() {
             sources.insert(p.display().to_string(), hash(&fs::read(p)?));
         }
@@ -1153,6 +1161,10 @@ fn bake(
             include_bytes!("../../skatev-runtime/src/visparks.rs").as_slice(),
         ),
         (
+            "visbars.rs",
+            include_bytes!("../../skatev-runtime/src/visbars.rs").as_slice(),
+        ),
+        (
             "bounds.rs",
             include_bytes!("../../svwc/src/bounds.rs").as_slice(),
         ),
@@ -1191,6 +1203,7 @@ fn bake(
     ] {
         sources.insert(format!("rules/{name}"), hash(bytes));
     }
+    SkateVRuntime::visbars::set_live(size, live_cells.clone());
     let mask_text: String = live_cells.iter().map(|c| format!("{} {}\n", c.0, c.1)).collect();
     sources.insert("policy/live-cells-v1".to_owned(), hash(mask_text.as_bytes()));
     // Per worker thread: its own floor-map and surface-sidecar handles. One
@@ -1257,6 +1270,14 @@ fn bake(
     let mut validation = Validation::default();
     let ramps = std::sync::atomic::AtomicUsize::new(0);
     let step_count = std::sync::atomic::AtomicUsize::new(0);
+    // Visible-railing report rows per tile (diagnostic); a resumed tile keeps
+    // its rows from the report of the same generation.
+    let report_header = format!("SVVB-REPORT 2
+{}
+", source.lines().next().unwrap_or(""));
+    let prior = fs::read_to_string(out.join("visbars-report.txt")).unwrap_or_default();
+    let prior_rows: Vec<String> = if prior.starts_with(&report_header) { prior.lines().skip(2).map(str::to_owned).collect() } else { Vec::new() };
+    let bar_reports = std::sync::Mutex::new(BTreeMap::<tiles::Cell, Vec<String>>::new());
     let build = |c: tiles::Cell, lookups: &mut Lookups| -> Result<(Tile, Validation), Box<dyn Error + Send + Sync>> {
         let mut validation = Validation::default();
         let at = Vec3::new((c.0 as f32 + 0.5) * size, (c.1 as f32 + 0.5) * size, 0.);
@@ -1379,6 +1400,16 @@ fn bake(
             }
         }
         tile.origin_names = names.names;
+        let added = tile.triangles.iter().filter(|(_, tag)| tag & SkateVRuntime::live::VISBAR_TAG != 0).count();
+        if added > 30_000 { return Err(format!("tile {c:?}: {added} visible railing triangles exceeds 30000").into()); }
+        let slabs = tile.triangles.iter().filter(|(_, tag)| tag & SkateVRuntime::live::SLAB_TAG != 0).count();
+        let mut rows = vec![format!("tile {} {} {added} {slabs}", c.0, c.1)];
+        for r in &cleaned.visbars {
+            if r.triangles.iter().any(|t| !tiles::clip_triangle(*t, c, size).is_empty()) {
+                rows.push(format!("component {}", r.line(c)));
+            }
+        }
+        bar_reports.lock().unwrap().insert(c, rows);
         // Step noses of the alternative step variant (unflagged flights rebuilt
         // as steps), for StepRails: the same rules on that flight alone, where
         // only the noses have a drop beneath (Codex review 2026-10-24).
@@ -1463,6 +1494,8 @@ fn bake(
             .and_then(|f| Tile::read(std::io::BufReader::new(f)).ok())
             .filter(|t| t.cell == c && t.size == size && t.source == source);
         if let Some(tile) = existing {
+            let (row, component) = (format!("tile {} {} ", c.0, c.1), format!("component {} {} ", c.0, c.1));
+            bar_reports.lock().unwrap().insert(c, prior_rows.iter().filter(|r| r.starts_with(&row) || r.starts_with(&component)).cloned().collect());
             resumed += 1;
             account(&tile, &mut obj, &mut vertex, &mut no_grind, &mut length)?;
             triangles += tile.triangles.len();
@@ -1517,6 +1550,9 @@ fn bake(
             Ok::<(), Box<dyn Error>>(())
         })?;
     }
+    let rows = bar_reports.into_inner().unwrap();
+    fs::write(out.join("visbars-report.txt"), report_header + &rows.values().flatten().map(|r| format!("{r}
+")).collect::<String>())?;
     let workers = num_workers;
     if let Some(o) = obj.as_mut() { o.flush()?; }
     fs::write(out.join("tile-size.txt"), format!("{size}\n"))?;

@@ -638,6 +638,11 @@ fn run(
     ));
     log(&format!("train tracks: {} tracks as grind rails on their steel rails", crate::tracks::load(&cache.with_extension("tracks"))));
     log(&format!("visual rails: {} map cells of rails from GTA's visible models", crate::visrails::load(&cache.with_extension("visrails"))));
+    match crate::visbars::load(&cache.with_extension("visbars")) {
+        Ok(n) => log(&format!("visible railings: {n} map cells")),
+        Err(e) => log(&e),
+    }
+    if let Err(e) = crate::visbars::load_live(&cache.parent().unwrap_or(std::path::Path::new(".")).join("tiles")) { log(&e); }
     match crate::visparks::load(&cache.with_extension("visparks")) {
         Ok(n) => log(&format!("high-res parks: {n} visible park triangles")),
         Err(e) => log(&e),

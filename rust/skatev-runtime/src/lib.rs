@@ -32,6 +32,7 @@ pub mod parks;
 pub mod tracks;
 pub mod tubes;
 pub mod visrails;
+pub mod visbars;
 pub mod visparks;
 mod probes;
 pub mod materials;
@@ -1022,6 +1023,7 @@ pub extern "C" fn sv_set_world_option(id: u32, on: u32) {
             9 => &stairs::ENABLED,
             10 => &live::STEP_RAILS,
             // 11 Fallbacks and 12 RailBoxes are gone (design 2026-10-26 4.4).
+            13 => &visbars::VISIBLE_RAILINGS,
             14 => &visparks::HIGH_RES_PARKS,
             _ => return,
         };

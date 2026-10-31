@@ -127,6 +127,7 @@ struct Config {
     bool objectRails = true;       // ObjectRails: standing objects (electrical boxes, benches) get grind rails
     bool stepRails = false;        // StepRails: every stair step's nose is a grind rail (Manatros 2026-10-24: some prefer it)
     bool highResParks = true;      // HighResParks: skateparks' coarse collision replaced by the visible model (off: GTA's)
+    bool visibleRailings = true;   // VisibleRailings: GTA's solid railing boxes replaced by the visible bars (off: GTA's)
     bool devOptions = false;       // DevOptions: show developer and diagnostic options in the menu (off: a cleaner menu)
     bool detailedStairs = true;    // DetailedStairs (Dev): stair ramps rebuilt as steps where GTA's data has them (Manatros 2026-10-19; 0: SK8V's ramps)
     bool gtaCamera = false; // GtaCamera=1 (Dev): skate with GTA's gameplay camera rendering, to measure the script camera's frame cost
@@ -340,6 +341,7 @@ const Key kKeys[] = {
     {"ObjectRails", Store<&Config::objectRails>},
     {"StepRails", Store<&Config::stepRails>},
     {"HighResParks", Store<&Config::highResParks>},
+    {"VisibleRailings", Store<&Config::visibleRailings>},
     {"DevOptions", Store<&Config::devOptions>},
     {"AimTwist", Store<&Config::aimTwist>},
     {"AimButton", Store<&Config::aimButton>},
@@ -3642,6 +3644,7 @@ const WorldSwitch kWorldSwitches[] = {
     {"RailTops", "Grind lines on top of rails", &Config::railTops, 3, true},
     {"CurbBevels", "Curb bevels", &Config::curbBevels, 7, true},
     {"HighResParks", "High-res skateparks", &Config::highResParks, 14, true},
+    {"VisibleRailings", "Railings from visible bars", &Config::visibleRailings, 13, true},
     {"UnflaggedStairs", "Unmarked stairs as steps (test)", &Config::unflaggedStairs, 9, false},
     {"DynamicWorld", "Nearby entities collide", &Config::dynamicWorld, kHostOnlyWorldSwitch, true},
 };
@@ -4117,6 +4120,8 @@ std::vector<menu::Page> MenuPages(Session& s) {
                "Adds no-grind bevels to curbs (best: on)."),
         Helped(Flag("High-res skateparks", "HighResParks", D.highResParks, Bound("HighResParks", [&s] { WorldChanged(s, "HighResParks"); })),
                "Uses visible skatepark surfaces (best: on). Off: GTA collision."),
+        Helped(Flag("Railings from visible bars", "VisibleRailings", D.visibleRailings, Bound("VisibleRailings", [&s] { WorldChanged(s, "VisibleRailings"); })),
+               "Railings collide only where their bars are (best: on). Off: GTA's solid boxes."),
         Helped(Flag("Unmarked stairs as steps (test)", "UnflaggedStairs", D.unflaggedStairs, Bound("UnflaggedStairs", [&s] { WorldChanged(s, "UnflaggedStairs"); })),
                "Treats unmarked stairs as steps for testing (best: off)."),
         Helped(Flag("Nearby entities collide", "DynamicWorld", D.dynamicWorld, Bound("DynamicWorld", [&s] { WorldChanged(s, "DynamicWorld"); })),
@@ -4340,7 +4345,7 @@ std::vector<menu::Page> MenuPages(Session& s) {
         {"HUD", {{"On screen", {"SkateHud", "Hud", "TrickAnalyzer", "KeyboardHints"}},
                  {"Hall of Meat", {"HallOfMeat", "Show records"}}}},
         {"World", {{"World collision", {"World collision:", "Compare: plain GTA", "Mark this spot", "DetailedStairs", "StepRails", "TrackRails", "ObjectRails",
-                                        "TubeRails", "VisualRails", "RailTops", "CurbBevels", "HighResParks", "UnflaggedStairs", "DynamicWorld", "Reset all settings"}},
+                                        "TubeRails", "VisualRails", "RailTops", "CurbBevels", "HighResParks", "VisibleRailings", "UnflaggedStairs", "DynamicWorld", "Reset all settings"}},
                    {"Test marks", {"Mark", "Go to this mark", "Show fixed marks", "Delete this mark"}},
                    {"What the board hits", {"VehiclePush", "ObjectPush", "VehicleDamage", "BoardScratches"}},
                    {"People", {"PedsSurvive", "PedLaunch", "PedBumpImpulse", "Injuries"}},
@@ -4412,10 +4417,10 @@ bool ComponentInstalled(const char* name) {
 // only with DevOptions on; options of components the installer left out do
 // not show at all. Hidden rows keep their saved values.
 void HideUnavailable(std::vector<menu::Page>& pages) {
-    static const std::set<std::string> dev = {"CurbBevels", "RailTops", "VisualRails", "TubeRails", "UnflaggedStairs", "HighResParks"};
+    static const std::set<std::string> dev = {"CurbBevels", "RailTops", "VisualRails", "TubeRails", "UnflaggedStairs", "HighResParks", "VisibleRailings"};
     static const std::map<std::string, const char*> component = {
         {"BoardShop", "boards"}, {"WheelsFromPaint", "boards"}, {"WheelGlow", "glow"}, {"WheelGlowColour", "glow"},
-        {"SkateRadio", "music"}, {"VisualRails", "world"}, {"HighResParks", "world"}};
+        {"SkateRadio", "music"}, {"VisualRails", "world"}, {"HighResParks", "world"}, {"VisibleRailings", "world"}};
     for (auto& page : pages) {
         if (page.title == "Developer") page.visible = [] { return g_config.devOptions; };
         for (auto& item : page.items) {

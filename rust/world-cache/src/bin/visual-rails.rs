@@ -300,6 +300,72 @@ fn export_parks(out: &Path, placed: &[(u32, Place)], archetypes: &HashMap<u32, A
     Ok(())
 }
 
+/// Candidate limits use model height and placement scale, before rotation.
+fn candidate(height: f32, scale_z: f32, triangles: usize, width: f32) -> bool {
+    (0.3..=2.5).contains(&(height * scale_z.abs())) && triangles <= 3000 && width <= 16.0
+}
+
+fn bar_shader(name: &str) -> bool { !name.to_ascii_lowercase().contains("decal") }
+
+fn export_bars(out: &Path, placed: &[(u32, Place)], archetypes: &HashMap<u32, Archetype>,
+    files: &BTreeMap<String, gta_archives::Entry>, keys: &gta_archives::GtaKeys) -> anyhow::Result<()> {
+    use SkateVRuntime::visbars::Object;
+    // ShaderFx stores hashes. Resolve decal names from the mounted shader
+    // filenames, plus GTA's named decal techniques (also used by --surface).
+    let names = ["decal", "decal_dirt", "decal_tnt", "decal_spec_only", "decal_normal_only", "decal_emissive_only",
+        "decal_shadow_only", "decal_amb_only", "decal_glue", "normal_decal", "normal_decal_tnt", "normal_decal_pxm",
+        "normal_decal_pxm_tnt", "normal_spec_decal", "normal_spec_decal_detail", "normal_spec_decal_nopuddle",
+        "normal_spec_decal_tnt", "normal_spec_decal_pxm", "spec_decal", "mirror_decal"];
+    let decals: HashSet<u32> = names.iter().copied().chain(files.keys().filter(|n| n.ends_with(".sps")).map(|n| n.trim_end_matches(".sps")))
+        .filter(|n| !bar_shader(n)).map(rage_joaat).collect();
+    // Cache only eligible High-LOD meshes, not entire drawables.
+    let mut models: HashMap<u32, Option<(Vec<[V; 3]>, f32, usize)>> = HashMap::new();
+    let mut objects = Vec::new();
+    let mut counts: BTreeMap<u32, (usize, usize)> = BTreeMap::new();
+    for (hash, place) in placed {
+        let Some(a) = archetypes.get(hash) else { continue };
+        if a.is_fragment() { continue; }
+        let model = models.entry(*hash).or_insert_with(|| {
+            let d = drawable_of(a, files, keys)?;
+            if d.shader_group.as_ref().is_some_and(|g| g.shaders.iter().any(|s| vegetation().contains(&s.name_hash))) { return None; }
+            let lod = d.lods.iter().find(|l| l.level == LodLevel::High)?;
+            let count: usize = lod.models.iter().flat_map(|m| &m.geometries).filter_map(|g| g.index_buffer.as_ref()).map(|i| i.indices.len()/3).sum();
+            if count > 3000 { return None; }
+            let mut mesh = Vec::new();
+            let (mut zmin, mut zmax) = (f32::INFINITY, f32::NEG_INFINITY);
+            for g in lod.models.iter().flat_map(|m| &m.geometries) {
+                let shader = d.shader_group.as_ref().and_then(|s| s.shaders.get(g.shader_id as usize));
+                if shader.is_some_and(|s| decals.contains(&s.name_hash) || decals.contains(&s.file_name_hash) || vegetation().contains(&s.name_hash)) { continue; }
+                let (Some(vb), Some(ib)) = (&g.vertex_buffer, &g.index_buffer) else { continue };
+                let verts = vb.to_unified_vertices().ok()?;
+                for t in ib.indices.chunks_exact(3) {
+                    let mut tri = [[0.;3];3];
+                    for k in 0..3 {
+                        let v = verts.get(t[k] as usize)?.position;
+                        tri[k] = [v.x, v.y, v.z]; zmin = zmin.min(v.z); zmax = zmax.max(v.z);
+                    }
+                    mesh.push(tri);
+                }
+            }
+            (!mesh.is_empty()).then_some((mesh, zmax-zmin, count))
+        });
+        let Some((mesh, height, count)) = model else { continue };
+        let scale_z = match place { Place::Outside(e) => e.scale_z, Place::Inside(o, e) => o.scale_z * e.scale_z };
+        if !candidate(*height, scale_z, *count, 0.) { continue; }
+        let mesh: Vec<_> = mesh.iter().map(|t| t.map(|p| place.apply(p, GTA))).collect();
+        let mut lo = [f32::INFINITY;3]; let mut hi = [f32::NEG_INFINITY;3];
+        for p in mesh.iter().flatten() { for k in 0..3 { lo[k] = lo[k].min(p[k]); hi[k] = hi[k].max(p[k]); } }
+        if !candidate(*height, scale_z, *count, (hi[0]-lo[0]).max(hi[1]-lo[1])) { continue; }
+        let footprint = mesh.iter().map(|t| t.map(|p| [p[0],p[1]])).collect();
+        let entry = counts.entry(a.model_hash()).or_default(); entry.0 += 1; entry.1 += mesh.len();
+        objects.push(Object { id: u32::try_from(objects.len())?, model: a.model_hash(), z: [lo[2]-0.15, hi[2]+0.15], mesh, footprint });
+    }
+    for (model, (placements, triangles)) in counts { eprintln!("visbars model {model:08x}: {placements} candidates, {triangles} triangles"); }
+    SkateVRuntime::visbars::write(out, &objects)?;
+    eprintln!("wrote {} visible railing candidates to {}", objects.len(), out.display());
+    Ok(())
+}
+
 fn main() -> anyhow::Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.first().is_some_and(|a| a == "--ydr") {
@@ -474,6 +540,7 @@ fn main() -> anyhow::Result<()> {
         return Ok(());
     }
     export_parks(&out.with_extension("visparks"), &placed, &archetypes, &files, &keys)?;
+    export_bars(&out.with_extension("visbars"), &placed, &archetypes, &files, &keys)?;
     // Each archetype's rails once (model space).
     let mut model_rails: HashMap<u32, Arc<Vec<(Vec<V>, u32)>>> = HashMap::new();
     let mut by_shader: HashMap<u32, usize> = HashMap::new();
@@ -571,4 +638,18 @@ fn main() -> anyhow::Result<()> {
     eprintln!("wrote {} rails to {}", written.len(), out.display());
     let _: &Path = &out;
     Ok(())
+}
+
+#[cfg(test)]
+mod visbar_tests {
+    use super::*;
+    #[test]
+    fn candidate_limits_and_shader_policy() {
+        assert!(candidate(1., 1., 3000, 16.));
+        for (h,s,n,w) in [(0.29,1.,2,1.),(2.51,1.,2,1.),(1.,1.,3001,1.),(1.,1.,2,16.01),(1.,3.,2,1.)] {
+            assert!(!candidate(h,s,n,w));
+        }
+        for n in ["decal", "normal_spec_decal_detail", "mirror_decal", "DECAL_dirt"] { assert!(!bar_shader(n)); }
+        for n in ["cutout_fence", "cutout_fence_normal", "glass", "glass_reflect", "normal_spec"] { assert!(bar_shader(n)); }
+    }
 }

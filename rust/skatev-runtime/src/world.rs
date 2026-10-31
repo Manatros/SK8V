@@ -519,7 +519,10 @@ pub fn build_area_reusing(center: Vec3, tris: impl Iterator<Item = ([[f32; 3]; 3
 }
 
 fn build_area_rules(center: Vec3, tris: impl Iterator<Item = ([[f32; 3]; 3], u32)>, cache: &mut crate::reuse::AreaCache, static_rails: bool, live_tubes: bool) -> Area {
-    let (gta, surfaces): (Vec<[Vec3; 3]>, Vec<u32>) = tris
+    // Visible railing meshes skip every rule (no grind lines from them, no
+    // filter drops them) and join the output unchanged (visbars design 2.6).
+    let (bars, tris): (Vec<_>, Vec<_>) = tris.partition(|(_, tag)| tag & crate::live::VISBAR_TAG != 0);
+    let (gta, surfaces): (Vec<[Vec3; 3]>, Vec<u32>) = tris.into_iter()
         .map(|(t, tag)| (t.map(Vec3::from_array), tag))
         .filter(|(p, _)| p.iter().all(|v| v.is_finite())
             && (p[1] - p[0]).cross(p[2] - p[0]).length_squared() > 1e-10)
@@ -732,6 +735,7 @@ fn build_area_rules(center: Vec3, tris: impl Iterator<Item = ([[f32; 3]; 3], u32
     }
     cache.clearance = answers.into_inner();
     cache.rail_index = Some((indexed_tris, rail_grid));
+    collision.extend(bars.into_iter().map(|(t, tag)| (t.map(Vec3::from_array), tag)));
     spatial_order(&mut collision);
     Area {
         tags: collision.iter().map(|(_, s)| *s).collect(),
@@ -1872,7 +1876,7 @@ pub fn audit(area: &Area) -> AreaAudit {
         if packed_surface(tag) >= 16 {
             a.bad_surface += 1;
         }
-        if tag & !(skate_host::bridge::NO_GRIND_TAG | crate::live::PARKMESH_TAG | crate::live::PARKGTA_TAG | crate::live::PARKCUT_TAG | 0xf7ff) != 0 {
+        if tag & !(skate_host::bridge::NO_GRIND_TAG | crate::live::PARKMESH_TAG | crate::live::PARKGTA_TAG | crate::live::PARKCUT_TAG | crate::live::VISBAR_TAG | crate::live::SLAB_TAG | 0xf7ff) != 0 {
             a.unknown_tag_bits += 1;
         }
     }
