@@ -169,8 +169,8 @@ fn decode(bytes: &[u8]) -> io::Result<File> {
     Ok(file)
 }
 
-/// The candidate file is large (every 0.3-2.5 m model, about 2.4 GB for
-/// Story Mode): only its cell table stays in memory; cells are read from
+/// The candidate file is large (every 0.3-6 m model up to 40 m long, about
+/// 4.1 GB for Story Mode): only its cell table stays in memory; cells are read from
 /// disk when a bake area needs them (peer review 2026-10-31).
 struct Lazy { path: std::path::PathBuf, table: Table }
 static FILE: OnceLock<Option<Lazy>> = OnceLock::new();
@@ -188,7 +188,9 @@ pub fn load(path: &Path) -> Result<usize, String> {
         let mut head = vec![0; 16];
         file.read_exact(&mut head).ok()?;
         let n = u32::from_le_bytes(head[12..16].try_into().ok()?) as usize;
-        head.resize(16 + n.checked_mul(20)?, 0);
+        let size = 16 + n.checked_mul(20)?;
+        if size as u64 > len { return None; }
+        head.resize(size, 0);
         file.read_exact(&mut head[16..]).ok()?;
         Some(Lazy { path: path.to_owned(), table: table(&head, len).ok()? })
     });
@@ -239,8 +241,11 @@ pub struct Replacement {
 /// with any of them stays as it is.
 pub fn replace(tris: &mut Vec<Tri>, keep: &std::collections::HashSet<u64>) -> Replacement {
     let (Some(Some(f)), Some(Some((size, live)))) = (FILE.get(), LIVE.get()) else { return Replacement::default() };
-    let b = tris.iter().flat_map(|t| t.v).fold([f32::INFINITY, f32::NEG_INFINITY, f32::INFINITY, f32::NEG_INFINITY], |b, p|
-        [b[0].min(p[0]), b[1].max(p[0]), b[2].min(p[1]), b[3].max(p[1])]);
+    // Only cells around railing-material triangles: no object reaches more
+    // than 40 m (the export limit) from a box it covers.
+    let b = tris.iter().filter(|t| RAILING_MATERIALS.contains(&t.material)).flat_map(|t| t.v)
+        .fold([f32::INFINITY, f32::NEG_INFINITY, f32::INFINITY, f32::NEG_INFINITY], |b, p|
+            [b[0].min(p[0] - 40.), b[1].max(p[0] + 40.), b[2].min(p[1] - 40.), b[3].max(p[1] + 40.)]);
     if !b[0].is_finite() { return Replacement::default(); }
     // A malformed cell found mid-bake is fatal: the receipt said the file was whole.
     let all = read_cells(f, cells(b, CELL)).expect("visible railings: unreadable SVVB cell");
@@ -289,10 +294,33 @@ fn side_vote(component: &[usize], tris: &[Tri], objects: &[&Object], b: [f32; 6]
     if count == 0 { 0. } else { close as f32 / count as f32 }
 }
 
-/// Share of an object's mesh vertices inside any of the boxes, at least half.
-fn eligible(o: &Object, boxes: &[[f32; 6]]) -> bool {
+/// Triangles bucketed by 0.5 m cells of their box widened by `reach`, for
+/// "is this point within `reach` of one of them".
+struct Near { reach: f32, cells: HashMap<[i32; 3], Vec<[Vec3; 3]>> }
+impl Near {
+    fn new<'a>(reach: f32, tris: impl Iterator<Item = &'a [[f32; 3]; 3]>) -> Near {
+        let mut cells: HashMap<[i32; 3], Vec<[Vec3; 3]>> = HashMap::new();
+        for t in tris {
+            let v = t.map(Vec3::from_array);
+            let lo = v[0].min(v[1]).min(v[2]) - Vec3::splat(reach); let hi = v[0].max(v[1]).max(v[2]) + Vec3::splat(reach);
+            let (a, b) = ((lo / 0.5).floor().as_ivec3(), (hi / 0.5).floor().as_ivec3());
+            if (b - a).max_element() > 400 { continue; }
+            for x in a.x..=b.x { for y in a.y..=b.y { for z in a.z..=b.z { cells.entry([x, y, z]).or_default().push(v); } } }
+        }
+        Near { reach, cells }
+    }
+    fn contains(&self, p: Vec3) -> bool {
+        let k = (p / 0.5).floor().as_ivec3();
+        self.cells.get(&[k.x, k.y, k.z]).is_some_and(|l| l.iter().any(|t| distance(p, t) <= self.reach * self.reach + 1e-8))
+    }
+}
+
+/// An object is a railing when at least half of its mesh vertices lie
+/// within 15 cm of the railing-material boxes (peer review 2026-10-31: a
+/// stair or planter model under a railing's posts is not one).
+fn eligible(o: &Object, boxes: &Near) -> bool {
     let n = o.mesh.len() * 3;
-    let inside = o.mesh.iter().flatten().filter(|p| boxes.iter().any(|b| (0..3).all(|k| p[k] >= b[2 * k] && p[k] <= b[2 * k + 1]))).count();
+    let inside = o.mesh.iter().flatten().filter(|p| boxes.contains(Vec3::from_array(**p))).count();
     n > 0 && inside * 2 >= n
 }
 
@@ -320,50 +348,62 @@ fn replace_with(tris: &mut Vec<Tri>, objects: &[&Object], keep: &std::collection
     for (i, t) in tris.iter().enumerate().filter(|(_, t)| RAILING_MATERIALS.contains(&t.material)) {
         let _ = t; components.entry(root(&mut parent, i)).or_default().push(i);
     }
-    // Only railings: an object takes part when at least half of its mesh
-    // vertices lie in the box of some railing-material component (+15 cm).
-    // Without it a park or planter model over a railing box would cover it
-    // and add its whole mesh (2026-10-31, limits widened for stair railings).
-    let boxes: Vec<[f32; 6]> = components.values().map(|c| {
-        let mut b = [f32::INFINITY, f32::NEG_INFINITY, f32::INFINITY, f32::NEG_INFINITY, f32::INFINITY, f32::NEG_INFINITY];
-        for p in c.iter().flat_map(|&i| tris[i].v) { for k in 0..3 { b[2 * k] = b[2 * k].min(p[k] - 0.15); b[2 * k + 1] = b[2 * k + 1].max(p[k] + 0.15); } }
-        b
-    }).collect();
-    let objects: Vec<&Object> = objects.iter().copied().filter(|o| eligible(o, &boxes)).collect();
-    let objects = &objects[..];
-    let mut remove: BTreeSet<usize> = BTreeSet::new(); let mut add: BTreeSet<u32> = BTreeSet::new();
-    let mut blocked: BTreeSet<u32> = BTreeSet::new();
+    if components.is_empty() { return out; }
+    let railing = Near::new(0.15, tris.iter().filter(|t| RAILING_MATERIALS.contains(&t.material)).map(|t| &t.v));
+    let mut all = [f32::INFINITY, f32::NEG_INFINITY, f32::INFINITY, f32::NEG_INFINITY];
+    for p in tris.iter().filter(|t| RAILING_MATERIALS.contains(&t.material)).flat_map(|t| t.v) {
+        all = [all[0].min(p[0]), all[1].max(p[0]), all[2].min(p[1]), all[3].max(p[1])];
+    }
+    let objects: Vec<&Object> = objects.iter().copied()
+        .filter(|o| { let b = o.bounds(); b[0] <= all[1] && b[1] >= all[0] && b[2] <= all[3] && b[3] >= all[2] })
+        .filter(|o| eligible(o, &railing)).collect();
+    // Pass 1: which objects cover which component. An object over an
+    // authored prop railing adds nothing anywhere: its bar would sit over
+    // the lowered prop bar.
+    struct Seen { corners: Vec<Vec3>, b: [f32; 6], covering: Vec<usize>, authored: bool }
+    let mut seen = Vec::new();
+    let mut blocked: BTreeSet<usize> = BTreeSet::new();
     for component in components.values() {
         let corners: BTreeSet<_> = component.iter().flat_map(|&i| tris[i].v).map(|p| p.map(f32::to_bits)).collect();
         let corners: Vec<_> = corners.into_iter().map(|p| Vec3::from_array(p.map(f32::from_bits))).collect();
-        // Component box (x, y, z ranges); objects whose footprint box misses it cannot cover it.
         let mut b = [f32::INFINITY, f32::NEG_INFINITY, f32::INFINITY, f32::NEG_INFINITY, f32::INFINITY, f32::NEG_INFINITY];
         for p in &corners { for k in 0..3 { b[2 * k] = b[2 * k].min(p[k]); b[2 * k + 1] = b[2 * k + 1].max(p[k]); } }
-        let covering: Vec<_> = objects.iter().copied()
-            .filter(|o| { let ob = o.bounds(); ob[0] <= b[1] && ob[1] >= b[0] && ob[2] <= b[3] && ob[3] >= b[2] && o.z[0] <= b[5] && o.z[1] >= b[4] })
-            .filter(|o| corners.iter().filter(|&&p| o.contains(p)).count() * 4 >= corners.len()).collect();
-        let covered = corners.iter().filter(|&&p| covering.iter().any(|o| o.contains(p))).count() as f32 / corners.len() as f32 >= 0.9;
-        let matched = if covered && !component.iter().any(|&i| keep.contains(&svwc::surfaces::key(&tris[i].v))) { side_vote(component, tris, &covering, b) } else { 0. };
+        let covering: Vec<usize> = (0..objects.len())
+            .filter(|&n| { let o = objects[n]; let ob = o.bounds(); ob[0] <= b[1] && ob[1] >= b[0] && ob[2] <= b[3] && ob[3] >= b[2] && o.z[0] <= b[5] && o.z[1] >= b[4] })
+            .filter(|&n| corners.iter().filter(|&&p| objects[n].contains(p)).count() * 4 >= corners.len()).collect();
         let authored = component.iter().any(|&i| keep.contains(&svwc::surfaces::key(&tris[i].v)));
-        let reason = if authored { "authored" } else if !covered { "uncovered" } else if matched >= 0.6 { "already-right" } else { "replaced" };
-        if reason == "replaced" { remove.extend(component); add.extend(covering.iter().map(|o| o.id)); }
-        // An object over an authored prop railing adds nothing anywhere: its
-        // bar would sit over the lowered prop bar (peer review 2026-10-31).
-        if reason == "authored" { blocked.extend(covering.iter().map(|o| o.id)); }
+        if authored { blocked.extend(covering.iter().copied()); }
+        seen.push(Seen { corners, b, covering, authored });
+    }
+    // Pass 2: decide with the unblocked objects only. A box whose cover is
+    // blocked keeps GTA's collision (no hole, peer review 2026-10-31).
+    let mut remove: BTreeSet<usize> = BTreeSet::new(); let mut add: BTreeSet<usize> = BTreeSet::new();
+    for (component, s) in components.values().zip(&seen) {
+        let free: Vec<usize> = s.covering.iter().copied().filter(|n| !blocked.contains(n)).collect();
+        let covering: Vec<&Object> = free.iter().map(|&n| objects[n]).collect();
+        let covered = s.corners.iter().filter(|&&p| covering.iter().any(|o| o.contains(p))).count() as f32 / s.corners.len() as f32 >= 0.9;
+        let matched = if covered && !s.authored { side_vote(component, tris, &covering, s.b) } else { 0. };
+        let reason = if s.authored { "authored" }
+            else if !covered && s.covering.len() > free.len() { "authored-neighbour" }
+            else if !covered { "uncovered" } else if matched >= 0.6 { "already-right" } else { "replaced" };
+        if reason == "replaced" { remove.extend(component); add.extend(free.iter().copied()); }
         out.reports.push(Report {
             key: component.iter().map(|&i| svwc::surfaces::key(&tris[i].v)).min().unwrap(),
             triangles: component.iter().map(|&i| tris[i].v).collect(), reason, matched,
-            covering: covering.iter().map(|o| (o.id, o.model)).collect(), added: 0,
+            covering: s.covering.iter().map(|&n| (objects[n].id, objects[n].model)).collect(), added: 0,
         });
     }
     let kept: Vec<_> = tris.iter().enumerate().filter(|(i, t)| !remove.contains(i) && RAILING_MATERIALS.contains(&t.material))
         .map(|(_, t)| t.v.map(Vec3::from_array)).collect();
+    // Only the mesh where a box went: the bars and posts that stood in it.
+    let removed = Near::new(0.25, remove.iter().map(|&i| &tris[i].v));
     let mut added_counts = BTreeMap::new();
-    for o in objects.iter().filter(|o| add.contains(&o.id) && !blocked.contains(&o.id)) {
+    for &n in &add {
+        let o = objects[n];
         let first = out.added.len();
         out.added.extend(o.mesh.iter().filter(|t| {
             let p = t.map(Vec3::from_array); let c = (p[0]+p[1]+p[2])/3.;
-            !kept.iter().any(|t| distance(c, t) <= 0.0009 + 1e-8)
+            removed.contains(c) && !kept.iter().any(|t| distance(c, t) <= 0.0009 + 1e-8)
         }).map(|&v| Tri { v, material: 64 }));
         added_counts.insert(o.id, out.added.len() - first);
     }
@@ -417,6 +457,18 @@ mod tests {
         o.footprint = o.mesh.iter().map(|t| t.map(|p| [p[0],p[1]])).collect();
         let mut tris = slab(); let r = replace_with(&mut tris,&[&o],&Default::default());
         assert_eq!(tris.len(),12); assert!(r.added.is_empty()); assert_eq!(r.reports[0].reason,"uncovered");
+    }
+    #[test]
+    fn a_box_only_covered_by_a_blocked_object_stays() {
+        // One railing over an authored prop railing and a GTA box: neither changes.
+        let o = object(1,0.,5.,false); let mut tris = slab();
+        let prop: Vec<Tri> = box_mesh(3.,5.,0.,1.).into_iter().map(|v| Tri {v,material:64}).collect();
+        let keep: std::collections::HashSet<u64> = prop.iter().map(|t| svwc::surfaces::key(&t.v)).collect();
+        tris.extend(prop);
+        let r = replace_with(&mut tris,&[&o],&keep);
+        assert_eq!(tris.len(),24); assert!(r.added.is_empty() && r.removed.is_empty());
+        let mut reasons: Vec<_> = r.reports.iter().map(|r| r.reason).collect(); reasons.sort();
+        assert_eq!(reasons,["authored","authored-neighbour"]);
     }
     #[test]
     fn authored_prop_railing_stays() {

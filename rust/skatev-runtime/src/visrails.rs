@@ -108,7 +108,7 @@ fn data_hash(path: &Path) -> std::io::Result<u64> {
 
 /// The same receipt text for another sidecar written by `visual-rails`
 /// (high-res parks, visparks.rs).
-pub(crate) fn policy_text_for(path: &Path) -> std::io::Result<String> { policy_text(path) }
+pub fn policy_text_for(path: &Path) -> std::io::Result<String> { policy_text(path) }
 
 fn policy_text(path: &Path) -> std::io::Result<String> {
     Ok(format!("SVRL-POLICY 1\nStoryArchives=1\nStateGroups=live\nsource {:016x}\ndata {:016x}\n", policy_source(), data_hash(path)?))

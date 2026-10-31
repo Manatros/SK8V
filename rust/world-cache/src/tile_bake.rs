@@ -1099,7 +1099,10 @@ fn bake(
         Ok(n) => eprintln!("visible railings: {n} map cells"),
         Err(e) => return Err(format!("{e}; regenerate it with visual-rails").into()),
     }
-    for p in [&tracks, &visual, &parks, &bars] {
+    // The candidate file is several GB: hashed as a stream, never read whole.
+    sources.insert(bars.display().to_string(), SkateVRuntime::visrails::policy_text_for(&bars)?
+        .lines().find_map(|l| l.strip_prefix("data ")).and_then(|h| u64::from_str_radix(h, 16).ok()).ok_or("visible railings: no data hash")?);
+    for p in [&tracks, &visual, &parks] {
         if p.is_file() {
             sources.insert(p.display().to_string(), hash(&fs::read(p)?));
         }
