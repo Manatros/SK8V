@@ -76,11 +76,11 @@ int wmain(int argc, wchar_t** argv) {
     auto capture = [&](unsigned id, bool on) { options[id] = on; };
     SendWorldOptions(saved, capture);
     const auto original = options;
-    assert(options.size() == 11 && options.at(8) && options.at(10) && !options.at(14));
+    assert(options.size() == 12 && options.at(13) && options.at(8) && options.at(10) && !options.at(14));
     assert(!options.count(kHostOnlyWorldSwitch));
     std::set<unsigned> ids;
     for (const auto& [id, on] : options) ids.insert(id);
-    assert((ids == std::set<unsigned>{0,2,3,4,5,6,7,8,9,10,14}));
+    assert((ids == std::set<unsigned>{0,2,3,4,5,6,7,8,9,10,13,14}));
     assert(!options.count(11) && !options.count(12));
     g_plainGtaCompare = true;
     SendWorldOptions(saved, capture);

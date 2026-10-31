@@ -645,7 +645,6 @@ pub fn run_verify_world(args: Vec<String>) -> Result<(), Box<dyn Error>> {
     if !SkateVRuntime::visrails::verified_policy(&world.join("sk8v.visrails")) {
         return Err("unverified Story visual rails".into());
     }
-    SkateVRuntime::visbars::load(&world.join("sk8v.visbars"))?;
     let bounds = [args[1].parse()?,args[2].parse()?,args[3].parse()?,args[4].parse()?];
     let (baked,live,triangles,rails) = verify_coverage(&world.join("tiles"),bounds)?;
     println!("Verified world: {baked} invariant cells + {live} live cells, {triangles} triangles, {rails} rail records");

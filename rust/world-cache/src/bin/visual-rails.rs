@@ -301,8 +301,11 @@ fn export_parks(out: &Path, placed: &[(u32, Place)], archetypes: &HashMap<u32, A
 }
 
 /// Candidate limits use model height and placement scale, before rotation.
+/// A railing down a flight is tall and long (Vespucci vb_34_new_rails03:
+/// 16.7 m, 3.38 m; 2026-10-31), so the limits are wide; the bake only uses
+/// objects that mostly stand on GTA's railing material (visbars::eligible).
 fn candidate(height: f32, scale_z: f32, triangles: usize, width: f32) -> bool {
-    (0.3..=2.5).contains(&(height * scale_z.abs())) && triangles <= 3000 && width <= 16.0
+    (0.3..=6.0).contains(&(height * scale_z.abs())) && triangles <= 3000 && width <= 40.0
 }
 
 fn bar_shader(name: &str) -> bool { !name.to_ascii_lowercase().contains("decal") }
@@ -645,8 +648,9 @@ mod visbar_tests {
     use super::*;
     #[test]
     fn candidate_limits_and_shader_policy() {
-        assert!(candidate(1., 1., 3000, 16.));
-        for (h,s,n,w) in [(0.29,1.,2,1.),(2.51,1.,2,1.),(1.,1.,3001,1.),(1.,1.,2,16.01),(1.,3.,2,1.)] {
+        assert!(candidate(1., 1., 3000, 40.));
+        assert!(candidate(3.38, 1., 2952, 16.7));
+        for (h,s,n,w) in [(0.29,1.,2,1.),(6.01,1.,2,1.),(1.,1.,3001,1.),(1.,1.,2,40.01),(1.,7.,2,1.)] {
             assert!(!candidate(h,s,n,w));
         }
         for n in ["decal", "normal_spec_decal_detail", "mirror_decal", "DECAL_dirt"] { assert!(!bar_shader(n)); }

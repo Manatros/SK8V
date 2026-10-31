@@ -522,6 +522,10 @@ fn build_area_rules(center: Vec3, tris: impl Iterator<Item = ([[f32; 3]; 3], u32
     // Visible railing meshes skip every rule (no grind lines from them, no
     // filter drops them) and join the output unchanged (visbars design 2.6).
     let (bars, tris): (Vec<_>, Vec<_>) = tris.partition(|(_, tag)| tag & crate::live::VISBAR_TAG != 0);
+    let bars: Vec<_> = bars.into_iter().filter(|(t, _)| {
+        let p = t.map(Vec3::from_array);
+        p.iter().all(|v| v.is_finite()) && (p[1] - p[0]).cross(p[2] - p[0]).length_squared() > 1e-10
+    }).collect();
     let (gta, surfaces): (Vec<[Vec3; 3]>, Vec<u32>) = tris.into_iter()
         .map(|(t, tag)| (t.map(Vec3::from_array), tag))
         .filter(|(p, _)| p.iter().all(|v| v.is_finite())

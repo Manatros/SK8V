@@ -809,8 +809,10 @@ pub fn clean_static(tris: &mut Vec<Tri>, stairs: &[bool], tubes: &[(svwc::bounds
     };
     // Railings from the visible bars (design 2026-10-25-visible-bar-collision):
     // GTA's closed railing-material boxes become the railing's own visible
-    // mesh, before the park pass so it neither cuts nor replaces them.
-    let bars = if variants || crate::visbars::VISIBLE_RAILINGS.load(Relaxed) {
+    // mesh, before the park pass so it neither cuts nor replaces them. Bake
+    // only: live cells skip every object touching them, so a live build has
+    // nothing to swap (peer review 2026-10-31).
+    let bars = if variants {
         crate::visbars::replace(tris, exact)
     } else {
         crate::visbars::Replacement::default()
@@ -830,7 +832,6 @@ pub fn clean_static(tris: &mut Vec<Tri>, stairs: &[bool], tubes: &[(svwc::bounds
     if variants || (detailed && crate::visparks::HIGH_RES_PARKS.load(Relaxed)) {
         let stairs: Vec<Tri> = ramps.iter().chain(&steps).chain(&unflagged_steps).chain(&unflagged_ramps).copied()
             .chain(tris.iter().filter(|t| exact.contains(&svwc::surfaces::key(&t.v))).copied())
-            .chain(bars.added.iter().copied())
             .collect();
         let parks = crate::visparks::replace(tris, &stairs);
         census.park_replaced = parks.removed.len();

@@ -111,36 +111,56 @@ impl Reader<'_> {
     }
 }
 
-fn decode(bytes: &[u8]) -> io::Result<File> {
-    if bytes.get(..4) != Some(b"SVVB") { return Err(invalid()); }
-    let mut r = Reader(&bytes[4..]);
+/// The cell table: per cell its object count and byte range.
+type Table = HashMap<(i32, i32), (u32, u64, u64)>;
+
+fn table(head: &[u8], len: u64) -> io::Result<Table> {
+    if head.get(..4) != Some(b"SVVB") { return Err(invalid()); }
+    let mut r = Reader(&head[4..]);
     if r.u32()? != 1 || r.f32()? != CELL { return Err(invalid()); }
-    let n = r.u32()? as usize;
-    let head = 16usize.checked_add(n.checked_mul(20).ok_or_else(invalid)?).ok_or_else(invalid)?;
-    if head > bytes.len() { return Err(invalid()); }
-    let mut rows = Vec::new(); let mut seen = BTreeSet::new();
+    let n = r.u32()? as u64;
+    let end = 16u64.checked_add(n.checked_mul(20).ok_or_else(invalid)?).ok_or_else(invalid)?;
+    if end > len { return Err(invalid()); }
+    let mut rows = Vec::new();
     for _ in 0..n {
         let c = (r.u32()? as i32, r.u32()? as i32); let count = r.u32()?;
-        let lo = r.u32()? as u64; let hi = r.u32()? as u64;
-        let off = usize::try_from(lo | hi << 32).map_err(|_| invalid())?;
-        if off < head || off > bytes.len() || !seen.insert(c) || count == 0 { return Err(invalid()); }
+        let off = r.u32()? as u64 | (r.u32()? as u64) << 32;
+        if off < end || off > len || count == 0 { return Err(invalid()); }
         rows.push((off, c, count));
     }
     rows.sort_unstable();
-    if rows.first().map_or(bytes.len(), |v| v.0) != head { return Err(invalid()); }
-    let mut file = File::default();
+    if rows.first().map_or(len, |v| v.0) != end { return Err(invalid()); }
+    let mut out = Table::new();
     for (i, &(off, c, count)) in rows.iter().enumerate() {
-        let end = rows.get(i + 1).map_or(bytes.len(), |v| v.0);
-        let mut r = Reader(bytes.get(off..end).ok_or_else(invalid)?);
+        let next = rows.get(i + 1).map_or(len, |v| v.0);
+        if next < off || out.insert(c, (count, off, next - off)).is_some() { return Err(invalid()); }
+    }
+    Ok(out)
+}
+
+fn cell_objects(bytes: &[u8], c: (i32, i32), count: u32) -> io::Result<Vec<Object>> {
+    let mut r = Reader(bytes);
+    let mut out: Vec<Object> = Vec::new();
+    for _ in 0..count {
+        let o = r.object()?;
+        if out.iter().any(|p| p.id == o.id) || !cells(o.bounds(), CELL).any(|v| v == c) { return Err(invalid()); }
+        out.push(o);
+    }
+    if !r.0.is_empty() { return Err(invalid()); }
+    Ok(out)
+}
+
+/// Whole-file decode (tests and small files): every cell, objects shared by id.
+fn decode(bytes: &[u8]) -> io::Result<File> {
+    let table = table(bytes, bytes.len() as u64)?;
+    let mut file = File::default();
+    for (&c, &(count, off, len)) in &table {
         let mut ids = Vec::new();
-        for _ in 0..count {
-            let o = r.object()?;
-            if ids.contains(&o.id) || !cells(o.bounds(), CELL).any(|v| v == c) { return Err(invalid()); }
+        for o in cell_objects(&bytes[off as usize..(off + len) as usize], c, count)? {
             ids.push(o.id);
             if let Some(old) = file.objects.get(&o.id) { if *old != o { return Err(invalid()); } }
             else { file.objects.insert(o.id, o); }
         }
-        if !r.0.is_empty() { return Err(invalid()); }
         file.table.insert(c, ids);
     }
     for o in file.objects.values() {
@@ -149,29 +169,47 @@ fn decode(bytes: &[u8]) -> io::Result<File> {
     Ok(file)
 }
 
-static FILE: OnceLock<Option<File>> = OnceLock::new();
+/// The candidate file is large (every 0.3-2.5 m model, about 2.4 GB for
+/// Story Mode): only its cell table stays in memory; cells are read from
+/// disk when a bake area needs them (peer review 2026-10-31).
+struct Lazy { path: std::path::PathBuf, table: Table }
+static FILE: OnceLock<Option<Lazy>> = OnceLock::new();
 static LIVE: OnceLock<Option<(f32, BTreeSet<(i32, i32)>)>> = OnceLock::new();
 
+/// Bake only. The game never loads this file: with baked tiles every
+/// object touching a live cell is skipped anyway, and the plain-GTA compare
+/// turns VisibleRailings off.
 pub fn load(path: &Path) -> Result<usize, String> {
     let f = FILE.get_or_init(|| {
         if !verified_policy(path) { return None; }
-        std::fs::read(path).ok().and_then(|b| decode(&b).ok())
+        use std::io::Read;
+        let mut file = std::fs::File::open(path).ok()?;
+        let len = file.metadata().ok()?.len();
+        let mut head = vec![0; 16];
+        file.read_exact(&mut head).ok()?;
+        let n = u32::from_le_bytes(head[12..16].try_into().ok()?) as usize;
+        head.resize(16 + n.checked_mul(20)?, 0);
+        file.read_exact(&mut head[16..]).ok()?;
+        Some(Lazy { path: path.to_owned(), table: table(&head, len).ok()? })
     });
     f.as_ref().map(|f| f.table.len()).ok_or_else(|| format!("visible railings disabled: unverified or malformed SVVB file {}", path.display()))
 }
 
-/// Called once at runtime startup, even with BakedWorld off.
-pub fn load_live(dir: &Path) -> Result<(), String> {
-    let policy = LIVE.get_or_init(|| {
-        let size: f32 = std::fs::read_to_string(dir.join("tile-size.txt")).ok()?.trim().parse().ok()?;
-        if !size.is_finite() || size <= 0. { return None; }
-        let (_, _, cells) = crate::tiles::read_live_cells(dir, size)?;
-        Some((size, cells))
-    });
-    policy.as_ref().map(|_| ()).ok_or_else(|| "visible railings disabled: missing or invalid global tiles/live-cells.txt".to_owned())
+fn read_cells(f: &Lazy, wanted: impl Iterator<Item = (i32, i32)>) -> io::Result<Vec<Object>> {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut file = std::fs::File::open(&f.path)?;
+    let mut out: BTreeMap<u32, Object> = BTreeMap::new();
+    for c in wanted {
+        let Some(&(count, off, len)) = f.table.get(&c) else { continue };
+        let mut bytes = vec![0; usize::try_from(len).map_err(|_| invalid())?];
+        file.seek(SeekFrom::Start(off))?;
+        file.read_exact(&mut bytes)?;
+        for o in cell_objects(&bytes, c, count)? { out.entry(o.id).or_insert(o); }
+    }
+    Ok(out.into_values().collect())
 }
 
-/// The baker already computed the global state mask from its source inventory.
+/// The baker computed the global state mask from its source inventory.
 pub fn set_live(size: f32, cells: BTreeSet<(i32, i32)>) { let _ = LIVE.set(Some((size, cells))); }
 
 #[derive(Clone, Debug)]
@@ -203,9 +241,10 @@ pub fn replace(tris: &mut Vec<Tri>, keep: &std::collections::HashSet<u64>) -> Re
     let (Some(Some(f)), Some(Some((size, live)))) = (FILE.get(), LIVE.get()) else { return Replacement::default() };
     let b = tris.iter().flat_map(|t| t.v).fold([f32::INFINITY, f32::NEG_INFINITY, f32::INFINITY, f32::NEG_INFINITY], |b, p|
         [b[0].min(p[0]), b[1].max(p[0]), b[2].min(p[1]), b[3].max(p[1])]);
-    let ids: BTreeSet<_> = cells(b, CELL).filter_map(|c| f.table.get(&c)).flatten().copied().collect();
-    let objects: Vec<_> = ids.iter().filter_map(|id| f.objects.get(id))
-        .filter(|o| !cells(o.bounds(), *size).any(|c| live.contains(&c))).collect();
+    if !b[0].is_finite() { return Replacement::default(); }
+    // A malformed cell found mid-bake is fatal: the receipt said the file was whole.
+    let all = read_cells(f, cells(b, CELL)).expect("visible railings: unreadable SVVB cell");
+    let objects: Vec<_> = all.iter().filter(|o| !cells(o.bounds(), *size).any(|c| live.contains(&c))).collect();
     replace_with(tris, &objects, keep)
 }
 
@@ -220,8 +259,13 @@ fn distance(p: Vec3, t: &[Vec3; 3]) -> f32 {
     }).fold(f32::INFINITY, f32::min)
 }
 
-fn side_vote(component: &[usize], tris: &[Tri], objects: &[&Object]) -> f32 {
-    let mesh: Vec<_> = objects.iter().flat_map(|o| o.mesh.iter().map(|t| t.map(Vec3::from_array))).collect();
+fn side_vote(component: &[usize], tris: &[Tri], objects: &[&Object], b: [f32; 6]) -> f32 {
+    // Only mesh triangles whose box reaches the component's box (+3 cm).
+    let near = |t: &[Vec3; 3]| (0..3).all(|k| {
+        let (lo, hi) = (t.iter().map(|p| p[k]).fold(f32::INFINITY, f32::min), t.iter().map(|p| p[k]).fold(f32::NEG_INFINITY, f32::max));
+        hi >= b[2 * k] - 0.03 && lo <= b[2 * k + 1] + 0.03
+    });
+    let mesh: Vec<_> = objects.iter().flat_map(|o| o.mesh.iter().map(|t| t.map(Vec3::from_array))).filter(near).collect();
     let (mut close, mut count) = (0usize, 0usize);
     for &i in component {
         let t = tris[i].v.map(Vec3::from_array);
@@ -243,6 +287,13 @@ fn side_vote(component: &[usize], tris: &[Tri], objects: &[&Object]) -> f32 {
         if count == before { count += 1; close += usize::from(mesh.iter().any(|m| distance((t[0]+t[1]+t[2])/3., m) <= 0.0009)); }
     }
     if count == 0 { 0. } else { close as f32 / count as f32 }
+}
+
+/// Share of an object's mesh vertices inside any of the boxes, at least half.
+fn eligible(o: &Object, boxes: &[[f32; 6]]) -> bool {
+    let n = o.mesh.len() * 3;
+    let inside = o.mesh.iter().flatten().filter(|p| boxes.iter().any(|b| (0..3).all(|k| p[k] >= b[2 * k] && p[k] <= b[2 * k + 1]))).count();
+    n > 0 && inside * 2 >= n
 }
 
 fn replace_with(tris: &mut Vec<Tri>, objects: &[&Object], keep: &std::collections::HashSet<u64>) -> Replacement {
@@ -269,16 +320,36 @@ fn replace_with(tris: &mut Vec<Tri>, objects: &[&Object], keep: &std::collection
     for (i, t) in tris.iter().enumerate().filter(|(_, t)| RAILING_MATERIALS.contains(&t.material)) {
         let _ = t; components.entry(root(&mut parent, i)).or_default().push(i);
     }
+    // Only railings: an object takes part when at least half of its mesh
+    // vertices lie in the box of some railing-material component (+15 cm).
+    // Without it a park or planter model over a railing box would cover it
+    // and add its whole mesh (2026-10-31, limits widened for stair railings).
+    let boxes: Vec<[f32; 6]> = components.values().map(|c| {
+        let mut b = [f32::INFINITY, f32::NEG_INFINITY, f32::INFINITY, f32::NEG_INFINITY, f32::INFINITY, f32::NEG_INFINITY];
+        for p in c.iter().flat_map(|&i| tris[i].v) { for k in 0..3 { b[2 * k] = b[2 * k].min(p[k] - 0.15); b[2 * k + 1] = b[2 * k + 1].max(p[k] + 0.15); } }
+        b
+    }).collect();
+    let objects: Vec<&Object> = objects.iter().copied().filter(|o| eligible(o, &boxes)).collect();
+    let objects = &objects[..];
     let mut remove: BTreeSet<usize> = BTreeSet::new(); let mut add: BTreeSet<u32> = BTreeSet::new();
+    let mut blocked: BTreeSet<u32> = BTreeSet::new();
     for component in components.values() {
         let corners: BTreeSet<_> = component.iter().flat_map(|&i| tris[i].v).map(|p| p.map(f32::to_bits)).collect();
         let corners: Vec<_> = corners.into_iter().map(|p| Vec3::from_array(p.map(f32::from_bits))).collect();
-        let covering: Vec<_> = objects.iter().copied().filter(|o| corners.iter().filter(|&&p| o.contains(p)).count() * 4 >= corners.len()).collect();
+        // Component box (x, y, z ranges); objects whose footprint box misses it cannot cover it.
+        let mut b = [f32::INFINITY, f32::NEG_INFINITY, f32::INFINITY, f32::NEG_INFINITY, f32::INFINITY, f32::NEG_INFINITY];
+        for p in &corners { for k in 0..3 { b[2 * k] = b[2 * k].min(p[k]); b[2 * k + 1] = b[2 * k + 1].max(p[k]); } }
+        let covering: Vec<_> = objects.iter().copied()
+            .filter(|o| { let ob = o.bounds(); ob[0] <= b[1] && ob[1] >= b[0] && ob[2] <= b[3] && ob[3] >= b[2] && o.z[0] <= b[5] && o.z[1] >= b[4] })
+            .filter(|o| corners.iter().filter(|&&p| o.contains(p)).count() * 4 >= corners.len()).collect();
         let covered = corners.iter().filter(|&&p| covering.iter().any(|o| o.contains(p))).count() as f32 / corners.len() as f32 >= 0.9;
-        let matched = if covered && !component.iter().any(|&i| keep.contains(&svwc::surfaces::key(&tris[i].v))) { side_vote(component, tris, &covering) } else { 0. };
+        let matched = if covered && !component.iter().any(|&i| keep.contains(&svwc::surfaces::key(&tris[i].v))) { side_vote(component, tris, &covering, b) } else { 0. };
         let authored = component.iter().any(|&i| keep.contains(&svwc::surfaces::key(&tris[i].v)));
         let reason = if authored { "authored" } else if !covered { "uncovered" } else if matched >= 0.6 { "already-right" } else { "replaced" };
         if reason == "replaced" { remove.extend(component); add.extend(covering.iter().map(|o| o.id)); }
+        // An object over an authored prop railing adds nothing anywhere: its
+        // bar would sit over the lowered prop bar (peer review 2026-10-31).
+        if reason == "authored" { blocked.extend(covering.iter().map(|o| o.id)); }
         out.reports.push(Report {
             key: component.iter().map(|&i| svwc::surfaces::key(&tris[i].v)).min().unwrap(),
             triangles: component.iter().map(|&i| tris[i].v).collect(), reason, matched,
@@ -288,7 +359,7 @@ fn replace_with(tris: &mut Vec<Tri>, objects: &[&Object], keep: &std::collection
     let kept: Vec<_> = tris.iter().enumerate().filter(|(i, t)| !remove.contains(i) && RAILING_MATERIALS.contains(&t.material))
         .map(|(_, t)| t.v.map(Vec3::from_array)).collect();
     let mut added_counts = BTreeMap::new();
-    for o in objects.iter().filter(|o| add.contains(&o.id)) {
+    for o in objects.iter().filter(|o| add.contains(&o.id) && !blocked.contains(&o.id)) {
         let first = out.added.len();
         out.added.extend(o.mesh.iter().filter(|t| {
             let p = t.map(Vec3::from_array); let c = (p[0]+p[1]+p[2])/3.;
@@ -337,6 +408,15 @@ mod tests {
             assert_eq!(crate::live::shown_with_railings(crate::live::SLAB_TAG, visible), !visible);
             assert_eq!(crate::live::shown_with_railings(crate::live::VISBAR_TAG, visible), visible);
         }
+    }
+    #[test]
+    fn a_large_model_over_a_railing_box_is_not_a_railing() {
+        // A park model whose mesh lies mostly away from the box adds nothing.
+        let mut o = object(1,0.,2.,false);
+        for z in [-4.,-3.,-2.,-1.5] { o.mesh.extend(box_mesh(-20.,20.,z,z+0.1)); }
+        o.footprint = o.mesh.iter().map(|t| t.map(|p| [p[0],p[1]])).collect();
+        let mut tris = slab(); let r = replace_with(&mut tris,&[&o],&Default::default());
+        assert_eq!(tris.len(),12); assert!(r.added.is_empty()); assert_eq!(r.reports[0].reason,"uncovered");
     }
     #[test]
     fn authored_prop_railing_stays() {
