@@ -1,85 +1,97 @@
-# GTAxSkate's additions to SK8V
+# GTAxSkate integration notes for SK8V
 
-**To play:** download [GTAxSkate-Setup.zip](https://github.com/Manatros/GTAxSkate/releases/download/dev-build/GTAxSkate-Setup.zip), unzip, double-click `Install GTAxSkate.cmd`. Help: [GTAxSkate](https://github.com/Manatros/GTAxSkate).
+This fork extends [SK8V](https://github.com/becaring/SK8V) 1.1.10. It holds the
+source, tests and build tools needed to inspect and integrate our additions.
+Player installation belongs in [GTAxSkate](https://github.com/Manatros/GTAxSkate).
+This is a combined integration tree; the areas below are logical boundaries,
+not a claim that independently tested feature pull requests already exist.
 
-This fork of [SK8V](https://github.com/becaring/SK8V) (by becaring) is what
-[GTAxSkate](https://github.com/Manatros/GTAxSkate) plays: SK8V as it is, plus a
-set of additions, each in its own branch so SK8V can take any of them as a pull
-request. The branch `skatemods` currently uses SK8V 1.1.9 plus our contributions and
-package patches. Published installers and the newest development build may differ.
-The package test plan controls the next promotion; newer upstream versions require
-compatibility checks, never an automatic assumption.
+## Preserve the upstream core
 
-## Why it is built this way
+SK8V owns skating, animation, audio, transitions and state. Entry uses its weapon
+wheel; hold Y (E on keyboard) to leave. Our additions fill demonstrated gaps and
+provide optional host services. Skate engine changes are recorded in
+`patches/skate/` and applied by `tools/prepare-skate-overlay.ps1`; do not substitute
+a second skating engine. Required host/runtime ABI checks still apply: distribute
+the tested pair rather than mixing arbitrary versions.
 
-GTAxSkate started as its own Skate 3 mod for GTA V, with its own Skate core,
-ground probes, park collision, board sounds and a lot of board customization.
-SK8V does the core better: Skate's own audio engine, the pose hook, live
-collision, Hall of Meat, skitching, guns on the board. So the decision (2026-10-10) was:
+## Integration boundaries
 
-1. **SK8V is the base.** Skating, animation, collision, audio and the HUD stay
-   SK8V's. GTAxSkate does not keep a second core.
-2. **GTAxSkate fills the gaps,** and gives each one back to SK8V in SK8V's own
-   code and style, so becaring can take it as it is and grow it.
-3. **Every addition is independent:** one branch per feature, cut from SK8V's
-   `main`, its own INI keys and menu entries, README and INI template lines.
-   Runtime functions are optional exports (looked up with `GetProcAddress`), where possible.
-   Required exports and ABI are still checked; arbitrary host/runtime combinations
-   are not supported.
-4. **SK8V's behaviour stays SK8V's by default.** Options that change how SK8V
-   plays (GTA's camera, knocked people surviving) are off in SK8V's template;
-   the GTAxSkate installer turns on the GTAxSkate defaults.
-5. **The best working solution wins.** Where SK8V already does something well,
-   GTAxSkate's version was dropped; where GTAxSkate's worked better (the vehicle
-   shapes, the board shop), it was ported into SK8V's structure.
+| Area | Source and purpose |
+|---|---|
+| World collision/grinds | Runtime `world.rs`, `live.rs`, `tiles.rs`, `rails.rs`, `visrails.rs`; `rust/world-cache`. Preserve active GTA states, fill demonstrated gaps and derive rails from authored geometry. Contract below. |
+| Vehicles/props | Runtime `dynamic.rs`, `worker.rs`; host entity gathering. Prefer per-instance bounds. A fixed prop leaves both dynamic triangles and rails only after its matching static version is installed. Detached car parts must not inherit whole-car collision. |
+| Object placement | Host `object_dropper.cpp`, `object_dropper_logic.h`. Resolve the selected model and height after this frame's movement/lift. Manual lift is −4 to +4 m because GTA's ground query can select overhead surfaces. |
+| Keyboard | `rust/skate-input`, runtime keyboard exports and host input/menu. Emulate controller input while preserving upstream entry/leave; an idle controller must not suppress active keyboard input. |
+| Board shop/parts | Runtime `shop.rs`, `board_shop.rs`, host board parts and preparation tools. Extract the player's own disc assets; preserve the animated board skeleton and skin flags. Static replacements can break trucks/wheels. |
+| Camera/tuning/radio | Host camera/menu/radio and runtime tuning exports. Keep additions optional and preserve upstream behavior unless a preset explicitly selects alternatives. |
 
-## The branches
+## Collision data contract and rationale
 
-| Branch | What it adds | How it works |
-|---|---|---|
-| `contrib/keyboard-mouse` | Keyboard and mouse as a controller; the keys on screen; every key rebindable in the menu; F gets on and off; F10 opens the menu | `rust/skate-input` turns held keys into a controller frame (the left stick ramps like a thumbstick, the trick stick is typed with the arrow keys, Space is the pop: held = crouch, let go = flick). The host uses it alongside a controller: whichever was used last plays, so an idle or virtual pad (Steam Input, DS4Windows) never shuts the keyboard out. Keys in `SkateVKeys.txt`; the menu page "Keyboard keys" rebinds them (`sv_keyboard_bind`). |
-| `contrib/board-shop` | Skate 3's board shop in GTA's street clothing stores; the bought board ridden; boards on show; wear | Every deck, truck, wheel, griptape and paint of Skate 3 is built (from the player's own disc) as a drawable with the native board's seven-bone skeleton (`tools/prepare-board-parts.py`), so trucks turn and wheels spin like SK8V's board. The host loads only the chosen parts from loose files (no DLC, no archetype limit) and poses them with SK8V's board pose. The runtime keeps the catalog, prices, each character's garage and the store's show (`shop.rs`, `board_shop.rs`). G (or E while looking at the boards on show) opens it; cash is the character's own. |
-| `contrib/gta-camera` | A third person camera while skating (near, middle, far) that keeps out of the skater, the view kept between walking and skating, the skater's eyes, R a cinematic camera and a skate filmer that look filmed, a Camera menu page | Near, middle and far follow the board, not the body, so flips and bails never swing the camera into the skater; it swings in behind the direction of travel and the mouse turns it. The view last used carries over between walking and skating (`CameraRemember=`), `CameraView=` is the standard one; first person is GTA's, the skater's eyes sit at Skate's head. The cinematic camera gets 2.39:1 bars, a film grade and shallow focus; the filmer 4:3 and a handheld shake. The cinematic camera (`action_cam.rs`, tested) cuts between chase, roadside, side, overhead, wheel, telephoto and front shots like GTA's in a car. |
-| `contrib/trainer-tuning` | Pop, grind pop, push, braking, steering, wobble, grip, turn power, manual drag, hold fakie, hippie jump height; stamina | Skate's `TrainerTuning` multipliers were read but never set: overlay patch 0049 sets them, patch 0050 adds the hippie jump's height (1.6 clears a car). GTA's stamina skill scales push and pop (85 % with none); skating at speed trains it. |
-| `contrib/vehicle-shapes` | Cars you can ride and hippie jump that SK8V only knows as boxes | SK8V's extracted bounds miss many vehicles (most DLC cars). Such a model is measured once with up to 500 probes down its own up axis; the heights make a roof, hood and trunk, walled down to 0.2 m above the ground (`vehicle_shapes.rs`, tested), used instead of the box. |
-| `contrib/map-helpers` | GPS route while skating; GTA's skate parks on the map | GTA drops the route when the player is neither on foot nor in a vehicle; it is drawn as a vehicle's. The parks were found in GTA's own map data. |
-| `contrib/skate-radio` | Skating tunes the radio to a chosen station (Self Radio: Skate 3's soundtrack) | Once per skate session, unless the radio is already on; says once if Self Radio is empty. |
-| `contrib/injuries` | A limp after hard bails | The worst bone knock of a bail (SK8V's bail grunt measure) from 9 m/s on gives GTA's `move_m@injured` walk on foot for 30 s to 2 min. |
-| `contrib/board-shop` (board in hand) | see above: the board picked in the wheel stays in hand in GTA, swung with GTA's melee, blows wear it | `fork-extras` holds the CarryBoard switch; `boardparts::Hand` shows the HD parts on SK8V's hidden hammer. |
-| `contrib/gentle-peds` | Option: people the board knocks down survive | Invincible from the knock until they are up again. |
+The former city bake combined mutually exclusive map states, including intact
+and destroyed buildings, and treated every present tile as authoritative. Its
+rail exporter also scanned Online-only packs. Solid boxes derived from absent
+models can therefore obstruct Story Mode. Valid file checksums alone do not
+establish correct geometry.
 
+1. Share the Story archive order in `world-cache/src/vfs.rs`; honor enabled patch
+   startup archives through `packs.rs`. Reject unreadable required metadata.
+2. Validate manifests before classifying groups. Script, time and weather
+   dependent groups need GTA's active state. Place local MLO bounds through
+   their instances, never at world origin.
+3. Bake invariant cells. The mandatory `live-cells.txt` policy binds rules,
+   inventory, size, count and body digest; tiles also bind its digest.
+4. Read active geometry for live cells before expensive cleanup/rail finding.
+   Keep 13 m context for closed-solid cleanup, then clip to cell ownership.
+   Never overlay baked and live collision for the same cell.
+5. Do not refill those cells from the old raw fallback: it also contains alternate
+   floors. Watch for later loads even when an active state currently has no
+   bounds. Invalid policy on an existing enabled dataset must retain the prior
+   area rather than silently enabling unrestricted cached floors.
+6. Regenerate visible rails under the same Story/state policy. The adjacent
+   `.visrails.policy` receipt binds exporter policy and exact bytes. Old all-DLC
+   exports are rejected. Live patches retain active physics tubes and omit
+   static visual/track sidecars; sidecar-only grind lines may be absent there.
 
-`fork-extras` holds two small fork-only changes (a runtime handle export, and
-Y with the board in hand getting on). `skatemods` is `fork-extras` plus a merge
-of every branch above, made anew by GTAxSkate's `scripts/sk8v-sync.ps1` on each
-SK8V release (it resolves the list conflicts the branches share, checks that
-nothing lost a brace, builds and runs the tests).
+`tiles::rules_hash` covers archive selection, extraction, placement and final
+surface rules, with canonical line endings. Semantic changes require matching
+data regeneration; relabeling old output with a new hash is unsafe. Disabling
+`BakedWorld` explicitly selects the legacy live/fallback path.
 
-## Status
+Collision view uses closest surface/segment distance. Corner/centroid selection
+hid large nearby walls while they still collided; drawing remains capped.
 
-The current development branch uses SK8V 1.1.9. The latest wheel direction
-fix was confirmed in game on 2026-10-16; speed appeared correct. Standstill,
-other animation checks, the optional board composer, and broader release
-acceptance remain covered by the GTAxSkate test plan. Historical stable
-releases do not imply acceptance of this development snapshot.
+## Build, validation and remaining limits
 
+Follow [BUILDING.md](BUILDING.md) for the paired build, pinned dependencies and
+overlay preparation. Focused checks from the repository root:
 
-## Current package integration status (2026-10-16)
+```text
+cargo test --offline --manifest-path rust/Cargo.toml -p skatev-runtime --lib
+cargo test --offline --manifest-path rust/Cargo.toml -p skatev-world-cache --all-targets
+```
 
-Runtime ownership/callback/HUD reload fixes, camera clearance and Developer
-provenance/diagnostics are independent overlays maintained in the player repo's
-patches directory and checked before application. Controller camera issue1 is
-tracked centrally in GTAxSkate. Gameplay acceptance is pending the next test.
-FiveM friends support is a separate SK8M Lua target; the Story ASI is not its
-network runtime. LS Skate is not integrated. No AI skaters are included.
+Host fixtures are under `host/tests`, covering placement, menu, camera and board
+parts. Data-dependent tests are ignored by default and take explicit local paths
+through environment variables. Never commit archives, keys or extracted assets.
 
-Maintainer adoption notes:
-- https://github.com/Manatros/GTAxSkate/blob/dev/SK8V-SAVE-RELOAD-INTEGRATION.md
-- https://github.com/Manatros/GTAxSkate/blob/dev/SK8V-RELOAD-LIFECYCLE.md
-- https://github.com/Manatros/GTAxSkate/blob/dev/SK8V-CAMERA-VERSIONS.md
-- https://github.com/Manatros/GTAxSkate/blob/dev/CONTRIBUTING.md
+Export verified rails, bake a representative small region, verify source/policy
+identities and coverage, then rebuild the city. Complete coverage means baked
+cells **plus intentional live cells**; do not endlessly retry live cells as
+failed tiles. Command forms are in [WORLD-BAKE.md](docs/WORLD-BAKE.md).
 
-Next test and release gates:
-https://github.com/Manatros/GTAxSkate/blob/dev/TEST-RUN.md
+Tests establish invariants, not gameplay acceptance. Compare upstream and the
+candidate at the same location/state: open streets, changing states, bridges,
+metro contact performance, grind transitions and placed props. The current
+collision correction still requires gameplay validation. Moving-object grinds
+and repeated-pattern stair recognition remain unresolved. Propose broader work
+separately with a specific reproduction and meaningful tests.
 
-Board composition setup and rollback: [guide](https://github.com/Manatros/GTAxSkate/blob/dev/BOARD-COMPOSITION.md).
+## Repository and license responsibilities
+
+Keep implementation, meaningful tests, integration rationale and required build
+tools here. Keep player launchers, installation payloads and user help in
+GTAxSkate. Exclude internal task logs, AI instructions, experiments and generated
+game data from both public trees. Preserve attribution, component licenses and
+source availability for distributed binaries; this fork supplies no proprietary
+game assets or keys.

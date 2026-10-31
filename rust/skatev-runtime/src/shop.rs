@@ -19,6 +19,9 @@ pub enum Tier {
     Mid,
     /// Ponsonbys.
     High,
+    /// A board shop (the Vespucci boardwalk's first, design
+    /// 2026-10-26-shops-step1): the widest choice, a few of each per day.
+    Skate,
 }
 
 impl Tier {
@@ -27,6 +30,7 @@ impl Tier {
             Self::Low => "Binco & Discount Store",
             Self::Mid => "Suburban",
             Self::High => "Ponsonbys",
+            Self::Skate => "Skate Shop",
         }
     }
 
@@ -44,6 +48,7 @@ impl Tier {
             "low" | "binco" | "discount" => Some(Self::Low),
             "mid" | "suburban" => Some(Self::Mid),
             "high" | "ponsonbys" => Some(Self::High),
+            "skate" | "skateshop" => Some(Self::Skate),
             _ => None,
         }
     }
@@ -140,7 +145,7 @@ pub fn price_of(tier: Tier, kind: Kind, key: &str) -> u32 {
     let base = lo + (fnv(key) % ((hi - lo) / 5 + 1)) * 5;
     match tier {
         Tier::Low => ((base * 4 / 5).div_ceil(5) * 5).max(5),
-        Tier::Mid => base,
+        Tier::Mid | Tier::Skate => base,
         Tier::High => base * 3,
     }
 }
@@ -846,6 +851,50 @@ pub fn show_picks<T: Clone>(boards: &[T], store: (i32, i32), day: u32, count: us
     (0..count).map(|i| boards[(seed + i * 37) % boards.len()].clone()).collect()
 }
 
+/// Complete boards Suburban sells besides those on its wall (Manatros
+/// 2026-10-26: "the 4 boards on the wall and a handful extra").
+pub const MID_EXTRA: usize = 4;
+
+/// Boards on show per store kind: Binco sells exactly these, Suburban these
+/// and `MID_EXTRA` more (design 2026-10-26-shops-step1).
+pub fn on_show(tier: Tier) -> usize {
+    match tier {
+        Tier::Low | Tier::Mid => 4,
+        Tier::Skate => 6,
+        _ => 5,
+    }
+}
+
+/// `count` different items of `items` for a store on game day `day`: the
+/// same all day, others the next day (`salt` keeps a store's sections apart).
+pub fn picks_distinct<T: Clone>(items: &[T], store: (i32, i32), day: u32, salt: u32, count: usize) -> Vec<T> {
+    let mut order: Vec<usize> = (0..items.len()).collect();
+    let mut seed = ((store.0.unsigned_abs() as u64).wrapping_mul(7919) ^ (store.1.unsigned_abs() as u64).wrapping_mul(104_729))
+        .wrapping_add(u64::from(day) * 131).wrapping_add(u64::from(salt).wrapping_mul(2_654_435_761)) | 1;
+    // Fisher-Yates with a small LCG: deterministic on every machine.
+    for i in (1..order.len()).rev() {
+        seed = seed.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1_442_695_040_888_963_407);
+        order.swap(i, (seed >> 33) as usize % (i + 1));
+    }
+    order.into_iter().take(count).map(|i| items[i].clone()).collect()
+}
+
+/// How many offers of a stocked section a store kind shows per day (0: the
+/// section is not sold there). Complete boards are the display's.
+pub fn section_count(tier: Tier, title: &str) -> usize {
+    match tier {
+        Tier::Low | Tier::High => 0,
+        Tier::Mid => match title {
+            "Build: Deck" => 5,
+            "Build: Trucks" => 3,
+            "Build: Wheels" => 4,
+            "Build: Griptape" | "Build: Wheel paint" => 4,
+            _ => 0,
+        },
+        Tier::Skate => 12,
+    }
+}
+
 /// The shows, one line each: `show3 x y  ax ay az  nx ny  floor  till|wall`.
 pub fn shows_to_text(shows: &[ShowCase]) -> String {
     let mut out = String::from("# Skate 3 for GTA V: where each store shows its boards (delete a line to place them anew).\n");
@@ -894,6 +943,23 @@ pub fn preview_start() -> bevy_math::Quat {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn daily_picks_are_distinct_steady_and_rotate() {
+        let items: Vec<u32> = (0..40).collect();
+        let a = picks_distinct(&items, (5, 7), 10, 0, 6);
+        assert_eq!(a.len(), 6);
+        assert_eq!(a.iter().collect::<std::collections::BTreeSet<_>>().len(), 6, "no repeats");
+        assert_eq!(a, picks_distinct(&items, (5, 7), 10, 0, 6), "the same all day");
+        assert_ne!(a, picks_distinct(&items, (5, 7), 11, 0, 6), "new the next day");
+        assert_ne!(a, picks_distinct(&items, (6, 7), 10, 0, 6), "each store its own");
+        assert_eq!(picks_distinct(&items[..3], (5, 7), 10, 0, 6).len(), 3, "never more than there are");
+        assert_eq!(section_count(Tier::Low, "Build: Deck"), 0);
+        assert_eq!(section_count(Tier::Mid, "Build: Deck"), 5);
+        assert_eq!(section_count(Tier::Mid, "Build: Sticker"), 0);
+        assert_eq!(section_count(Tier::Skate, "Build: Truck Base paint"), 12);
+        assert_eq!((on_show(Tier::Low), on_show(Tier::Mid), on_show(Tier::Skate)), (4, 4, 6));
+    }
+
     #[test]
     fn the_decks_own_grip_is_free_owned_and_takes_the_griptape_off() {
         let offers = super::grip_offers(None, super::Tier::Mid);

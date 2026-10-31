@@ -34,6 +34,6 @@ PropCollisionIndex::Route PropCollisionIndex::Select(const SvDynamicBody& b, boo
     if (HasTemplate(b.model_hash)) return Route::Exact;
     if (!object) return Route::Box; // Existing ped/vehicle bounds and reactions.
     if (door) return unlocked ? Route::None : Route::Box;
-    const float largest = (std::max)({b.fallback.half_extents.x, b.fallback.half_extents.y, b.fallback.half_extents.z});
-    return largest <= 2.5f ? Route::Box : Route::None;
+    // GTA's physics-level bound preserves the actual shape of untemplated props.
+    return Route::None;
 }

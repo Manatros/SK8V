@@ -13,14 +13,26 @@ pub const PED: u32 = 1 << 9;
 pub const FOLIAGE: u32 = 1 << 19;
 pub const TEST_WEAPON: u32 = 1 << 21;
 pub const TEST_CAMERA: u32 = 1 << 22;
+pub const GLASS: u32 = 1 << 26;
+pub const MAP_RIVER: u32 = 1 << 27;
+
+/// Liquid collision materials (125..=128: water, blood, oil, petrol): GTA
+/// swims or wades through them, so the skater must not stand on them.
+pub fn is_water(material: u8) -> bool {
+    matches!(material, 125..=128)
+}
+
 
 /// What a skater collides with (the bake's `primitives::skater_collides`):
-/// what a ped collides with, minus foliage. An archetype with no flags is kept.
+/// what a ped collides with, minus foliage and river surfaces.
 pub fn skater_collides(type_flags: u32, include: u32) -> bool {
     if type_flags == 0 && include == 0 {
         return true;
     }
-    type_flags & FOLIAGE == 0 && include & PED != 0
+    if type_flags & (FOLIAGE | MAP_RIVER) != 0 {
+        return false;
+    }
+    include & PED != 0
 }
 
 /// A surface GTA's bullets and camera stop at that a ped passes: the
@@ -68,6 +80,13 @@ pub struct Place {
 }
 
 impl Place {
+    /// Mean axis length: how a placed prop's scale widens its tubes (1 for map bounds).
+    pub fn scale(&self) -> f32 {
+        if self.identity { return 1.0; }
+        let len = |v: V3| (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt();
+        (len(self.rows[0]) + len(self.rows[1]) + len(self.rows[2])) / 3.0
+    }
+
     pub fn apply(&self, p: V3) -> V3 {
         if self.identity {
             return p;
@@ -139,7 +158,7 @@ fn solid_vegetation(shape: &[[V3; 3]], place: &Place, material: u8) -> bool {
 pub fn primitive(h: &[u8], place: &Place, clip: Clip, out: &mut Vec<Tri>, counts: &mut Counts) {
     let (lo, hi, c) = (v3_at(h, 0x30), v3_at(h, 0x20), v3_at(h, 0x50));
     let (radius, margin, material) = (f32_at(h, 0x14), f32_at(h, 0x2C), h[0x4C]);
-    if !(finite(lo) && finite(hi) && finite(c) && radius.is_finite() && margin.is_finite()) {
+    if is_water(material) || !(finite(lo) && finite(hi) && finite(c) && radius.is_finite() && margin.is_finite()) {
         return;
     }
     counts.primitives += 1;
@@ -197,6 +216,43 @@ pub fn geometry(
     out: &mut Vec<Tri>,
     counts: &mut Counts,
 ) {
+    geometry_marked(verts, polys, materials, poly_material, quantum, centre, place, clip, out, &mut Vec::new(), counts);
+}
+
+/// The STAIRS bit of an 8 B material (CodeWalker `BoundMaterial_s`: flags =
+/// `Data1 >> 24 | (Data2 & 0xFF) << 8`, `FLAG_STAIRS` = 1): GTA's ped
+/// collision covers a flight of steps with a ramp carrying it.
+pub const MATERIAL_STAIRS: u8 = 1;
+
+// Capsule and cylinder polygons decoded on this thread (world space: ends
+// and radius), for `take_tubes`: GTA builds coping, handrails and railing
+// bars as these, and their top line is the rail.
+thread_local! {
+    static TUBES: std::cell::RefCell<Vec<(V3, V3, f32)>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// The capsules and cylinders `geometry_marked` decoded on this thread since
+/// the last call (world space ends, radius).
+pub fn take_tubes() -> Vec<(V3, V3, f32)> {
+    TUBES.with_borrow_mut(std::mem::take)
+}
+
+/// As `geometry`, also pushing to `stairs` (one entry per triangle pushed to
+/// `out`) whether its material carries `MATERIAL_STAIRS`.
+#[allow(clippy::too_many_arguments)]
+pub fn geometry_marked(
+    verts: &[u8],
+    polys: &[u8],
+    materials: &[u8],
+    poly_material: &[u8],
+    quantum: V3,
+    centre: V3,
+    place: &Place,
+    clip: Clip,
+    out: &mut Vec<Tri>,
+    stairs: &mut Vec<bool>,
+    counts: &mut Counts,
+) {
     let nv = verts.len() / 6;
     let local = |i: u16| -> Option<V3> {
         let i = (i & 0x7FFF) as usize;
@@ -206,20 +262,26 @@ pub fn geometry(
         let c = |k: usize| i16::from_le_bytes([verts[i * 6 + k * 2], verts[i * 6 + k * 2 + 1]]) as f32;
         Some(add([c(0) * quantum[0], c(1) * quantum[1], c(2) * quantum[2]], centre))
     };
-    let push = |t: [V3; 3], material: u8, out: &mut Vec<Tri>| {
+    let push = |t: [V3; 3], material: u8, stair: bool, out: &mut Vec<Tri>, stairs: &mut Vec<bool>| {
         if t.iter().all(|v| finite(*v)) && touches(&t, clip) {
             out.push(Tri { v: t, material });
+            stairs.push(stair);
         }
     };
     let mut scratch: Vec<[V3; 3]> = Vec::new();
     for (i, rec) in polys.as_chunks::<16>().0.iter().enumerate() {
         let kind = rec[0] & 7;
-        let material = poly_material.get(i).and_then(|&m| materials.get(m as usize * 8)).map_or(0, |&m| m);
+        let entry = poly_material.get(i).map(|&m| m as usize * 8);
+        let material = entry.and_then(|m| materials.get(m)).map_or(0, |&m| m);
+        let stair = entry.and_then(|m| materials.get(m + 3)).is_some_and(|&f| f & MATERIAL_STAIRS != 0);
+        if is_water(material) {
+            continue;
+        }
         if kind == 0 {
             let v = [u16_at(rec, 4), u16_at(rec, 6), u16_at(rec, 8)].map(local);
             if let [Some(a), Some(b), Some(c)] = v {
                 counts.triangles += 1;
-                push([a, b, c].map(|p| place.apply(p)), material, out);
+                push([a, b, c].map(|p| place.apply(p)), material, stair, out, stairs);
             }
             continue;
         }
@@ -227,7 +289,10 @@ pub fn geometry(
         scratch.clear();
         let ok = match kind {
             1 => local(u16_at(rec, 2)).map(|c| shapes::sphere(c, f32_at(rec, 4), &mut scratch)),
-            2 => local(u16_at(rec, 2)).zip(local(u16_at(rec, 8))).map(|(a, b)| shapes::capsule(a, b, f32_at(rec, 4), &mut scratch)),
+            2 => local(u16_at(rec, 2)).zip(local(u16_at(rec, 8))).map(|(a, b)| {
+                tube(place.apply(a), place.apply(b), f32_at(rec, 4) * place.scale());
+                shapes::capsule(a, b, f32_at(rec, 4), &mut scratch)
+            }),
             3 => match [4, 6, 8, 10].map(|o| local(u16_at(rec, o))) {
                 [Some(a), Some(b), Some(c), Some(d)] => {
                     shapes::box_from_corners([a, b, c, d], &mut scratch);
@@ -235,7 +300,10 @@ pub fn geometry(
                 }
                 _ => None,
             },
-            4 => local(u16_at(rec, 2)).zip(local(u16_at(rec, 8))).map(|(a, b)| shapes::cylinder(a, b, f32_at(rec, 4), &mut scratch)),
+            4 => local(u16_at(rec, 2)).zip(local(u16_at(rec, 8))).map(|(a, b)| {
+                tube(place.apply(a), place.apply(b), f32_at(rec, 4) * place.scale());
+                shapes::cylinder(a, b, f32_at(rec, 4), &mut scratch)
+            }),
             _ => None,
         };
         if crate::clean::soft_vegetation(material) && !(ok.is_some() && solid_vegetation(&scratch, place, material)) {
@@ -244,9 +312,15 @@ pub fn geometry(
         }
         if ok.is_some() {
             for t in scratch.drain(..) {
-                push(t.map(|p| place.apply(p)), material, out);
+                push(t.map(|p| place.apply(p)), material, stair, out, stairs);
             }
         }
+    }
+}
+
+fn tube(a: V3, b: V3, r: f32) {
+    if finite(a) && finite(b) && r.is_finite() && r > 0.0 {
+        TUBES.with_borrow_mut(|t| t.push((a, b, r)));
     }
 }
 

@@ -139,12 +139,14 @@ pub(crate) fn write_section<W: Write>(out: &mut W, raw: &[u8]) -> io::Result<()>
     out.write_all(&frame)
 }
 
-pub(crate) fn read_section<R: Read>(r: &mut R) -> io::Result<Vec<u8>> {
+/// Read back as a stream: the whole decoded section (326 MB for the full map's
+/// joint maps) was held beside what the caller built from it.
+pub(crate) fn read_section<R: Read>(r: &mut R) -> io::Result<impl Read + use<R>> {
     let mut len = [0u8; 4];
     r.read_exact(&mut len)?;
     let mut frame = vec![0u8; u32::from_le_bytes(len) as usize];
     r.read_exact(&mut frame)?;
-    zstd::stream::decode_all(&frame[..])
+    zstd::stream::read::Decoder::new(io::Cursor::new(frame))
 }
 
 /// Reads the block index after a tile table of `counts` (table order).

@@ -1,0 +1,138 @@
+--- a/crates/skate-core/src/physics/board_world.rs
++++ b/crates/skate-core/src/physics/board_world.rs
+@@ -403,6 +403,12 @@
+         let triangles = &self.triangles;
+         let triangle_bounds = &self.triangle_bounds;
+         let imported_floor_seams = self.imported_floor_seams;
++        // Every seam lookup only reads walkable faces. Select those once per
++        // query instead of rescanning scaffold sides at every gap sample and
++        // contact point. Build it only for a lateral contact: all helpers
++        // return false below that threshold. Air/ground-only queries allocate
++        // nothing extra; narrow-phase candidates remain untouched.
++        let mut seam_candidates = None;
+         let output = &mut self.contacts;
+         let mut publish = |records: &[ContactRecord]| {
+             output.extend(records.iter().map(collision_from_record));
+@@ -426,21 +432,28 @@
+                 };
+                 let material = combine_contact_materials(volume.material, entry.material);
+                 for pair in &manifold.points[..manifold.count] {
++                    let floor_candidates: &[usize] = if imported_floor_seams
++                        && !(manifold.normal.x.hypot(manifold.normal.z) < 0.05)
++                    {
++                        seam_candidates.get_or_insert_with(|| imported_floor_candidates(&candidates, triangles))
++                    } else {
++                        &[]
++                    };
+                     let internal = imported_floor_seams
+                         && imported_internal_floor_edge(
+                             index,
+                             entry,
+                             pair.b,
+                             manifold.normal,
+-                            &candidates,
++                            &floor_candidates,
+                             triangles,
+                             triangle_bounds,
+                         );
+                     let gap = imported_floor_seams
+                         && !internal
+-                        && (coplanar_gap_contact(entry, pair.b, manifold.normal, &candidates, triangles, triangle_bounds)
+-                            || stacked_sheet_lip(pair.b, manifold.normal, &candidates, triangles, triangle_bounds)
+-                            || wheel_scale_step(volume.body, pair.a, pair.b, manifold.normal, &candidates, triangles, triangle_bounds)
++                        && (coplanar_gap_contact(entry, pair.b, manifold.normal, &floor_candidates, triangles, triangle_bounds)
++                            || stacked_sheet_lip(pair.b, manifold.normal, &floor_candidates, triangles, triangle_bounds)
++                            || wheel_scale_step(volume.body, pair.a, pair.b, manifold.normal, &floor_candidates, triangles, triangle_bounds)
+                             || deck_clears_face(volume.body, pair.a, manifold.normal, volume.linear_velocity, &entry.triangle.vertices));
+                     let internal = internal || gap;
+                     // SkateV diagnostic (HOST replays only): SKATEV_CONTACT_TRACE=1
+@@ -562,6 +575,14 @@
+     *LEVEL.get_or_init(|| std::env::var("SKATEV_CONTACT_TRACE").ok().and_then(|v| v.parse().ok()).unwrap_or(0))
+ }
+ 
++/// Source-ordered subset shared by imported seam helpers. Their floor
++/// queries all use this exact normal gate; no possible support is removed.
++fn imported_floor_candidates(candidates: &[usize], triangles: &[WorldTriangle]) -> Vec<usize> {
++    candidates.iter().copied()
++        .filter(|&i| !(triangles[i].triangle.feature.normal.y < IMPORTED_SEAM_MIN_UP))
++        .collect()
++}
++
+ fn imported_internal_floor_edge(
+     source_index: usize,
+     source: &WorldTriangle,
+--- a/crates/skate-core/src/physics/board_world/tests.rs
++++ b/crates/skate-core/src/physics/board_world/tests.rs
+@@ -491,3 +491,72 @@
+     // Wheels and trucks are left to the wheel-scale step rule.
+     assert!(!deck_clears_face(CollisionBody::Board(BodyId::FrontTruck), Vector3::new(0., 0.1, 0.), diagonal, rolling, &bump));
+ }
++
++
++// A scaffold supplies many nonwalkable sides but few possible supports.
++// These reference calls deliberately retain the old unfiltered candidate list.
++fn scaffold_floor_fixture() -> (Vec<WorldTriangle>, usize) {
++    let (mut triangles, source) = gap(0.25, 0.045);
++    for i in 0..4096 {
++        let x = (i % 64) as f32 * 0.02 - 0.64;
++        let z = (i / 64) as f32 * 0.02 - 0.64;
++        triangles.push(tri([[x, -1., z], [x, 2., z + 0.01], [x, -1., z + 0.01]]));
++    }
++    (triangles, source)
++}
++
++fn floor_filter_answers(triangles: &[WorldTriangle], source: usize, candidates: &[usize], bounds: &[Bounds]) -> Vec<bool> {
++    let mut answers = Vec::new();
++    for x in [-0.1, 0., 0.05, 0.25, 0.4] {
++        for y in [-0.04, 0., 0.02, 0.2] {
++            let contact = Vector3::new(x, y, 0.);
++            for normal in [Vector3::new(-1., 0., 0.), Vector3::new(-0.9, 0.3, 0.), Vector3::new(0., 1., 0.)] {
++                answers.push(imported_internal_floor_edge(source, &triangles[source], contact, normal, candidates, triangles, bounds));
++                answers.push(coplanar_gap_contact(&triangles[source], contact, normal, candidates, triangles, bounds));
++                answers.push(stacked_sheet_lip(contact, normal, candidates, triangles, bounds));
++                answers.push(wheel_scale_step(CollisionBody::Board(BodyId::RightFrontWheel), contact, contact, normal, candidates, triangles, bounds));
++                answers.push(wheel_scale_step(CollisionBody::Board(BodyId::Deck), contact, contact, normal, candidates, triangles, bounds));
++            }
++        }
++    }
++    answers
++}
++
++#[test]
++fn scaffold_floor_prefilter_preserves_all_seam_rules_and_source_order() {
++    let (triangles, source) = scaffold_floor_fixture();
++    let bounds: Vec<_> = triangles.iter().map(|t| Bounds::from_points(t.triangle.vertices).unwrap()).collect();
++    let candidates: Vec<_> = (0..triangles.len()).rev().collect();
++    let filtered = imported_floor_candidates(&candidates, &triangles);
++    assert_eq!(filtered.len(), 6);
++    assert!(filtered.windows(2).all(|w| w[0] > w[1]), "retain incoming source order");
++    let expected = floor_filter_answers(&triangles, source, &candidates, &bounds);
++    assert!(expected.iter().any(|&x| x) && expected.iter().any(|&x| !x), "exercise acceptance and rejection");
++    assert_eq!(floor_filter_answers(&triangles, source, &filtered, &bounds), expected);
++    // Threshold/NaN semantics match the existing helper comparisons exactly.
++    let mut special = triangles[..3].to_vec();
++    for (t, y) in special.iter_mut().zip([IMPORTED_SEAM_MIN_UP, IMPORTED_SEAM_MIN_UP - 0.0001, f32::NAN]) {
++        t.triangle.feature.normal.y = y;
++    }
++    assert_eq!(imported_floor_candidates(&[2, 1, 0], &special), vec![2, 0]);
++}
++
++#[test]
++#[ignore = "manual release-mode timing, no wall-clock assertions"]
++fn scaffold_floor_prefilter_timing() {
++    let (triangles, source) = scaffold_floor_fixture();
++    let bounds: Vec<_> = triangles.iter().map(|t| Bounds::from_points(t.triangle.vertices).unwrap()).collect();
++    let candidates: Vec<_> = (0..triangles.len()).collect();
++    let rounds = 50;
++    let start = std::time::Instant::now();
++    for _ in 0..rounds {
++        std::hint::black_box(floor_filter_answers(&triangles, source, std::hint::black_box(&candidates), &bounds));
++    }
++    let reference = start.elapsed();
++    let start = std::time::Instant::now();
++    for _ in 0..rounds {
++        let filtered = imported_floor_candidates(std::hint::black_box(&candidates), &triangles);
++        std::hint::black_box(floor_filter_answers(&triangles, source, &filtered, &bounds));
++    }
++    eprintln!("scaffold seam helper timing: {rounds} rounds, {} candidates, {} walkable; original {:?}, prefiltered {:?} (includes list construction)", candidates.len(), imported_floor_candidates(&candidates, &triangles).len(), reference, start.elapsed());
++}

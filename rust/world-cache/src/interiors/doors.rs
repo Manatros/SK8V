@@ -38,9 +38,17 @@ impl EntityKey {
         Self([8, 12, 16, 32, 36, 40, 48, 52, 56, 60, 64, 68].map(|o| u32_le(e, o)))
     }
 }
+/// Archetype flag bit 17. Every map prop the host found in GTA's object pool
+/// on 2026-10-29 carried it (53 of 53); skate ramps, rails and metro fixtures
+/// do not, and GTA keeps those as static map pieces the live path never sees
+/// (design 2026-10-31-static-authored-prop-collision).
+pub const OBJECT_ARCHETYPE: u32 = 0x0002_0000;
+
 #[derive(Default, Debug, Clone)]
 pub struct Metadata {
     pub archetypes: HashSet<u32>,
+    /// Archetypes with `OBJECT_ARCHETYPE`: their placements are live-owned.
+    pub object_archetypes: HashSet<u32>,
     entities: HashSet<EntityKey>,
 }
 impl Metadata {
@@ -138,10 +146,12 @@ fn read_resource(reader: &ResReader<'_>) -> Result<Metadata, String> {
                 continue;
             };
             let extension_door = has_door(&blocks, base, 120)?;
+            let name = match u32_le(base, 88) { 0 => u32_le(base, 112), n => n };
             if extension_door || u32_le(base, 12) & 0x0400_0000 != 0 {
-                let name = u32_le(base, 88);
-                out.archetypes
-                    .insert(if name == 0 { u32_le(base, 112) } else { name });
+                out.archetypes.insert(name);
+            }
+            if u32_le(base, 12) & OBJECT_ARCHETYPE != 0 {
+                out.object_archetypes.insert(name);
             }
         }
     }
@@ -242,6 +252,20 @@ pub(crate) mod tests {
         let mut b = fixture();
         w32(&mut b, 0x74 + 5 * 16, 16);
         assert!(parse(&b).is_err());
+    }
+    #[test]
+    fn object_pool_archetypes_are_recorded_by_flag_bit_17() {
+        let mut b = fixture();
+        b[0x480] = 0; // no door: object-pool ownership is independent of doors
+        w32(&mut b, 0x40c, 0x2002_0000); // bench: object pool
+        let m = parse(&b).unwrap();
+        assert!(m.object_archetypes.contains(&0x5678) && !m.archetypes.contains(&0x5678));
+        w32(&mut b, 0x40c, 0x2000_0020); // prop_skate_halfpipe: static map piece
+        assert!(!parse(&b).unwrap().object_archetypes.contains(&0x5678));
+        w32(&mut b, 0x40c, 0x2002_0000);
+        w32(&mut b, 0x458, 0);
+        w32(&mut b, 0x470, 0x9876); // asset-name alias, as for doors
+        assert!(parse(&b).unwrap().object_archetypes.contains(&0x9876));
     }
     #[test]
     fn archetype_asset_alias_is_used_when_name_is_zero() {

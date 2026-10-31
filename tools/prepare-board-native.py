@@ -169,12 +169,13 @@ def export(board_path, lighting_path, reference, rage, out):
             name = p.get('name')
             if name in names: p.find('Name').text = names[name]
             if name == 'bumpiness': p.set('x', str(s['normal_scale']))
-            # Skate's row2 is not GTA's scale: taken raw (intensity 5, falloff 1)
-            # the lobe was near-flat and took the light's colour (orange under
-            # sodium lamps). GTA props use intensity 0.1..1, falloff 22..200.
-            # ponytail: linear map anchored to the reference's falloff 40; tune by eye.
-            if name == 'specularIntensityMult': p.set('x', str(max(lighting[s['name']]['params'][2][:3]) / 5))
-            if name == 'specularFalloffMult': p.set('x', str(40 * lighting[s['name']]['params'][2][3]))
+            # GTA's own shine for this shader (as prepare-board-parts.py): w_me_bat
+            # for deck and wheels, rifle metal for the truck. Skate's row2 mapped
+            # to fresnel 0.97 at full strength mirrored the sky in dark tunnels.
+            shine = (0.75, 40.0, 0.75) if 'truck' in prefix else (0.6, 20.0, 0.22)
+            if name == 'specularIntensityMult': p.set('x', str(shine[0]))
+            if name == 'specularFalloffMult': p.set('x', str(shine[1]))
+            if name == 'specularFresnel': p.set('x', str(shine[2]))
             # normal_spec deferred PS: gbuffer1.w (puddle mask) = sat((wetnessMultiplier-0.2)*10)
             # on upward normals, so 0.4 drew the ground's puddle onto the deck.
             if name == 'wetnessMultiplier': p.set('x', '0.2')

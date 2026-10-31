@@ -585,11 +585,39 @@ fn set(shared: &Mutex<Shared>, status: u32, message: impl Into<String>) {
     s.message = message.into();
 }
 
+/// A collision stream or preparation that failed earlier and now succeeded:
+/// the error it published must not keep the host waiting (Codex review
+/// 2026-10-24: STATUS_ERROR stayed set after a later success).
+fn recover(shared: &Mutex<Shared>) {
+    let mut s = shared.lock().unwrap();
+    if s.status == STATUS_ERROR {
+        s.status = STATUS_READY;
+        s.message = "ready".into();
+    }
+}
+
 /// Streamed-in or dropped collision within this (plus 32 m and the bound's
 /// own size) of the player rebuilds the area (`live::changed_near`).
 const LIVE_NEAR: f32 = 16.0;
 
-type Built = (Vec3, Result<(PreparedCollision, usize, usize, Vec<crate::live::Seen>), String>);
+type Built = (Vec3, Result<(PreparedCollision, world::Area), String>);
+
+struct BuildRequest {
+    centre: Vec3,
+    at: Vec3,
+    lead: Vec3,
+}
+
+/// A host body slower than this (m/s, rad/s) is not carried between samples.
+const MOVING_SPEED: f32 = 0.05;
+/// Moving bodies' triangles are moved once one has gone this far (m).
+const MOVE_STEP: f32 = 0.01;
+/// Spin counts at this distance from a body's origin (half a car's length).
+const SPIN_REACH: f32 = 2.5;
+/// Never carried further ahead than this past their sample (s).
+const MAX_AHEAD: f32 = 0.1;
+/// A vehicle still this long (s) counts as parked: its rails are grindable.
+const PARKED_SECS: f32 = 2.0;
 
 fn run(
     data_root: PathBuf,
@@ -608,6 +636,16 @@ fn run(
         "Skate animation banks preloaded in {}ms",
         started.elapsed().as_millis()
     ));
+    log(&format!("train tracks: {} tracks as grind rails on their steel rails", crate::tracks::load(&cache.with_extension("tracks"))));
+    log(&format!("visual rails: {} map cells of rails from GTA's visible models", crate::visrails::load(&cache.with_extension("visrails"))));
+    match crate::visparks::load(&cache.with_extension("visparks")) {
+        Ok(n) => log(&format!("high-res parks: {n} visible park triangles")),
+        Err(e) => log(&e),
+    }
+    match crate::baked::open(&cache) {
+        Ok(tiles) => log(&format!("prebaked map: {tiles} tiles (sound surfaces and materials only, not collision)")),
+        Err(e) => log(&format!("prebaked map: none ({e}); GTA's live collision only")),
+    }
     let static_world = Arc::new(Mutex::new(StaticWorld::open(&cache)));
     let mut prop_templates = crate::dynamic::Templates::new(&cache);
     // Vehicle models whose skitch line was logged (once each).
@@ -630,7 +668,7 @@ fn run(
     let mut session: Option<Session> = None;
     let mut audio_state = crate::audio::map::State::default();
     let mut built_at = Vec3::ZERO;
-    let mut builder_jobs: Option<mpsc::Sender<Vec3>> = None;
+    let mut builder_jobs: Option<mpsc::Sender<BuildRequest>> = None;
     let (built_send, built) = mpsc::channel::<Built>();
     // Preload: the one Skate session is built and warmed on a helper thread
     // from now on, while the collision builder already streams the player's
@@ -684,6 +722,12 @@ fn run(
     let mut tracked: Option<Vec3> = None;
     // GTA's collision in the area changed: rebuild the working set in place.
     let mut rebuild_area = false;
+    let mut options_version = world::options_version();
+    // A swap held back for a floor gap (log once; after 3 s the new area wins,
+    // so a real drop or a stale old area cannot hold collision forever).
+    let mut deferred_since: Option<std::time::Instant> = None;
+    // Developer collision view: why edges near the skater are not rails (rails::take_rejected).
+    let mut rejected_logged = std::time::Instant::now();
     // GTA's physics level (live collision): the newest report from the host
     // not yet applied, the level in use, and the bounds the installed area
     // was read from (when GTA streams collision in or out near the skater,
@@ -691,6 +735,7 @@ fn run(
     let mut pending_live: Option<Option<crate::live::Level>> = None;
     let mut live_level: Option<crate::live::Level> = None;
     let mut installed_bounds: Arc<Vec<crate::live::Seen>> = Arc::default();
+    let mut installed_area: Option<world::Area> = None;
     // The check reads GTA's whole physics table (tens of thousands of
     // ReadProcessMemory calls): on its own below-normal thread, not this
     // above-normal one, where its bursts took cores from GTA's threads.
@@ -719,17 +764,52 @@ fn run(
     let mut assist_packet = 0u32;
     // The right stick Skate was fed last (the Trick Analyzer replays it).
     let mut right_stick = [0i16; 2];
+    let mut left_stick = [0i16; 2];
     let mut line_player = crate::line::Player::default();
     let mut latest_dynamic = Vec::new();
-    // Skitch grab lines as last sampled by the host, and when. Skate ticks at
-    // 60 Hz while host batches arrive at the game's frame rate; each tick
-    // carries the lines forward by the car's velocity (`extrapolated_lines`),
-    // so a held line moves every tick instead of standing still and jumping.
+    // The object dropper's props (never moving): which are in the static
+    // build. Their set (tag, model, position in cm), its version, the version
+    // the installed area holds, the tags it covers and a set waiting for the
+    // world lock. Until an area with the current set is installed they stay
+    // dynamic triangles, so they are never missing.
+    let mut fixed_key: Vec<(u32, u32, [i32; 6])> = Vec::new();
+    let mut fixed_version = 0u64;
+    let mut installed_fixed = 0u64;
+    let mut fixed_tags = std::collections::HashSet::<u32>::new();
+    let mut pending_fixed: Option<(u64, Vec<([[f32; 3]; 3], u32)>)> = None;
+    // Moving host bodies between samples (the maintainer 2026-10-17: car collision more
+    // accurate; faster things updated more often, slow ones less): each
+    // body's Skate-space velocity, spin and origin by triangle tag, when the
+    // sample arrived, and how far ahead (s) the triangles were last moved.
+    let mut motion: std::collections::HashMap<u32, (Vec3, Vec3, Vec3)> = std::collections::HashMap::new();
+    // Simulated time (ticks x period) since the last sample and since the last
+    // move: ticks run in bursts when a frame's batch arrives, so wall time
+    // between them is ~0 and carried nothing (20-35 updates/s at 75 fps).
+    let mut since_move = 0.0f32;
+    // Game time (sum of the frames' dt) and the game time of the last sample
+    // of host bodies (its frame). A tick simulates game time
+    // `game_time - accumulated`, at or a little before the sample: bodies
+    // are carried to exactly that time (forward carrying made them lead the
+    // car by a varying tick or two: the maintainer's "wobble").
+    let mut game_time = 0.0f64;
+    let mut sample_time = 0.0f64;
+    let mut sample_pending = false;
+    let mut moved_ahead = 0.0f32;
+    // The game's frame time (smoothed): moves never come faster than frames
+    // are shown (the maintainer: tie the refresh to the frame rate).
+    let mut frame_dt = 1.0f32 / 60.0;
+    // The last batch's bodies, for the collision view (only while it is on).
+    let mut view_bodies: Vec<crate::dynamic::HostBody> = Vec::new();
+
+    // Moves and host samples of moving bodies, logged every 10 s (verbose).
+    let (mut moves, mut samples, mut motion_logged) = (0u32, 0u32, std::time::Instant::now());
+    // Parked vehicles (still for PARKED_SECS): their rails join the static
+    // grind world. First seen still at (tag -> (place in cm, since)).
+    let mut still_since: std::collections::HashMap<u32, ([i32; 6], std::time::Instant)> = std::collections::HashMap::new();
+    let mut parked_rails: Vec<Vec<[f32; 3]>> = Vec::new();
+    let mut rails_dirty = false;
+    // Host grab frames use the moving collision sample clock and angular motion.
     let mut skitch_lines: Vec<skate_host::bridge::GrabLine> = Vec::new();
-    let mut skitch_lines_at = std::time::Instant::now();
-    // The lines Skate is given: `skitch_lines` carried forward, then smoothed
-    // (`smoothed_lines`) so sampling-time noise does not shake the held arms.
-    let mut skitch_smooth: Vec<skate_host::bridge::GrabLine> = Vec::new();
     // The vehicle being skitched (lifecycle publication).
     let mut skitch_held: Option<u32> = None;
     let mut impulse_log = ImpulseLog::default();
@@ -806,7 +886,15 @@ fn run(
         let mut host_bodies: Option<Vec<skate_host::bridge::HostBody>> = None;
         let mut grab_lines: Option<Vec<skate_host::bridge::GrabLine>> = None;
         let mut track: Option<(Vec3, f32)> = None;
-        for job in batch {
+        let last_dyn = batch.iter().rposition(|j| matches!(j, Job::DynamicBodies(_)));
+        let last_ped = batch.iter().rposition(|j| matches!(j, Job::PedParts(_)));
+        for (job_idx, job) in batch.into_iter().enumerate() {
+            if matches!(job, Job::DynamicBodies(_)) && Some(job_idx) != last_dyn {
+                continue;
+            }
+            if matches!(job, Job::PedParts(_)) && Some(job_idx) != last_ped {
+                continue;
+            }
             match job {
                 Job::Track { at, heading } => track = Some((at, heading)),
                 Job::Activate {
@@ -822,7 +910,7 @@ fn run(
                     if session.is_none() {
                         // Cold path (no background preparation happened).
                         set(shared, STATUS_ACTIVATING, "loading Skate session");
-                        let (mut s, sender) = prepare_session(
+                        let (mut s, sender, area) = prepare_session(
                             &data_root,
                             &static_world,
                             &built_send,
@@ -833,6 +921,9 @@ fn run(
                             log,
                         )?;
                         apply_settings(&mut s, hom.enabled(), bail_limit, air_limit, lip_rule, difficulty, camera_type, prefs);
+                        installed_bounds = Arc::new(area.bounds.clone());
+                        installed_fixed = area.fixed;
+                        installed_area = Some(area);
                         builder_jobs = Some(sender);
                         session = Some(s);
                         audio_state = crate::audio::map::State::default();
@@ -849,10 +940,15 @@ fn run(
                                 "finishing Los Santos collision here",
                             );
                             match built.recv_timeout(std::time::Duration::from_secs(60)) {
-                                Ok((centre, Ok((prepared, n, r, bounds)))) => {
+                                Ok((centre, Ok((prepared, area)))) => {
+                                    let (n, r) = (area.triangles.len(), area.rails.len());
                                     s.install_collision(prepared)?;
+                                    installed_fixed = area.fixed;
+                                    installed_bounds = Arc::new(area.bounds.clone());
+                                    area.publish_view();
+                                    if !parked_rails.is_empty() { refresh_rails(s, Some(&area), &parked_rails)?; }
+                                    installed_area = Some(area);
                                     built_at = centre;
-                                    installed_bounds = Arc::new(bounds);
                                     life(shared, |l| {
                                         l.collision_builds += 1;
                                         l.collision_centre = centre;
@@ -877,12 +973,16 @@ fn run(
                                     log_source(log, spawn, &area.note);
                                     let (n, r) = (area.triangles.len(), area.rails.len());
                                     s.install_collision(s.collision_builder().build_tagged(
-                                        area.triangles,
-                                        area.tags,
-                                        area.rails,
+                                        area.triangles.clone(),
+                                        area.tags.clone(),
+                                        area.rails.clone(),
                                     )?)?;
                                     built_at = spawn;
-                                    installed_bounds = Arc::new(area.bounds);
+                                    installed_fixed = area.fixed;
+                                    installed_bounds = Arc::new(area.bounds.clone());
+                                    area.publish_view();
+                                    if !parked_rails.is_empty() { refresh_rails(s, Some(&area), &parked_rails)?; }
+                                    installed_area = Some(area);
                                     life(shared, |l| {
                                         l.collision_builds += 1;
                                         l.collision_centre = spawn;
@@ -939,7 +1039,117 @@ fn run(
                     ));
                 }
                 Job::DynamicBodies(bodies) => {
-                    let (triangles, messages) = prop_templates.triangles(&bodies, live_level.as_ref());
+                    let cm = |v: Vec3| [(v.x * 100.).round() as i32, (v.y * 100.).round() as i32, (v.z * 100.).round() as i32];
+                    let mut key: Vec<_> = bodies.iter().filter(|b| b.fixed).map(|b| {
+                        let (p, f) = (cm(b.position), cm(b.axes[1]));
+                        (b.fallback.tag, b.model, [p[0], p[1], p[2], f[0], f[1], f[2]])
+                    }).collect();
+                    key.sort_unstable();
+                    // The static area holds the current set: those leave the dynamic triangles.
+                    let in_static = installed_fixed == fixed_version;
+                    prop_templates.retain_bodies(&bodies);
+                    let mut moving: Vec<_> = bodies.iter().filter(|b| needs_dynamic_shape(b, in_static, &fixed_tags)).cloned().collect();
+                    // Spend the one-car read budget on the held car, then the nearest body.
+                    moving.sort_by(|a, b| {
+                        let rank = |b: &crate::dynamic::HostBody| (
+                            skitch_held != Some(b.fallback.tag | crate::dynamic::DYNAMIC_TAG),
+                            b.position.distance_squared(skater_at));
+                        let (ah, ad) = rank(a);
+                        let (bh, bd) = rank(b);
+                        ah.cmp(&bh).then_with(|| ad.total_cmp(&bd))
+                    });
+                    let (triangles, messages) = prop_templates.triangles(&moving, live_level.as_ref());
+                    if crate::collision_view::on() {
+                        view_bodies = bodies.clone();
+                    }
+                    motion = moving
+                        .iter()
+                        .filter(|b| !b.fixed)
+                        .filter_map(|b| {
+                            let (l, a) = b.velocity?;
+                            (l.length() > MOVING_SPEED || a.length() > MOVING_SPEED).then(|| {
+                                (b.fallback.tag | crate::dynamic::DYNAMIC_TAG, (coords::to_skate(l), coords::to_skate(a), coords::to_skate(b.position)))
+                            })
+                        })
+                        .collect();
+                    sample_pending = true;
+                    moved_ahead = 0.0;
+                    // The sample lags the coming tick: carry it at once (the
+                    // per-frame cap made it sit behind for a tick: flicker).
+                    since_move = f32::MAX;
+                    if !motion.is_empty() {
+                        samples += 1;
+                    }
+                    if motion_logged.elapsed().as_secs_f32() >= 10.0 {
+                        if verbose() && (moves > 0 || samples > 0) {
+                            log(&format!(
+                                "moving collision 10s: {samples} host samples with moving bodies, {moves} moves between them ({:.0}/s together), frame {:.1} ms",
+                                (samples + moves) as f32 / motion_logged.elapsed().as_secs_f32(),
+                                frame_dt * 1000.0
+                            ));
+                        }
+                        (moves, samples, motion_logged) = (0, 0, std::time::Instant::now());
+                    }
+                    // Parked vehicles: still (by place) for PARKED_SECS.
+                    let now = std::time::Instant::now();
+                    let cm = |v: Vec3| [(v.x * 100.).round() as i32, (v.y * 100.).round() as i32, (v.z * 100.).round() as i32];
+                    let mut seen = std::collections::HashMap::new();
+                    let mut parked: Vec<&crate::dynamic::HostBody> = Vec::new();
+                    // Standing vehicles and objects (electrical boxes, benches,
+                    // barriers: Manatros 2026-10-20 "small objects grindable too").
+                    let objects = crate::dynamic::OBJECT_RAILS.load(std::sync::atomic::Ordering::Relaxed);
+                    // Placed objects too: their own shape's rails while dynamic (once in_static, StaticWorld owns their rails).
+                    for b in bodies.iter().filter(|b| needs_dynamic_shape(b, in_static, &fixed_tags) && ((b.fallback.tag >> 28) & 0x7 == 0 || ((objects || b.fixed) && (b.fallback.tag >> 28) & 0x7 == 2))) {
+                        let (p, f) = (cm(b.position), cm(b.axes[1]));
+                        let place = [p[0], p[1], p[2], f[0], f[1], f[2]];
+                        // Measured from where it stopped (not the last sample: a car
+                        // creeping 1 cm per sample was "parked"), and slow.
+                        let slow = b.velocity.is_none_or(|(l, a)| l.length() < 0.1 && a.length() < 0.1);
+                        let (start, since) = match still_since.get(&b.fallback.tag) {
+                            Some(&(from, at)) if slow && from.iter().zip(&place).all(|(x, y)| (x - y).abs() <= 2) => (from, at),
+                            _ => (place, now),
+                        };
+                        seen.insert(b.fallback.tag, (start, since));
+                        if now.duration_since(since).as_secs_f32() >= PARKED_SECS {
+                            parked.push(b);
+                        }
+                    }
+                    still_since = seen;
+                    // Stable ordering makes equality include geometry and placement,
+                    // without treating a different empty car set as a rail change.
+                    parked.sort_by_key(|b| b.fallback.tag);
+                    let mut rails = Vec::new();
+                    let mut rail_messages = Vec::new();
+                    for b in parked {
+                        rails.extend(prop_templates.vehicle_rails(b, &mut rail_messages).iter()
+                            .map(|r| r.iter().map(|&p| coords::to_skate(p).to_array()).collect()));
+                    }
+                    for message in rail_messages { log(&message); }
+                    if !same_parked_rails(&rails, &parked_rails) {
+                        log(&format!("parked rails: {} -> {}", parked_rails.len(), rails.len()));
+                        parked_rails = rails;
+                        rails_dirty = true;
+                    }
+                    if key != fixed_key || (fixed_tags.len() < key.len() && key.iter().any(|k| !fixed_tags.contains(&k.0) && bodies.iter().any(|b| b.fallback.tag == k.0 && prop_templates.gta_triangles(b).is_some()))) {
+                        // Models load in `triangles` above (a changed set is all in `moving`).
+                        let mut tris = Vec::new();
+                        fixed_tags.clear();
+                        for b in bodies.iter().filter(|b| b.fixed) {
+                            if let Some(t) = prop_templates.gta_triangles(b) {
+                                tris.extend(t);
+                                fixed_tags.insert(b.fallback.tag);
+                            }
+                        }
+                        fixed_key = key;
+                        fixed_version += 1;
+                        log(&format!(
+                            "dropped objects: {} of {} built into the static area ({} triangles), rebuilding",
+                            fixed_tags.len(),
+                            fixed_key.len(),
+                            tris.len()
+                        ));
+                        pending_fixed = Some((fixed_version, tris));
+                    }
                     for message in messages { log(&message); }
                     dynamic = Some(triangles);
                     entity_proxies = prop_templates.proxies(&bodies);
@@ -1088,13 +1298,17 @@ fn run(
                         let area = static_world.lock().unwrap().around(line.start)?;
                         let (n, r) = (area.triangles.len(), area.rails.len());
                         s.install_collision(s.collision_builder().build_tagged(
-                            area.triangles,
-                            area.tags,
-                            area.rails,
+                            area.triangles.clone(),
+                            area.tags.clone(),
+                            area.rails.clone(),
                         )?)?;
                         s.set_dynamic_surfaces(&latest_dynamic);
                         built_at = line.start;
-                        installed_bounds = Arc::new(area.bounds);
+                        installed_fixed = area.fixed;
+                        installed_bounds = Arc::new(area.bounds.clone());
+                        area.publish_view();
+                        if !parked_rails.is_empty() { refresh_rails(s, Some(&area), &parked_rails)?; }
+                        installed_area = Some(area);
                         life(shared, |l| {
                             l.collision_builds += 1;
                             l.collision_centre = line.start;
@@ -1160,6 +1374,15 @@ fn run(
                 }
                 Job::Step { dt, pad, aspect } => {
                     steps_done += 1;
+                    game_time += f64::from(dt.max(0.0));
+                    if sample_pending {
+                        // The host sends a frame's bodies just before its step.
+                        sample_time = game_time;
+                        sample_pending = false;
+                    }
+                    if dt > 0.0 && dt < 0.25 {
+                        frame_dt += (dt - frame_dt) * 0.1;
+                    }
                     let Some(s) = session.as_mut().filter(|_| active) else {
                         continue;
                     };
@@ -1193,6 +1416,7 @@ fn run(
                         log(&line);
                     }
                     right_stick = if pad.connected { pad.right } else { [0; 2] };
+                    left_stick = if pad.connected { pad.left } else { [0; 2] };
                     let frame = if pad.connected {
                         InputFrame::from_pad(
                             pad.buttons,
@@ -1233,8 +1457,11 @@ fn run(
                     shared,
                     log,
                 ) {
-                    Ok((mut s, sender)) => {
+                    Ok((mut s, sender, area)) => {
                         apply_settings(&mut s, hom.enabled(), bail_limit, air_limit, lip_rule, difficulty, camera_type, prefs);
+                        installed_bounds = Arc::new(area.bounds.clone());
+                        installed_fixed = area.fixed;
+                        installed_area = Some(area);
                         builder_jobs = Some(sender);
                         session = Some(s);
                         audio_state = crate::audio::map::State::default();
@@ -1255,19 +1482,43 @@ fn run(
         if let (Some(s), Some(triangles)) = (session.as_mut(), dynamic) {
             latest_dynamic = triangles;
             s.set_dynamic_surfaces(&latest_dynamic);
+            // The view places host bodies on their entities itself, each frame.
+            crate::collision_view::publish_bodies(&latest_dynamic, &view_bodies);
+            // For Mark this spot: which body has how much collision (a
+            // 12-triangle box is the model-size fallback).
+            let mut counts: std::collections::HashMap<u32, usize> = std::collections::HashMap::new();
+            for (_, tag, _) in &latest_dynamic { *counts.entry(*tag).or_default() += 1; }
+            crate::spot::set_bodies(view_bodies.iter().map(|b| crate::spot::Body {
+                model: b.model, position: b.position, fixed: b.fixed, allow_box: b.allow_box,
+                triangles: counts.get(&(b.fallback.tag | crate::dynamic::DYNAMIC_TAG)).copied().unwrap_or(0),
+            }).collect());
         }
         if let (Some(s), Some(bodies)) = (session.as_mut(), host_bodies) {
             host_groups = bodies.iter().map(|b| (b.tag, b.collision_group)).collect();
             s.set_host_bodies(bodies);
         }
-        if let (Some(s), Some(lines)) = (session.as_mut(), grab_lines) {
-            if let Err(e) = s.set_grab_lines(&lines) {
-                log(&format!("skitch grab lines rejected: {e}"));
+        if let Some(lines) = grab_lines {
+            if let Some(s) = session.as_mut() {
+                match s.set_grab_lines(&lines) {
+                    Ok(accepted) => crate::collision_view::publish_skitch(&accepted),
+                    Err(e) => log(&format!("skitch grab lines rejected: {e}")),
+                }
             }
             skitch_lines = lines;
-            skitch_lines_at = std::time::Instant::now();
         }
         let target = if active { Some(skater_at) } else { tracked };
+        crate::rails::set_diagnostics((active && crate::collision_view::on()).then_some(skater_at));
+        if rejected_logged.elapsed().as_secs_f32() >= 5.0 {
+            rejected_logged = std::time::Instant::now();
+            let rejected = crate::rails::take_rejected();
+            if !rejected.is_empty() {
+                let list: Vec<String> = rejected
+                    .iter()
+                    .map(|r| format!("({:.1}, {:.1}, {:.2}) {:.2} m: {}", r.mid.x, r.mid.y, r.mid.z, r.length, r.reason))
+                    .collect();
+                log(&format!("rails: {} edges within 3 m of the skater were not rails: {}", rejected.len(), list.join("; ")));
+            }
+        }
         // Finished builds wait in the channel until the session exists.
         if let Some(s) = session.as_mut() {
             if let Ok((centre, result)) = built.try_recv() {
@@ -1290,15 +1541,40 @@ fn run(
                             centre.x, centre.y
                         ))
                     }
-                    Ok((prepared, n, r, bounds)) => {
+                    Ok((_, ref area))
+                        if active
+                            && deferred_since.is_none_or(|d| d.elapsed().as_secs_f32() < 3.0)
+                            && installed_area.as_ref().is_some_and(|old| area.loses_floor(old, skater_at, skater_at + skater_velocity * 0.25)) =>
+                    {
+                        if deferred_since.is_none() {
+                            deferred_since = Some(std::time::Instant::now());
+                            log(&format!("collision swap deferred: NO FLOOR at skater ({:.1}, {:.1}, {:.1}) or predicted position; keeping old area, retrying for up to 3 s", skater_at.x, skater_at.y, skater_at.z));
+                        }
+                        rebuild_area = true;
+                    }
+                    Ok((_, area)) if area.options != world::options_version() => {
+                        rebuild_area = true;
+                        log("world options changed during build: discarding stale collision");
+                    }
+                    Ok((prepared, area)) => {
+                        let (n, r) = (area.triangles.len(), area.rails.len());
                         let t = std::time::Instant::now();
                         s.install_collision(prepared)?;
+                        if let Some(d) = deferred_since.take() {
+                            log(&format!("collision swap installed after {:.1} s held back for a floor gap", d.elapsed().as_secs_f32()));
+                        }
+                        installed_fixed = area.fixed;
+                        installed_bounds = Arc::new(area.bounds.clone());
+                        area.publish_view();
+                        if !parked_rails.is_empty() { refresh_rails(s, Some(&area), &parked_rails)?; }
+                        installed_area = Some(area);
                         s.set_dynamic_surfaces(&latest_dynamic);
                         perf.install(t.elapsed());
                         let first = built_at == PRELOAD_AT;
                         built_at = centre;
-                        installed_bounds = Arc::new(bounds);
-                        stream_failed_at = None;
+                        if stream_failed_at.take().is_some() {
+                            recover(shared);
+                        }
                         life(shared, |l| {
                             l.collision_builds += 1;
                             l.collision_centre = centre;
@@ -1329,8 +1605,38 @@ fn run(
                             log(&format!("collision stream failed: {e}"));
                         }
                         stream_failed_at = Some(centre);
+                        let first = built_at == PRELOAD_AT;
+                        if first || e.contains("incompatible") {
+                            life(shared, |l| {
+                                l.preparing = false;
+                                l.prepared = false;
+                            });
+                            set(shared, STATUS_ERROR, &format!("collision stream failed: {e}"));
+                        }
                     }
                 }
+            }
+        }
+        if rails_dirty && let Some(s) = session.as_mut() {
+            // Runs on this (physics) thread: logged when it costs a visible hitch.
+            let t = std::time::Instant::now();
+            refresh_rails(s, installed_area.as_ref(), &parked_rails)?;
+            let ms = t.elapsed().as_secs_f32() * 1000.0;
+            if ms > 2.0 { log(&format!("parked-car rails updated in {ms:.1} ms ({} cars' rails)", parked_rails.len())); }
+            rails_dirty = false;
+        }
+        if crate::collision_view::take_rebuild() && let Some(area) = installed_area.as_ref() {
+            area.publish_view();
+            crate::collision_view::publish_rails(&combined_rails(Some(area), &parked_rails));
+        }
+        if let Some((version, tris)) = pending_fixed.take() {
+            match static_world.try_lock() {
+                Ok(mut w) => {
+                    w.set_fixed(version, tris);
+                    rebuild_area = true;
+                }
+                Err(std::sync::TryLockError::WouldBlock) => pending_fixed = Some((version, tris)),
+                Err(std::sync::TryLockError::Poisoned(_)) => return Err("world cache poisoned".into()),
             }
         }
         if let Some(level) = pending_live {
@@ -1350,6 +1656,11 @@ fn run(
                 Err(std::sync::TryLockError::WouldBlock) => {}
                 Err(std::sync::TryLockError::Poisoned(_)) => return Err("world cache poisoned".into()),
             }
+        }
+        if options_version != world::options_version() {
+            options_version = world::options_version();
+            rebuild_area = true;
+            log("world options changed: rebuilding the current area from scratch");
         }
         // GTA streams collision in and out: a static bound loaded or dropped
         // near the skater (or the walking player) since the installed area
@@ -1374,6 +1685,8 @@ fn run(
         }
         if let (Some(level), Some(t), Some((jobs, _))) = (live_level, target, stream_check.as_ref())
             && !checking
+            && (!crate::BAKED_WORLD.load(std::sync::atomic::Ordering::Relaxed)
+                || installed_area.as_ref().is_some_and(world::Area::needs_live_watch))
             && pending_centre.is_none()
             && built_at != PRELOAD_AT
             && live_checked.elapsed().as_secs_f32() >= 1.0
@@ -1400,7 +1713,7 @@ fn run(
             } else {
                 Vec3::new(built_at.x, built_at.y, t.z)
             };
-            if builder_jobs.as_ref().is_some_and(|b| b.send(centre).is_ok()) {
+            if builder_jobs.as_ref().is_some_and(|b| b.send(BuildRequest { centre, at: t, lead: world::lead_centre(t, velocity, build_secs) - t }).is_ok()) {
                 pending_centre = Some(centre);
                 requested_at = std::time::Instant::now();
                 rebuild_area = false;
@@ -1440,6 +1753,7 @@ fn run(
                     crate::line::Next::Frame(f) => {
                         assist_packet = assist_packet.wrapping_add(1);
                         right_stick = f.right;
+                        left_stick = f.left;
                         s.collect(
                             InputFrame::from_pad(f.buttons, f.triggers, f.left, f.right, assist_packet),
                             period,
@@ -1468,6 +1782,7 @@ fn run(
                 if let Some(i) = injected {
                     assist_packet = assist_packet.wrapping_add(1);
                     right_stick = i.right_stick;
+                    left_stick = i.left_stick;
                     s.collect(
                         InputFrame::from_pad(
                             i.buttons,
@@ -1485,12 +1800,37 @@ fn run(
             }
             let t = std::time::Instant::now();
             let air_frames = s.air_frames();
-            if !skitch_lines.is_empty() {
-                let ahead = skitch_lines_at.elapsed().as_secs_f32();
-                // A line set the host has not refreshed for a while is left as is.
-                if ahead > 0.0 && ahead < 0.25 {
-                    let lines = smoothed_lines(&mut skitch_smooth, &extrapolated_lines(&skitch_lines, ahead), period);
-                    let _ = s.set_grab_lines(&lines);
+            let tick_time = game_time - f64::from(accumulated);
+            let ahead = ((tick_time - sample_time) as f32).clamp(-MAX_AHEAD, MAX_AHEAD);
+            let lines = extrapolated_lines(&skitch_lines, ahead, &motion);
+            match s.set_grab_lines(&lines) {
+                Ok(accepted) => crate::collision_view::publish_skitch(&accepted),
+                Err(e) => log(&format!("skitch grab lines rejected: {e}")),
+            }
+            // Moving bodies carried to this tick by their own velocity. Only
+            // when one has gone MOVE_STEP since the last move: fast things move
+            // every tick, slow ones every few, still ones never.
+            since_move += period;
+            if !motion.is_empty() && !latest_dynamic.is_empty() && !sample_pending {
+                let tick_time = game_time - f64::from(accumulated);
+                let ahead = ((tick_time - sample_time) as f32).clamp(-MAX_AHEAD, MAX_AHEAD);
+                let reach = motion.values().map(|(l, a, _)| l.length() + a.length() * SPIN_REACH).fold(0.0, f32::max) * (ahead - moved_ahead).abs();
+                // At most once per shown frame (never more often than ticks).
+                if reach >= MOVE_STEP && since_move >= frame_dt * 0.9 {
+                    let moved: Vec<_> = latest_dynamic
+                        .iter()
+                        .map(|&(p, tag, surface)| match motion.get(&tag) {
+                            Some(&(l, a, c)) => {
+                                let q = Quat::from_scaled_axis(a * ahead);
+                                (p.map(|v| (c + q * (Vec3::from_array(v) - c) + l * ahead).to_array()), tag, surface)
+                            }
+                            None => (p, tag, surface),
+                        })
+                        .collect();
+                    s.move_dynamic_surfaces(&moved);
+                    moves += 1;
+                    moved_ahead = ahead;
+                    since_move = 0.0;
                 }
             }
             s.advance()?;
@@ -1505,7 +1845,8 @@ fn run(
                 ));
             }
             let pose = s.pose();
-            let struck: Vec<(u32, u32)> = exchange_impulses(s, &pose, shared, log, &ped_proxies, &mut impulse_log)
+            let contact_age = ((game_time - f64::from(accumulated) - sample_time) as f32).clamp(-MAX_AHEAD, MAX_AHEAD);
+            let struck: Vec<(u32, u32)> = exchange_impulses(s, &pose, shared, log, &ped_proxies, &entity_proxies, &latest_dynamic, (contact_age, &motion), left_stick, period, &mut impulse_log)
                 .into_iter()
                 .filter_map(|tag| host_groups.get(&tag).map(|g| (tag, *g)))
                 .collect();
@@ -1641,8 +1982,21 @@ fn run(
 }
 
 /// Contact exchange bookkeeping kept across ticks.
+fn walking_velocity(stick: [i16; 2], camera: Option<bevy_math::Mat3>, actual: Vec3) -> Vec3 {
+    let Some(camera) = camera else { return actual };
+    let x = f32::from(stick[0])/32767.0;
+    let y = f32::from(stick[1])/32767.0;
+    if x*x+y*y < 0.2*0.2 { return Vec3::ZERO; }
+    // Same camera-relative axes as Skate's offboard controls: -LR, +UD.
+    let forward = Vec3::new(camera.z_axis.x,0.0,camera.z_axis.z).normalize_or_zero();
+    let right = Vec3::Y.cross(forward);
+    let desired = (forward*y-right*x).clamp_length_max(1.0);
+    desired * actual.dot(desired.normalize_or_zero()).max(1.4).min(4.0)
+}
+
 #[derive(Default)]
 struct ImpulseLog {
+    walk_position: Option<(Vec3, u64)>,
     /// Host impacts logged recently: (entity, when).
     impacts: Vec<(u32, std::time::Instant)>,
     /// The vehicle let go of, and when (its pushes stay withheld 0.5 s).
@@ -1660,6 +2014,11 @@ fn exchange_impulses(
     shared: &Mutex<Shared>,
     log: &Log,
     peds: &[skate_host::bridge::HostBody],
+    objects: &[skate_host::bridge::HostBody],
+    triangles: &[([[f32; 3]; 3], u32, u32)],
+    sample: (f32, &std::collections::HashMap<u32, (Vec3, Vec3, Vec3)>),
+    left_stick: [i16; 2],
+    period: f32,
     state: &mut ImpulseLog,
 ) -> Vec<u32> {
     // Host-driven impacts (a car striking the rider), logged once per entity
@@ -1686,6 +2045,31 @@ fn exchange_impulses(
     // (otherwise the rider pushes the car, which then tows the rider).
     let held = s.skitch_held_tag();
     let mut impulses = s.take_host_impulses();
+    if pose.state.starts_with("Biped") || pose.state == "OffBoardPushing" {
+        let at = pose.root.w_axis.truncate();
+        if let Some((last, _)) = state.walk_position.filter(|(_, tick)| *tick + 1 == pose.tick) {
+            let velocity = (at - last) / period;
+            // A teleport never pushes objects along its path.
+            if velocity.length() < 8.0 {
+                let desired = walking_velocity(left_stick, pose.camera.map(|(_,basis,_)| basis), velocity);
+                let (ahead, motion) = sample;
+                let placed: Vec<_> = triangles.iter().filter(|(_,tag,_)| (tag>>28)&7 == 2).map(|&(t,tag,surface)| {
+                    let t = match motion.get(&tag) {
+                        Some(&(l,a,c)) => { let q = Quat::from_scaled_axis(a*ahead);
+                            t.map(|v| (c + q*(Vec3::from_array(v)-c) + l*ahead).to_array()) },
+                        None => t,
+                    };
+                    (t,tag,surface)
+                }).collect();
+                let extra = crate::dynamic::walking_pushes(at, desired, period, &placed, objects);
+                let solved: Vec<_> = impulses.iter().map(|i| i.tag).collect();
+                impulses.extend(extra.into_iter().filter(|i| !solved.contains(&i.tag)));
+            }
+        }
+        state.walk_position = Some((at, pose.tick));
+    } else {
+        state.walk_position = None;
+    }
     let before = impulses.len();
     // ... and for 0.5 s after the release (the exit tick and the separation
     // still produce pushes on the car the rider just let go of).
@@ -1829,77 +2213,93 @@ fn prepare_session(
     natural_stance: u32,
     shared: &Mutex<Shared>,
     log: &Log,
-) -> Result<(Session, mpsc::Sender<Vec3>), String> {
+) -> Result<(Session, mpsc::Sender<BuildRequest>, world::Area), String> {
     let t = std::time::Instant::now();
     life(shared, |l| l.preparing = true);
-    let area = static_world.lock().unwrap().around(at)?;
-    log_source(log, at, &area.note);
-    log(&format!(
-        "collision around ({:.1}, {:.1}, {:.1}): {} triangles, rails: {} candidates {} lips {} runs {} rails; curb bevels {} on {} top edges",
-        at.x,
-        at.y,
-        at.z,
-        area.triangles.len(),
-        area.census.candidates,
-        area.census.lips,
-        area.census.runs,
-        area.census.rails,
-        area.bevels.bevels,
-        area.bevels.edges
-    ));
-    if area.triangles.is_empty() {
-        life(shared, |l| l.preparing = false);
-        return Err(format!(
-            "no GTA collision around ({:.0}, {:.0})",
-            at.x, at.y
+    let run = || -> Result<_, String> {
+        let area = static_world.lock().unwrap().around(at)?;
+        log_source(log, at, &area.note);
+        log(&format!(
+            "collision around ({:.1}, {:.1}, {:.1}): {} triangles, rails: {} candidates {} lips {} runs {} rails; curb bevels {} on {} top edges",
+            at.x,
+            at.y,
+            at.z,
+            area.triangles.len(),
+            area.census.candidates,
+            area.census.lips,
+            area.census.runs,
+            area.census.rails,
+            area.bevels.bevels,
+            area.bevels.edges
         ));
-    }
-    let skate_at = coords::to_skate(at).to_array();
-    let skate_heading = coords::skate_heading(heading);
-    let mut s = Session::new_tagged(
-        data_root,
-        area.triangles,
-        area.tags,
-        area.rails,
-        skate_at,
-        skate_heading,
-    )?;
-    s.set_natural_stance(natural_stance);
-    let sender = start_builder(
-        s.collision_builder(),
-        Arc::clone(static_world),
-        built_send.clone(),
-        log.clone(),
-    )?;
-    let built_ms = t.elapsed().as_millis();
-    // Warm-up: Skate's off-board entry and a few ticks at the preparation
-    // point, then suspended. Disable with SKATEV_PREPARE_WARMUP=0.
-    let warm = std::env::var("SKATEV_PREPARE_WARMUP").map_or(true, |v| v != "0");
-    if warm {
-        s.activate_offboard(skate_at, skate_heading)?;
-        for _ in 0..30 {
-            s.collect(InputFrame::neutral(), s.period());
-            s.advance()?;
+        if area.triangles.is_empty() {
+            return Err(format!(
+                "no GTA collision around ({:.0}, {:.0})",
+                at.x, at.y
+            ));
+        }
+        let skate_at = coords::to_skate(at).to_array();
+        let skate_heading = coords::skate_heading(heading);
+        let mut s = Session::new_tagged(
+            data_root,
+            area.triangles.clone(),
+            area.tags.clone(),
+            area.rails.clone(),
+            skate_at,
+            skate_heading,
+        )?;
+        s.set_natural_stance(natural_stance);
+        let sender = start_builder(
+            s.collision_builder(),
+            Arc::clone(static_world),
+            built_send.clone(),
+            log.clone(),
+        )?;
+        let built_ms = t.elapsed().as_millis();
+        // Warm-up: Skate's off-board entry and a few ticks at the preparation
+        // point, then suspended. Disable with SKATEV_PREPARE_WARMUP=0.
+        let warm = std::env::var("SKATEV_PREPARE_WARMUP").map_or(true, |v| v != "0");
+        if warm {
+            s.activate_offboard(skate_at, skate_heading)?;
+            for _ in 0..30 {
+                s.collect(InputFrame::neutral(), s.period());
+                s.advance()?;
+            }
+        }
+        s.suspend_input();
+        let ms = t.elapsed().as_secs_f32() * 1000.0;
+        log(&format!(
+            "Skate session prepared around ({:.1}, {:.1}, {:.1}) in {ms:.0}ms (session {built_ms}ms, warm-up {})",
+            at.x,
+            at.y,
+            at.z,
+            if warm { "on" } else { "off" }
+        ));
+        area.publish_view();
+        Ok((s, sender, area, ms))
+    };
+    match run() {
+        Ok((s, sender, area, ms)) => {
+            recover(shared);
+            life(shared, |l| {
+                l.preparing = false;
+                l.prepared = true;
+                l.session_builds += 1;
+                l.collision_builds += 1;
+                l.collision_centre = at;
+                l.last_prepare_ms = ms;
+            });
+            Ok((s, sender, area))
+        }
+        Err(e) => {
+            life(shared, |l| {
+                l.preparing = false;
+                l.prepared = false;
+            });
+            set(shared, STATUS_ERROR, &format!("Skate preparation error: {e}"));
+            Err(e)
         }
     }
-    s.suspend_input();
-    let ms = t.elapsed().as_secs_f32() * 1000.0;
-    life(shared, |l| {
-        l.preparing = false;
-        l.prepared = true;
-        l.session_builds += 1;
-        l.collision_builds += 1;
-        l.collision_centre = at;
-        l.last_prepare_ms = ms;
-    });
-    log(&format!(
-        "Skate session prepared around ({:.1}, {:.1}, {:.1}) in {ms:.0}ms (session {built_ms}ms, warm-up {})",
-        at.x,
-        at.y,
-        at.z,
-        if warm { "on" } else { "off" }
-    ));
-    Ok((s, sender))
 }
 
 /// Collision centre of a preloaded session that has no player collision yet:
@@ -2035,35 +2435,33 @@ fn start_builder(
     static_world: Arc<Mutex<StaticWorld>>,
     out: mpsc::Sender<Built>,
     log: Log,
-) -> Result<mpsc::Sender<Vec3>, String> {
-    let (send, jobs) = mpsc::channel::<Vec3>();
+) -> Result<mpsc::Sender<BuildRequest>, String> {
+    let (send, jobs) = mpsc::channel::<BuildRequest>();
     std::thread::Builder::new()
         .name("skatev-collision".into())
         .stack_size(16 * 1024 * 1024)
         .spawn(move || {
             set_thread_priority(THREAD_PRIORITY_BELOW_NORMAL);
-            while let Ok(mut centre) = jobs.recv() {
+            while let Ok(mut request) = jobs.recv() {
                 while let Ok(newer) = jobs.try_recv() {
-                    centre = newer;
+                    request = newer;
                 }
+                let BuildRequest { centre, at, lead } = request;
                 let result = catch_unwind(AssertUnwindSafe(|| -> Result<_, String> {
                     let area = static_world
                         .lock()
                         .map_err(|_| "world cache poisoned")?
                         .around(centre)?;
                     log_source(&log, centre, &area.note);
-                    let (n, r) = (area.triangles.len(), area.rails.len());
-                    Ok((
-                        builder.build_tagged(area.triangles, area.tags, area.rails)?,
-                        n,
-                        r,
-                        area.bounds,
-                    ))
+                    let prepared = builder.build_tagged(area.triangles.clone(), area.tags.clone(), area.rails.clone())?;
+                    Ok((prepared, area))
                 }))
                 .unwrap_or_else(|_| Err("collision builder panicked".into()));
                 if out.send((centre, result)).is_err() {
                     break;
                 }
+                // Publish the needed area before reading farther tiles.
+                if let Ok(mut world) = static_world.lock() { world.prefetch(at, lead); }
             }
         })
         .map_err(|e| e.to_string())?;
@@ -2254,69 +2652,163 @@ mod bail_tests {
     }
 }
 
-/// Grab lines moved `seconds` ahead along each car's sampled linear velocity
-/// (frame row 3 is the position, `velocity` the same Skate-space units per s).
-fn extrapolated_lines(lines: &[skate_host::bridge::GrabLine], seconds: f32) -> Vec<skate_host::bridge::GrabLine> {
-    lines
-        .iter()
-        .map(|l| {
-            let mut l = *l;
-            for i in 0..3 {
-                l.frame[3][i] += l.velocity[i] * seconds;
+/// Carry grab frames with the same sample clock, pivot and spin as collision.
+fn extrapolated_lines(
+    lines: &[skate_host::bridge::GrabLine], seconds: f32,
+    motion: &std::collections::HashMap<u32, (Vec3, Vec3, Vec3)>,
+) -> Vec<skate_host::bridge::GrabLine> {
+    lines.iter().map(|l| {
+        let mut l = *l;
+        if let Some(&(linear, angular, centre)) = motion.get(&l.tag) {
+            let q = Quat::from_scaled_axis(angular * seconds);
+            for row in 0..4 {
+                let v = Vec3::new(l.frame[row][0], l.frame[row][1], l.frame[row][2]);
+                let v = if row == 3 { centre + q * (v - centre) + linear * seconds } else { q * v };
+                l.frame[row][..3].copy_from_slice(&v.to_array());
             }
-            l
-        })
-        .collect()
+        }
+        l
+    }).collect()
 }
 
-/// Tick-to-tick correction of the carried line toward its latest estimate.
-/// The estimate is the host's last sample plus velocity times the time since
-/// it arrived; that time carries a few ms of jitter (4 cm at 10 m/s)
-/// which the held arms' IK followed. The filter keeps the line
-/// moving by its own smoothed velocity and only absorbs the noise.
-/// ponytail: fixed gains; a lag of a few cm while the car brakes hard.
-const SKITCH_LINE_POSITION_GAIN: f32 = 0.3;
-const SKITCH_LINE_VELOCITY_GAIN: f32 = 0.15;
-/// A line this far from its estimate is a new car or a teleport: take it.
-const SKITCH_LINE_SNAP: f32 = 1.0;
+/// Keep the previous placement through the same 2 cm jitter allowed by the
+/// parked detector. Compare to that retained baseline so drift cannot accumulate.
+fn needs_dynamic_shape(body: &crate::dynamic::HostBody, in_static: bool, fixed_tags: &std::collections::HashSet<u32>) -> bool {
+    !(in_static && body.fixed && fixed_tags.contains(&body.fallback.tag))
+}
 
-fn smoothed_lines(
-    state: &mut Vec<skate_host::bridge::GrabLine>,
-    target: &[skate_host::bridge::GrabLine],
-    dt: f32,
-) -> Vec<skate_host::bridge::GrabLine> {
-    state.retain(|f| target.iter().any(|t| t.tag == f.tag));
-    for t in target {
-        let Some(f) = state.iter_mut().find(|f| f.tag == t.tag) else {
-            state.push(*t);
-            continue;
+#[cfg(test)]
+mod fixed_handoff_tests {
+    use super::*;
+
+    #[test]
+    fn a_placed_prop_keeps_collision_until_static_install_then_drops_dynamic_copy() {
+        use crate::dynamic::HostBox;
+        let prop = crate::dynamic::HostBody {
+            model: 1, position: Vec3::ZERO, axes: [Vec3::X, Vec3::Y, Vec3::Z],
+            fallback: HostBox { tag: 0x20000001, center: Vec3::ZERO, rotation: bevy_math::Quat::IDENTITY, half_extents: Vec3::ONE },
+            allow_box: false, velocity: None, grab_point: None, fixed: true, vehicle_part: false,
         };
-        let mut far = 0.0f32;
-        for i in 0..3 {
-            f.frame[3][i] += f.velocity[i] * dt;
-            far += (t.frame[3][i] - f.frame[3][i]).powi(2);
-        }
-        if far.sqrt() > SKITCH_LINE_SNAP {
-            *f = *t;
-            continue;
-        }
-        for i in 0..3 {
-            f.frame[3][i] += (t.frame[3][i] - f.frame[3][i]) * SKITCH_LINE_POSITION_GAIN;
-            f.velocity[i] += (t.velocity[i] - f.velocity[i]) * SKITCH_LINE_VELOCITY_GAIN;
-            for row in 0..3 {
-                f.frame[row][i] += (t.frame[row][i] - f.frame[row][i]) * SKITCH_LINE_POSITION_GAIN;
-            }
-        }
-        f.points = t.points;
-        f.approach = t.approach;
+        let mut built_tags = std::collections::HashSet::new();
+        assert!(needs_dynamic_shape(&prop, true, &built_tags), "newly dropped prop is not in the installed area");
+        built_tags.insert(prop.fallback.tag);
+        assert!(needs_dynamic_shape(&prop, false, &built_tags), "building an area must not remove current collision");
+        assert!(!needs_dynamic_shape(&prop, true, &built_tags), "installed area owns both the shape and its rails");
+        let mut moving = prop.clone();
+        moving.fixed = false;
+        assert!(needs_dynamic_shape(&moving, true, &built_tags), "a movable body never belongs to the fixed area");
     }
-    state.clone()
+}
+
+fn same_parked_rails(a: &[Vec<[f32; 3]>], b: &[Vec<[f32; 3]>]) -> bool {
+    a.len() == b.len() && a.iter().zip(b).all(|(a, b)| {
+        a.len() == b.len() && a.iter().zip(b).all(|(&a, &b)| {
+            Vec3::from_array(a).distance_squared(Vec3::from_array(b)) <= 0.02 * 0.02
+        })
+    })
+}
+
+fn combined_rails(area: Option<&world::Area>, parked: &[Vec<[f32; 3]>]) -> Vec<Vec<[f32; 3]>> {
+    let mut out = combined_rails_uncapped(area, parked);
+    // Never past Skate's grind index (65,535): the area's centre keeps its lines.
+    let centre = area.map(|a| crate::coords::to_skate(a.center)).unwrap_or(Vec3::ZERO);
+    world::cap_rail_segments(&mut out, centre, 65_000);
+    out
+}
+
+fn combined_rails_uncapped(area: Option<&world::Area>, parked: &[Vec<[f32; 3]>]) -> Vec<Vec<[f32; 3]>> {
+    let rails = area.map(|a| a.rails.as_slice()).unwrap_or_default();
+    if parked.is_empty() {
+        return rails.to_vec();
+    }
+    // The area's rails are already deduplicated. Re-running city-wide
+    // sampling for each nearby prop cost 110-121 ms during the metro bail.
+    // Only map rails whose boxes meet a parked rail can duplicate it.
+    let bounds = |r: &Vec<[f32; 3]>| r.iter().fold((Vec3::splat(f32::INFINITY), Vec3::splat(f32::NEG_INFINITY)), |(lo,hi), &p| {
+        let p = Vec3::from_array(p); (lo.min(p),hi.max(p))
+    });
+    let nearby: Vec<_> = parked.iter().map(bounds).collect();
+    let (near, mut far): (Vec<_>, Vec<_>) = rails.iter().cloned().partition(|r| {
+        let (lo,hi) = bounds(r);
+        nearby.iter().any(|&(a,b)| lo.cmple(b + Vec3::splat(0.15)).all() && hi.cmpge(a - Vec3::splat(0.15)).all())
+    });
+    // Objects' rails over the map's on the same edge (a placed rail is both): one.
+    let mut all: Vec<Vec<Vec3>> = parked.iter().chain(near.iter()).map(|r| r.iter().map(|&p| coords::from_skate(Vec3::from_array(p))).collect()).collect();
+    crate::rails::trim_overlaps(&mut all);
+    crate::rails::join_ends(&mut all);
+    crate::rails::dedupe_metres(&mut all);
+    crate::rails::join_ends(&mut all);
+    crate::rails::straighten(&mut all, 0.03);
+    far.extend(all.into_iter().map(|r| r.into_iter().map(|p| coords::to_skate(p).to_array()).collect::<Vec<_>>()));
+    far
+}
+
+/// Update grind geometry without rebuilding static contact collision.
+fn refresh_rails(s: &mut Session, area: Option<&world::Area>, parked: &[Vec<[f32; 3]>]) -> Result<(), String> {
+    let rails = combined_rails(area, parked);
+    s.set_grind_rails(rails.clone())?;
+    crate::collision_view::publish_rails(&rails);
+    Ok(())
 }
 
 #[cfg(test)]
 mod skitch_line_tests {
+    use super::*;
+
     #[test]
-    fn lines_move_with_the_car_velocity() {
+    fn blocked_walking_keeps_pushing_only_while_the_stick_is_held() {
+        let camera = Some(bevy_math::Mat3::IDENTITY);
+        assert_eq!(walking_velocity([0,32767], camera, Vec3::ZERO), Vec3::Z*1.4);
+        assert_eq!(walking_velocity([32767,0], camera, Vec3::ZERO), -Vec3::X*1.4);
+        assert_eq!(walking_velocity([0,0], camera, Vec3::Z), Vec3::ZERO);
+        assert_eq!(walking_velocity([100,100], camera, Vec3::ZERO), Vec3::ZERO);
+    }
+
+    #[test]
+    fn combining_object_rails_keeps_distant_map_rails_exact_and_merges_near_duplicates() {
+        let mut area = world::build_area(Vec3::ZERO, std::iter::empty());
+        let local = vec![[0.0,1.0,0.0],[2.0,1.0,0.0]];
+        let far = vec![[100.001,1.0,100.003],[102.001,1.0,100.003]];
+        area.rails = vec![local.clone(),far.clone()];
+        let combined = combined_rails(Some(&area), &[local]);
+        assert_eq!(combined.len(),2, "near duplicate is merged");
+        assert!(combined.contains(&far), "unaffected rails avoid conversion/rounding and resampling");
+        assert_eq!(combined_rails(Some(&area), &[]),area.rails);
+    }
+
+    #[test]
+    fn object_and_static_rails_share_overlaps_and_continue_without_losing_short_tails() {
+        let mut area=world::build_area(Vec3::ZERO,std::iter::empty());
+        area.rails=vec![vec![[0.,1.,0.],[2.,1.,0.]]];
+        for parked in [
+            vec![vec![[1.,1.,0.],[2.04,1.,0.]]],
+            vec![vec![[2.,1.,0.],[3.,1.,0.]]],
+        ] {
+            let end=parked[0][1][0];
+            let combined=combined_rails(Some(&area),&parked);
+            assert_eq!(combined.len(),1,"one object/map rail must own the shared edge");
+            let r=&combined[0];
+            assert!((r[0][0].min(r.last().unwrap()[0])-0.).abs()<1e-5);
+            assert!((r[0][0].max(r.last().unwrap()[0])-end).abs()<1e-5,
+                "unique short tails and object continuations survive: {combined:?}");
+        }
+    }
+
+    #[test]
+    fn parked_rails_ignore_jitter_but_detect_drift_topology_and_removal() {
+        let rails = vec![vec![[0., 0., 1.], [2., 0., 1.]]];
+        let shifted = |x| vec![vec![[x, 0., 1.], [2. + x, 0., 1.]]];
+        assert!(same_parked_rails(&[], &[]));
+        assert!(same_parked_rails(&rails, &rails));
+        assert!(same_parked_rails(&rails, &shifted(0.01)));
+        assert!(!same_parked_rails(&rails, &shifted(0.03)), "compare drift against original placement");
+        assert!(!same_parked_rails(&rails, &[vec![[0., 0., 1.]]]), "changed topology");
+        assert!(!same_parked_rails(&rails, &[]), "moving or absent car loses its rails");
+        assert!(!same_parked_rails(&[], &rails), "new rails");
+    }
+
+    #[test]
+    fn grab_frames_use_collision_motion_including_spin_and_negative_age() {
         let line = skate_host::bridge::GrabLine {
             tag: 7,
             frame: [[1., 0., 0., 0.], [0., 1., 0., 0.], [0., 0., 1., 0.], [10., 0., 5., 0.]],
@@ -2324,42 +2816,16 @@ mod skitch_line_tests {
             points: [[-1., -2., 0.5, 0.], [1., -2., 0.5, 0.]],
             approach: [0., -1., 0., 0.],
         };
-        let moved = super::extrapolated_lines(&[line], 0.5)[0];
-        assert_eq!(moved.frame[3], [18.5, 0., 4., 0.]);
-        assert_eq!(moved.points, line.points);
-    }
-
-    fn car(z: f32, v: f32) -> skate_host::bridge::GrabLine {
-        skate_host::bridge::GrabLine {
-            tag: 7,
-            frame: [[1., 0., 0., 0.], [0., 1., 0., 0.], [0., 0., 1., 0.], [0., 0., z, 0.]],
-            velocity: [0., 0., v, 0.],
-            points: [[-1., -2., 0.5, 0.], [1., -2., 0.5, 0.]],
-            approach: [0., -1., 0., 0.],
+        let centre = Vec3::new(9., 0., 5.);
+        let motion = [(7, (Vec3::new(17., 0., -2.), Vec3::Y * 2., centre))].into();
+        for seconds in [-0.1, 0., 0.1] {
+            let moved = extrapolated_lines(&[line], seconds, &motion)[0];
+            let q = Quat::from_scaled_axis(Vec3::Y * (2. * seconds));
+            assert!((Vec3::from_array(moved.frame[0][..3].try_into().unwrap()) - q * Vec3::X).length() < 1e-5);
+            assert!((Vec3::from_array(moved.frame[3][..3].try_into().unwrap()) - (centre + q * Vec3::X + Vec3::new(17., 0., -2.) * seconds)).length() < 1e-5);
+            assert_eq!(moved.points, line.points);
         }
-    }
-
-    #[test]
-    fn smoothing_removes_sampling_jitter_but_follows_the_car_and_snaps_on_a_jump() {
-        // A car at 10 m/s whose estimate is off by up to +-4 cm per tick.
-        let dt = 1.0 / 60.0;
-        let noise = [0.04f32, -0.03, 0.02, -0.04, 0.03, -0.02, 0.04, -0.01];
-        let (mut state, mut raw, mut smooth) = (Vec::new(), Vec::new(), Vec::new());
-        for k in 0..120 {
-            let truth = 10.0 * dt * k as f32;
-            let est = car(truth + noise[k % noise.len()], 10.0 + noise[(k + 3) % noise.len()] * 20.0);
-            raw.push(est.frame[3][2]);
-            smooth.push(super::smoothed_lines(&mut state, &[est], dt)[0].frame[3][2]);
-        }
-        let jitter = |v: &[f32]| (60..119).map(|i| (v[i + 1] - 2.0 * v[i] + v[i - 1]).abs()).sum::<f32>() / 59.0;
-        assert!(jitter(&smooth) < jitter(&raw) * 0.4, "{} vs {}", jitter(&smooth), jitter(&raw));
-        // Still on the car (steady state has no lag beyond the noise).
-        assert!((smooth[119] - 10.0 * dt * 119.0).abs() < 0.05);
-        // A teleport or another car is taken at once.
-        let jumped = super::smoothed_lines(&mut state, &[car(50.0, 0.0)], dt)[0];
-        assert_eq!(jumped.frame[3][2], 50.0);
-        // A line that left the set is forgotten.
-        assert!(super::smoothed_lines(&mut state, &[], dt).is_empty() && state.is_empty());
+        assert!(extrapolated_lines(&[], 0.1, &motion).is_empty());
     }
 }
 

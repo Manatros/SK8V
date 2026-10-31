@@ -26,16 +26,23 @@ const SIDES: usize = 10;
 /// type flags and the include flags of what collides with it.
 pub const FOLIAGE: u32 = 1 << 19;
 pub const PED: u32 = 1 << 9;
+pub const TEST_WEAPON: u32 = 1 << 21;
+pub const TEST_CAMERA: u32 = 1 << 22;
+pub const GLASS: u32 = 1 << 26;
+pub const MAP_RIVER: u32 = 1 << 27;
 
 /// What the skater collides with: what a ped collides with, minus foliage
-/// (peds push through bushes; 176 K foliage primitives). Weapon-, cover-,
-/// vehicle- and animal-only children are left out (no PED include flag).
-/// A bound with no composite parent carries no flags and is kept.
+/// and river surfaces (peds push through bushes; 176 K foliage primitives).
+/// Weapon-, cover-, vehicle- and animal-only children are left out (no PED
+/// include flag). A bound with no composite parent carries no flags and is kept.
 pub fn skater_collides((kind, include): (u32, u32)) -> bool {
     if kind == 0 && include == 0 {
         return true;
     }
-    kind & FOLIAGE == 0 && include & PED != 0
+    if kind & (FOLIAGE | MAP_RIVER) != 0 {
+        return false;
+    }
+    include & PED != 0
 }
 
 /// Soft vegetation GTA authors as volumes: bush and grass clumps as boxes,
@@ -134,6 +141,9 @@ fn walk(
                 return;
             }
             let material = head[0x4c];
+            if svwc::bounds::is_water(material) {
+                return;
+            }
             if !options.all_flags && soft_vegetation(material) {
                 counts.vegetation += 1;
                 return;
@@ -330,6 +340,9 @@ fn geometry(
             .get(i)
             .and_then(|&m| materials.get(m as usize))
             .map_or(0, |m| (m & 0xFF) as u8);
+        if svwc::bounds::is_water(material) {
+            continue;
+        }
         if kind == 0 {
             // Triangle, as rage-formats decodes it (indices @4/6/8, top bit a flag).
             let v = [u16_le(rec, 4), u16_le(rec, 6), u16_le(rec, 8)].map(local);
@@ -786,5 +799,43 @@ mod tests {
         let mut t = Vec::new();
         cylinder(a, Vec3::new(1.0, 2.0, 0.5), 0.1, &mut t);
         assert!(outward(&t, Vec3::new(0.5, 1.0, 0.25)));
+    }
+}
+
+#[cfg(test)]
+mod metro_probe {
+    /// Narrow upward strips (rail-head tops) per metro piece, normal vs hi@
+    /// copy (2026-10-24 tunnel investigation). Needs SKATEV_TEST_YBN = an
+    /// extracted collision folder; run with --ignored --nocapture.
+    #[test]
+    #[ignore]
+    fn rail_heads_in_normal_and_hi_copies() {
+        let Ok(dir) = std::env::var("SKATEV_TEST_YBN") else { return };
+        let mut names: Vec<String> = std::fs::read_dir(&dir).unwrap().filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.starts_with("metro_") && n.ends_with(".ybn")).collect();
+        names.sort();
+        let count = |path: &std::path::Path, ped_only: bool| -> (usize, usize) {
+            let Ok(bytes) = std::fs::read(path) else { return (0, 0) };
+            let mut c = super::Counts::default();
+            let Ok(tris) = super::triangles(&bytes, super::Options { primitives: true, all_flags: !ped_only }, &mut c) else { return (0, 0) };
+            let strips = tris.iter().filter(|t| {
+                let v = t.vertices.map(|v| bevy_math::Vec3::new(v.x, v.y, v.z));
+                let n = (v[1] - v[0]).cross(v[2] - v[0]).normalize_or_zero();
+                if n.z < 0.9 { return false; }
+                // Shortest triangle height: a long thin strip of a rail head.
+                let area2 = (v[1] - v[0]).cross(v[2] - v[0]).length();
+                let longest = [(v[0], v[1]), (v[1], v[2]), (v[2], v[0])].iter().map(|(a, b)| a.distance(*b)).fold(0.0, f32::max);
+                longest > 0.5 && area2 / longest < 0.09
+            }).count();
+            (tris.len(), strips)
+        };
+        for n in names {
+            let normal = std::path::Path::new(&dir).join(&n);
+            let hi = std::path::Path::new(&dir).join(format!("hi@{n}"));
+            let (a, b) = count(&normal, true);
+            let (c, d) = count(&hi, false);
+            println!("{n:28} normal(ped) tris {a:6} rail-head strips {b:4} | hi@ tris {c:6} strips {d:4}");
+        }
     }
 }

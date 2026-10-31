@@ -1,6 +1,9 @@
 cmake_minimum_required(VERSION 3.24)
 project(SkateVLegacy LANGUAGES CXX)
 
+option(GTAXSKATE_TEST_WORLD_BASELINE "Start local tests with the canonical world collision profile" OFF)
+message(STATUS "Local test world baseline: ${GTAXSKATE_TEST_WORLD_BASELINE}")
+
 if(NOT WIN32 OR NOT CMAKE_SIZEOF_VOID_P EQUAL 8)
   message(FATAL_ERROR "SkateV Legacy host is x64 Windows-only")
 endif()
@@ -44,6 +47,8 @@ add_library(SkateVLegacy SHARED
   src/board_tracks.cpp
   src/thread_census.cpp
   src/skate_map.cpp
+  src/object_dropper.cpp
+  src/collision_view.cpp
 )
 target_compile_features(SkateVLegacy PRIVATE cxx_std_20)
 # Source provenance only: never carry a hard-coded release number into a future
@@ -66,7 +71,8 @@ if(GIT_FOUND)
 endif()
 message(STATUS "SK8V nearest source tag: ${SK8V_SOURCE_TAG}")
 target_compile_definitions(SkateVLegacy PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX
-  SK8V_SOURCE_TAG="${SK8V_SOURCE_TAG}")
+  SK8V_SOURCE_TAG="${SK8V_SOURCE_TAG}"
+  GTAXSKATE_TEST_WORLD_BASELINE=$<BOOL:${GTAXSKATE_TEST_WORLD_BASELINE}>)
 target_include_directories(SkateVLegacy PRIVATE include "${SHVDIR}/inc")
 target_link_libraries(SkateVLegacy PRIVATE "${SHVDIR}/lib/ScriptHookV.lib" version xinput hid setupapi shell32)
 # Original Skate 3 HUD overlay (hud_overlay.cpp): D3D11 + runtime shader compile.

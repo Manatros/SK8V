@@ -2,10 +2,14 @@
 // GTA side only: input acquisition, control suppression, camera, presentation
 // and HUD drawing. Skating, tricks and scoring are all Skate's.
 #include "stall_sampler.h"
+#include "camera_logic.h"
 #include <windows.h>
 #include <xinput.h>
 #include <main.h>
 #include <algorithm>
+#include <map>
+#include <set>
+#include <fstream>
 #include <cctype>
 #include <atomic>
 #include <cmath>
@@ -41,6 +45,9 @@
 #include "pose_math.h"
 #include "live_clip.h"
 #include "natives.h"
+#include "object_dropper.h"
+#include "collision_view.h"
+#include "interaction_menu_logic.h"
 #include "ped_speech.h"
 #include "runtime_bridge.h"
 #include "injuries.h"
@@ -107,10 +114,27 @@ struct Config {
     int gunIk = 1;
     float aimTwist = 80.0f; // AimTwist: most the aiming chest turns from the stance (degrees); shots still go to the reticle
     bool gunProbe = false;
+    bool collisionView = false;    // CollisionView=1 (Dev): draw what Skate collides with near the player
+    float collisionViewRange = 10.0f; // CollisionViewRange: metres drawn around the player
+    unsigned dropperKey = VK_INSERT;  // DropperKey: virtual key that opens/closes the object dropper (0: none; F9 is Menyoo's Spooner)
+    bool tubeRails = true;         // TubeRails: GTA's tubes (coping, handrails, railing bars) get a grind rail on top
+    bool curbBevels = true;        // CurbBevels: no-grind kerb ramps (default on)
+    bool unflaggedStairs = false;  // UnflaggedStairs: unmarked concrete flights as steps (test; can cut holes)
+    bool visualRails = true;       // VisualRails: rails from GTA's visible models (handrails without collision) get a grind rail
+    bool trackRails = true;        // TrackRails: a grind rail on top of each train track's steel rail
+    bool railTops = true;          // RailTops: grind lines lifted onto the top of what they run along
+    bool objectRails = true;       // ObjectRails: standing objects (electrical boxes, benches) get grind rails
+    bool stepRails = false;        // StepRails: every stair step's nose is a grind rail (Manatros 2026-10-24: some prefer it)
+    bool highResParks = true;      // HighResParks: skateparks' coarse collision replaced by the visible model (off: GTA's)
+    bool devOptions = false;       // DevOptions: show developer and diagnostic options in the menu (off: a cleaner menu)
+    bool detailedStairs = true;    // DetailedStairs (Dev): stair ramps rebuilt as steps where GTA's data has them (Manatros 2026-10-19; 0: SK8V's ramps)
     bool gtaCamera = false; // GtaCamera=1 (Dev): skate with GTA's gameplay camera rendering, to measure the script camera's frame cost
     std::uint16_t aimButton = 0x0100, fireButton = 0x0200, gunButton = 0x0020;
     bool drawSkater = true;        // DrawSkater: the board mesh while the native board is unavailable
     int boardTracks = 1;           // BoardTracks=1: tread marks in sand, mud, dirt, grass and snow
+    float wheelGlow = 0.0f;        // WheelGlow: glowing wheels, 0 (off) .. 1
+    std::string wheelGlowColour = "Wheel colour"; // WheelGlowColour: the wheels' own colour, or one of GlowColours
+    std::string boardMaterial = "Vehicle"; // BoardMaterial: G-buffer material class of the board (see boardstencil::SetMaterial)
     int snow = 0;                  // Snow: 0 auto (GTA's snow level and weather), 1 always, 2 never
     float trackWidth = 0.08f;      // TrackWidth: tread mark width (m)
     bool hallOfMeat = true;        // HallOfMeat=1: Skate 3's bail scoring, broken-bone slow-mo, HoM HUD
@@ -125,13 +149,14 @@ struct Config {
     int difficulty = 0;            // Difficulty=Easy|Normal|Hardcore|Motorized: Skate 3's physics_mode (index)
     int cameraType = 1;            // Camera=Low|High: Skate 3's stock camera graph branch (0 Low, 1 High)
     // CameraView: the view skating starts in: 0 Skate 3's camera, 1-3 GTA's near, middle, far
-    // follow camera (the mouse turns it), 4 GTA's first person. V cycles them while skating.
+    // follow modes; 4 legacy FirstPerson and 5 Head both use GTA first person.
     int cameraView = 0;
     std::string cinemaFilter = "NG_filmic01"; // CinemaFilter: GTA timecycle look of the cinematic camera ("" = none)
     std::string filmerFilter = "NG_filmic06"; // FilmerFilter: the skate filmer's look
     float filmFilterStrength = 0.85f;         // FilmFilterStrength
-    bool cameraRemember = true;
-    bool cameraOnBoard = false; // CameraFocus=Board: near/middle/far follow the board, else the skater // CameraRemember: skating starts in the view last used (walking or skating)
+    bool cameraRemember = true; // remember SK8V or GTA; GTA keeps its current on-foot mode
+    bool cameraFollow = false; // legacy CameraFollow: read for INI compatibility, unused
+    bool cameraOnBoard = false; // legacy CameraFocus: read for INI compatibility, unused
     int gestures[4] = {23, 7, 24, 22}; // EmoteUp/Down/Left/Right: d-pad gesture per direction (kGestures index, -1 None)
     int posture = 0;               // Posture=Normal|Stiff|Slouch|Buff: Skate 3's riding posture (kPostures index)
     int ridingStyle = 0;           // RidingStyle=Default|Loose|Gonzo|Aggressive: Skate 3's riding animations (kRidingStyles index)
@@ -151,6 +176,8 @@ struct Config {
     // launches them at twice the closing speed, scaled, with lift.
     bool pedLaunch = true;
     bool pedsSurvive = false;    // PedsSurvive: peds the board knocks down cannot die until they are up again
+    bool boardScratches = true;  // BoardScratches: light hits scratch cars (small damage, small radius)
+    float pedBump = 180.0f;      // PedBumpImpulse: pushes under this (N s) only bump a ped (shove + line); 0: always ragdoll
     float pedLaunchScale = 1.0f;
     float pedLaunchLift = 0.3f;
     float pedLaunchSpin = 1.0f; // PedLaunchSpin: gain on the launch's tumble about the struck point (0 none)
@@ -173,7 +200,9 @@ struct Config {
     bool vehicleDamage = true;
     // Radius is in SET_VEHICLE_DAMAGE's own units (scripts use tens to
     // hundreds; 0.5 dents nothing).
-    float vehicleDamageScale = 0.5f, vehicleDamageMin = 200.0f, vehicleDamageRadius = 150.0f;
+    // Dents smaller than SK8V's 150 (Manatros 2026-10-20: "dents don't need to be so huge").
+    float vehicleDamageScale = 0.3f, vehicleDamageMin = 200.0f, vehicleDamageRadius = 60.0f;
+    float objectPush = 0.25f; // ObjectPush: how much of Skate's impulse pushes props (Manatros 2026-10-18: "a bit too aggressive")
     float vehiclePush = 1.0f; // VehiclePush: how much of Skate's impulse pushes vehicles (less: they bounce less)
     // GTA delegation: swim when the skater's chest is under water (water this
     // deep over the feet; GTA's ped starts swimming at about the same depth),
@@ -297,6 +326,20 @@ const Key kKeys[] = {
     {"GunIK", Store<&Config::gunIk>},
     {"GunProbe", Store<&Config::gunProbe>},
     {"GtaCamera", Store<&Config::gtaCamera>},
+    {"CollisionView", Store<&Config::collisionView>},
+    {"CollisionViewRange", Store<&Config::collisionViewRange>},
+    {"DropperKey", Store<&Config::dropperKey>},
+    {"DetailedStairs", Store<&Config::detailedStairs>},
+    {"TubeRails", Store<&Config::tubeRails>},
+    {"VisualRails", Store<&Config::visualRails>},
+    {"UnflaggedStairs", Store<&Config::unflaggedStairs>},
+    {"CurbBevels", Store<&Config::curbBevels>},
+    {"TrackRails", Store<&Config::trackRails>},
+    {"RailTops", Store<&Config::railTops>},
+    {"ObjectRails", Store<&Config::objectRails>},
+    {"StepRails", Store<&Config::stepRails>},
+    {"HighResParks", Store<&Config::highResParks>},
+    {"DevOptions", Store<&Config::devOptions>},
     {"AimTwist", Store<&Config::aimTwist>},
     {"AimButton", Store<&Config::aimButton>},
     {"FireButton", Store<&Config::fireButton>},
@@ -305,6 +348,9 @@ const Key kKeys[] = {
     {"HallOfMeat", Store<&Config::hallOfMeat>},
     {"Injuries", Store<&Config::injuries>},
     {"BoardTracks", Store<&Config::boardTracks>},
+    {"WheelGlow", Store<&Config::wheelGlow>},
+    {"WheelGlowColour", Store<&Config::wheelGlowColour>},
+    {"BoardMaterial", [](Config& c, const std::string& v) { c.boardMaterial = v; }},
     {"Snow", Store<&Config::snow>},
     {"TrackWidth", Store<&Config::trackWidth>},
     {"HallOfMeatMetrics", Store<&Config::hallOfMeatMetrics>},
@@ -319,6 +365,7 @@ const Key kKeys[] = {
      }},
     {"Camera", [](Config& c, const std::string& v) { c.cameraType = menu::SameText(v, "Low") ? 0 : 1; }},
     {"CameraRemember", Store<&Config::cameraRemember>},
+    {"CameraFollow", Store<&Config::cameraFollow>},
     {"CameraFocus", [](Config& c, const std::string& v) { c.cameraOnBoard = menu::SameText(v, "Board"); }},
     {"CinemaFilter", [](Config& c, const std::string& v) { c.cinemaFilter = menu::SameText(v, "none") ? "" : v; }},
     {"FilmerFilter", [](Config& c, const std::string& v) { c.filmerFilter = menu::SameText(v, "none") ? "" : v; }},
@@ -326,7 +373,7 @@ const Key kKeys[] = {
     {"CameraView", [](Config& c, const std::string& v) {
         const char* names[] = {"Skate", "Near", "Middle", "Far", "FirstPerson", "Head"};
         for (int i = 0; i < 6; ++i)
-            if (menu::SameText(v, names[i])) c.cameraView = i;
+            if (menu::SameText(v, names[i])) c.cameraView = camera::CanonicalView(i);
     }},
     {"EmoteUp", [](Config& c, const std::string& v) { c.gestures[0] = GestureIndex(v); }},
     {"EmoteDown", [](Config& c, const std::string& v) { c.gestures[1] = GestureIndex(v); }},
@@ -365,6 +412,8 @@ const Key kKeys[] = {
     {"PedHitboxes", Store<&Config::pedHitboxes>},
     {"PedLaunch", Store<&Config::pedLaunch>},
     {"PedsSurvive", Store<&Config::pedsSurvive>},
+    {"PedBumpImpulse", Store<&Config::pedBump>},
+    {"BoardScratches", Store<&Config::boardScratches>},
     {"PedLaunchScale", Store<&Config::pedLaunchScale>},
     {"PedLaunchLift", Store<&Config::pedLaunchLift>},
     {"PedLaunchSpin", Store<&Config::pedLaunchSpin>},
@@ -378,6 +427,7 @@ const Key kKeys[] = {
     {"VehicleDamage", Store<&Config::vehicleDamage>},
     {"VehicleDamageScale", Store<&Config::vehicleDamageScale>},
     {"VehiclePush", Store<&Config::vehiclePush>},
+    {"ObjectPush", Store<&Config::objectPush>},
     {"VehicleDamageMin", Store<&Config::vehicleDamageMin>},
     {"VehicleDamageRadius", Store<&Config::vehicleDamageRadius>},
     {"GtaCharacter", Store<&Config::gtaCharacter>},
@@ -415,24 +465,49 @@ Config LoadConfig() {
 }
 
 Config g_config;
+struct GlowColour { const char* name; int r, g, b; };
+constexpr GlowColour GlowColours[] = {{"White", 255, 255, 255}, {"Red", 255, 40, 30}, {"Orange", 255, 120, 20},
+    {"Yellow", 255, 220, 40}, {"Green", 60, 255, 60}, {"Cyan", 40, 230, 255}, {"Blue", 40, 90, 255},
+    {"Purple", 170, 60, 255}, {"Pink", 255, 70, 190}};
+void ApplyWheelGlow(const Config& c) {
+    GlowColour pick = GlowColours[0];
+    for (const GlowColour& g : GlowColours) if (menu::SameText(c.wheelGlowColour, g.name)) pick = g;
+    if (menu::SameText(c.wheelGlowColour, "Wheel colour")) pick = {"Wheel colour", -1, -1, -1}; // drawn in the ridden wheels' colour
+    boardnative::SetWheelGlow(c.wheelGlow, pick.r, pick.g, pick.b);
+    // The wheels themselves glow through their emissive model copies; the slider
+    // sets the soft light they throw on the ground. When "Wheel colour" is active,
+    // pick the closest tinted emissive model copy so HDR bloom does not wash out to white.
+    std::string tint;
+    if (pick.r < 0) {
+        const int* w = boardnative::WheelColour();
+        const int hi = std::max({w[0], w[1], w[2]}), lo = std::min({w[0], w[1], w[2]});
+        if (hi - lo >= 35) {
+            const GlowColour* best = &GlowColours[1];
+            int bestDist = INT_MAX;
+            for (size_t i = 1; i < std::size(GlowColours); ++i) {
+                const int dr = w[0] - GlowColours[i].r, dg = w[1] - GlowColours[i].g, db = w[2] - GlowColours[i].b;
+                const int dist = dr * dr + dg * dg + db * db;
+                if (dist < bestDist) { bestDist = dist; best = &GlowColours[i]; }
+            }
+            tint = best->name;
+        }
+    } else {
+        tint = pick.name;
+    }
+    for (char& ch : tint) ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+    boardparts::SetGlowWheels(c.wheelGlow > 0.0f, tint);
+}
+unsigned BoardMaterialClass(const Config& c) { return c.boardMaterial == "Ped" ? 1u : c.boardMaterial == "Off" ? 0u : 2u; }
 const char* g_routeNotice = nullptr; // the Interaction page's last GPS change, shown once
-// GTA's follow camera is the view (CameraView 1-4): the mouse turns it.
+// GTA views and the developer override share the gameplay camera path.
 bool g_gtaView = false;
-// The view last used while skating, and GTA's on-foot camera mode when the
-// skater left (a V pressed on foot since then wins).
-int g_lastView = -1, g_footModeAtLeave = -1;
-// The third person camera of views near/middle/far (OrbitCamera): its yaw
-// in degrees, for walking that follows the camera.
-float g_orbitYaw = 0.0f;
-bool g_orbitOn = false;
-// view -> GTA's on-foot camera mode. First person while skating is the
-// skater's eyes (GTA's own first person hid the board), so both are GTA's
-// first person on foot.
-constexpr int kFootMode[6] = {-1, 0, 1, 2, 4, 4};
+// Last skating camera kind; -1 means CameraView still selects the first session.
+int g_lastView = -1;
 
 // '/' opens the settings menu (menu.h). Everything else that used a hotkey is a
 // menu item; the items that act on a frame of the main loop set these flags.
 std::atomic<bool> g_menuToggle{false};
+std::atomic<bool> g_dropperToggle{false}; // DropperKey pressed
 std::atomic<bool> g_quirkRequested{false};
 std::atomic<bool> g_soundListToggle{false};
 std::atomic<bool> g_lineRequested{false};
@@ -441,11 +516,50 @@ std::atomic<bool> g_lineNext{false};  // next line in Line='s ';' list
 void Keyboard(DWORD key, WORD, BYTE, BOOL, BOOL, BOOL wasDownBefore, BOOL isUpNow) {
     // F10 too: '/' is VK_OEM_2 only on a US layout (Shift+7 on a German one).
     if ((key == VK_OEM_2 || key == VK_F10) && !wasDownBefore && !isUpNow) g_menuToggle.store(true);
+    if (g_config.dropperKey && key == g_config.dropperKey && !wasDownBefore && !isUpNow) g_dropperToggle.store(true);
 }
 
 // ---- GTA presentation ------------------------------------------------------
 void Text(const char* s, float x, float y, float scale, int r, int g, int b, bool centre) {
     gta::Text(s, x, y, scale, r, g, b, 255, centre ? gta::Align::Centre : gta::Align::Left);
+}
+
+// Where moving GTA entities are gathered (the maintainer 2026-10-17: only where the
+// skater can get to): a circle of kGatherBase at rest that grows with speed
+// (kGatherLead seconds of travel) and shifts ahead by half of it, so a little
+// stays behind and more lies ahead. Never beyond the DynamicRadius setting.
+// Centred on the skater's body, not the board: in a bail the board flies off
+// alone and cars around the tumbling body fell out of the area (the maintainer
+// 2026-10-18: "when bailing cars dont collide anymore"). A board farther away
+// widens the circle so it stays inside too.
+struct GatherArea { SvVec3 centre; float radius; };
+constexpr float kGatherBase = 8.0f, kGatherLead = 1.0f;
+GatherArea GatherAreaFor(SvVec3 skater, SvVec3 board, SvVec3 v, float maxRadius) {
+    const bool body = std::isfinite(skater.x) && std::isfinite(skater.y) && std::isfinite(skater.z) &&
+                      (skater.x != 0.0f || skater.y != 0.0f || skater.z != 0.0f);
+    const SvVec3 at = body ? skater : board;
+    const float bx = board.x - at.x, by = board.y - at.y, bz = board.z - at.z;
+    const float apart = std::sqrt(bx * bx + by * by + bz * bz);
+    const float base = kGatherBase + (std::isfinite(apart) ? apart : 0.0f);
+    const float speed = std::sqrt(v.x * v.x + v.y * v.y + v.z * v.z);
+    if (!std::isfinite(speed) || speed < 0.5f) return {at, (std::min)(base, maxRadius)};
+    const float shift = speed * kGatherLead * 0.5f;
+    const float radius = (std::min)(base + shift, maxRadius);
+    const float k = (std::max)(0.0f, (std::min)(shift, radius - base * 0.5f)) / speed; // keep the skater well inside
+    return {{at.x + v.x * k, at.y + v.y * k, at.z + v.z * k}, radius};
+}
+
+// Gather interval: every Skate step (1/60 s) while the skater or anything
+// gathered moves at 2 m/s or more, 1/30 s for slow movement, 1/15 s when all is still.
+float GatherInterval(SvVec3 skater, const std::vector<SvDynamicBody>& bodies) {
+    auto len = [](const SvVec3& v) { return std::sqrt(v.x * v.x + v.y * v.y + v.z * v.z); };
+    float fastest = len(skater);
+    for (const SvDynamicBody& b : bodies) {
+        const float s = len(b.linear_velocity);
+        if (std::isfinite(s)) fastest = (std::max)(fastest, s);
+    }
+    if (!std::isfinite(fastest) || fastest >= 2.0f) return 1.0f / 60.0f;
+    return fastest >= 0.3f ? 1.0f / 30.0f : 1.0f / 15.0f;
 }
 
 // The board while the native board object is unavailable: the runtime's board
@@ -574,7 +688,7 @@ bool GameFocused() {
 void DrawKeyboardHints(bool onFoot) {
     std::string& text = g_keyHints[onFoot ? 1 : 0];
     if (text.empty()) {
-        text = g_runtime.KeyboardHints(onFoot) + "F\tBack to GTA\nTab\tGun out / away (hold: weapon wheel)\nMouse buttons\tAim / shoot (gun out)\nF10\tSK8V menu (all settings)\nV\tCamera view\n";
+        text = g_runtime.KeyboardHints(onFoot) + "Tab\tGun out / away (hold: weapon wheel)\nMouse buttons\tAim / shoot (gun out)\nF10\tSK8V menu (all settings)\nV\tCamera view\n";
         if (g_runtime.HasActionCam()) text += "R\tCinematic camera\n";
     }
     float y = 0.25f;
@@ -590,6 +704,10 @@ void DrawKeyboardHints(bool onFoot) {
         y += 0.021f;
     }
 }
+
+// The settings menu or the object dropper has the keys: no skating, camera,
+// weapon or F key reads meanwhile (the dropper uses W A S D, Q E, F R, Space).
+bool KeysTaken() { return menu::IsOpen() || objectdropper::IsOpen(); }
 
 SvPad ReadPadRaw() {
     // Polled every frame in and out of skate mode (board action). XInput is
@@ -652,7 +770,7 @@ SvPad ReadPadRaw() {
     // carries the mouse; the settings menu releases the keys.
     static bool s_fWas = false;
     const bool fDown = (GetAsyncKeyState('F') & 0x8000) != 0;
-    g_fPressed = fDown && !s_fWas && GameFocused();
+    g_fPressed = fDown && !s_fWas && GameFocused() && !objectdropper::IsOpen();
     s_fWas = fDown;
     static bool s_keyboardInUse = true;
     const auto moved = [](int v) { return v > 7849 || v < -7849; };  // XInput's thumb dead zone
@@ -666,12 +784,12 @@ SvPad ReadPadRaw() {
         SvPad keys{};
         const float mx = Call<float>(gta::GET_DISABLED_CONTROL_NORMAL, 0, 1);
         const float my = Call<float>(gta::GET_DISABLED_CONTROL_NORMAL, 0, 2);
-        bool typed = g_runtime.KeyboardPad(mx * 100.0f, my * 100.0f, dt, GameFocused() && !menu::IsOpen() && !g_weaponWheel, keys, !g_boardArmed);
+        bool typed = g_runtime.KeyboardPad(mx * 100.0f, my * 100.0f, dt, GameFocused() && !KeysTaken() && !g_weaponWheel, keys, !g_boardArmed);
         // GTA's own weapon keys on the board: Tab is the gun button (tap: gun
         // out or away, hold: GTA's weapon wheel), and with a gun out the
         // right mouse button aims and the left one shoots (SK8V's drive-by
         // layout on a controller: Back, LB, RB).
-        if (GameFocused() && !menu::IsOpen()) {
+        if (GameFocused() && !KeysTaken()) {
             const auto held = [](int vk) { return (GetAsyncKeyState(vk) & 0x8000) != 0; };
             if (held(VK_TAB)) keys.buttons |= g_config.gunButton, typed = true;
             if (g_boardArmed && held(VK_RBUTTON)) keys.buttons |= g_config.aimButton, typed = true;
@@ -725,7 +843,15 @@ void DrawInputs(const SvPad& pad) {
 
 // Skate and the lifecycle see a neutral pad while the settings menu is open.
 SvPad ReadPad() {
-    if (!menu::IsOpen() && !boardshop::IsOpen()) return ReadPadRaw();
+    // The object dropper reads the pad itself; F and Y must not get on or off meanwhile.
+    if (objectdropper::IsOpen()) {
+        g_fPressed = false;
+        SvPad idle{};
+        idle.connected = 1;
+        return idle;
+    }
+    // GTA's pause menu and map (setting a marker) take the pad: nothing reaches skating.
+    if (!menu::IsOpen() && !boardshop::IsOpen() && !gta::FrontendActive()) return ReadPadRaw();
     SvPad idle{};
     idle.connected = 1;
     return idle;
@@ -740,7 +866,7 @@ enum FramePart { kPartLifecycle, kPartControlsRead, kPartControls, kPartInput, k
 const char* const kPartNames[kPartCount] = {"lifecycle", "controls read", "controls", "input", "world", "step", "pose", "camera",
                                             "board", "after", "hud", "menu", "records", "audio", "level"};
 double g_partMs[kPartCount]{};
-unsigned g_gtaCamFrames = 0; // skating frames GTA's gameplay camera rendered (GtaCamera)
+unsigned g_gtaCamFrames = 0; // skating frames GTA's gameplay camera rendered
 double g_frameMs[kPartCount]{};
 double g_lapAt = 0.0;
 double QpcMs() {
@@ -795,9 +921,14 @@ public:
         if (windowMs >= 10000.0) {
             const double reportStart = Now();
             const unsigned draws = boardstencil::TakeAllDraws();
+            const unsigned gtaCamFrames = std::exchange(g_gtaCamFrames, 0u);
+            // Drain render/pose counters even when this preset disables logs.
+            // Otherwise the first Developer report includes earlier windows.
+            const hudoverlay::PresentStats hud = hudoverlay::TakePresentStats();
+            const posehook::ApplyTime pose = posehook::TakeApplyTime();
             if (util::g_verbose) Logf("frames %.1fs: %u frames (%.1f fps), worst %.1f ms, %u over 50 ms, SkateV work avg %.3f ms max %.3f ms, skating %u/%u (GTA's camera %u), GTA indexed draws %.0f/frame",
                  windowMs / 1000.0, frames_, frames_ * 1000.0 / windowMs, maxFrame_, hitches_,
-                 frames_ ? workTotal_ / frames_ : 0.0, workMax_, activeFrames_, frames_, std::exchange(g_gtaCamFrames, 0u),
+                 frames_ ? workTotal_ / frames_ : 0.0, workMax_, activeFrames_, frames_, gtaCamFrames,
                  frames_ ? double(draws) / frames_ : 0.0);
             if (util::g_verbose && activeFrames_) {
                 // Per skating frame, the skating path's parts; then the HUD draw on the render thread.
@@ -807,8 +938,6 @@ public:
                     sprintf_s(item, "%s%s %.3f", i ? ", " : "", kPartNames[i], g_partMs[i] / activeFrames_);
                     parts += item;
                 }
-                const hudoverlay::PresentStats hud = hudoverlay::TakePresentStats();
-                const posehook::ApplyTime pose = posehook::TakeApplyTime();
                 Logf("frames: skating parts ms/frame: %s; HUD draw (render thread) avg %.3f ms max %.3f ms over %u presents; "
                      "pose writes in GTA's anim pass %.3f, on its anim workers %.3f ms/frame (%u writes)",
                      parts.c_str(), hud.count ? hud.totalMs / hud.count : 0.0, hud.maxMs, hud.count,
@@ -883,8 +1012,8 @@ struct Session {
     bool wheelOpen = false;          // GTA's weapon wheel held open from GunButton
     DWORD wheelClosedAt = 0;
     bool aiming = false;
-    bool gtaCam = false; // GtaCamera: GTA's gameplay camera renders instead of ours
-    float dynamicDue = 1.0f; // seconds of game time toward Skate's next 60 Hz step (DynamicWorld gathers on it)
+    float dynamicDue = 1.0f; // seconds of game time toward the next DynamicWorld gather
+    float dynamicEvery = 1.0f / 60.0f; // gather interval: 1/60 s with fast movers, longer when all is slow (GatherInterval)
     DWORD nextShot = 0;
     DWORD reloadDone = 0; // board reload in progress until (0 none, direct fire only)
     // GTA's own fire: 0 not seen yet, 1 GTA's shots (INPUT_ATTACK), -1 GTA did
@@ -929,6 +1058,10 @@ struct Session {
     std::string message;
     SvOutput last{};
     int view = -1;                // CameraView in use (-1: not chosen since entering)
+    float lastGround[3]{};        // where Skate's skater last stood on ground (fall-through rescue)
+    bool lastGroundValid = false;
+    int prevFoot = -1;            // GTA's follow mode last frame in a GTA view (-1: not yet / SK8V's camera)
+    bool vHeld = false;           // V that left SK8V's camera still held: GTA must not take it too
     int action = 0;               // R: 0 off, 1 the cinematic camera, 2 the skate filmer
     bool wipingOut = false; // last output was a Wipeout state (bail voice)
     // Bail impacts: the skater's velocity from Skate's positions (60 Hz ticks).
@@ -943,9 +1076,13 @@ struct Session {
     SvVec3 hitPos[3][3]{};
     std::uint64_t hitTick[3]{};
     int hitSamples = 0;
+    DWORD hitsFrom = 0; // no bail hits before (entry: the session may still end an old wipeout)
+    DWORD rescueCheck = 0; // next fall-through probe
     // Lifecycle bookkeeping.
     lifecycle::BoardAction board;
     DWORD loadedSince = 0;     // player loaded and stable since (Unprepared)
+    bool loadingSpinner = false; // GTA's busy spinner shown while Skate gets ready after the game loaded
+    bool readyAnnounced = false;
     DWORD lastTrack = 0;       // last sv_lifecycle_track
     DWORD stateSince = 0;      // entered the current state (script-frame time: gaps without frames are skipped)
     DWORD lastLifecycleFrame = 0;
@@ -967,6 +1104,8 @@ struct Session {
     // else (Menyoo, a teleport mod), and Skate must follow it, not put it back.
     float placed[3]{};
     bool placedValid = false;
+    SvVec3 entryAt{};              // where the last entry put the skater
+    DWORD entrySettleUntil = 0;    // until then Skate's skater must be near entryAt
     bool keepPlace = false;     // Leave: the ped stays where it is
     bool teleportWait = false;  // waiting for the collision at a teleport target
     // GTA delegation (swim / climb): which action, since when, settled since.
@@ -1065,10 +1204,29 @@ bool SkateOwnsPlayer(const Session& s) {
     return s.state == LifeState::Entering || s.state == LifeState::Skating || s.state == LifeState::Leaving;
 }
 
+// Several settings at once; the world warning waits until the end.
+bool ApplyBulk(const std::string& name, const std::vector<std::pair<std::string, std::string>>& settings);
 void Notify(Session& s, const std::string& text, DWORD ms = 4000) {
     s.message = text;
     s.messageUntil = GetTickCount() + ms;
     Logf("SkateV Legacy: %s", text.c_str());
+}
+
+// SkateMods: right after the game loads, GTA and other mods can stall for a
+// second or two while Skate gets its collision ready; GTA's own busy spinner
+// (bottom right) says something is loading, so the game does not look hung.
+void LoadingSpinner(Session& s, bool on) {
+    if (on == s.loadingSpinner) return;
+    s.loadingSpinner = on;
+    if (on) {
+        Call<void>(gta::BEGIN_TEXT_COMMAND_BUSYSPINNER_ON, "STRING");
+        Call<void>(gta::ADD_TEXT_COMPONENT_SUBSTRING_PLAYER_NAME, "GTAxSkate: getting skating ready");
+        Call<void>(gta::END_TEXT_COMMAND_BUSYSPINNER_ON, 1);
+        Log("SkateV Legacy: loading spinner on");
+    } else {
+        Call<void>(gta::BUSYSPINNER_OFF);
+        Log("SkateV Legacy: loading spinner off");
+    }
 }
 
 // While Skate poses the real ped, GTA's IK (feet to ground, arm/head/torso
@@ -1164,8 +1322,9 @@ void ImpactGrunts(Session& s, const Config& cfg, const float* pose, const int bo
                     z = (p0.z - p1.z) / dt0 - (p1.z - p2.z) / dt1;
         worst = std::max(worst, std::sqrt(x * x + y * y + z * z));
     }
-    if (s.wipingOut) injuries::Hit(worst);
     const DWORD now = GetTickCount();
+    if (static_cast<LONG>(now - s.hitsFrom) < 0) return;
+    if (s.wipingOut) injuries::Hit(worst);
     // A new grunt more often than this cut the last one off before it played.
     if (!s.wipingOut || worst <= cfg.bailHitSpeed || now - s.lastGrunt <= 700) return;
     s.lastGrunt = now;
@@ -1218,32 +1377,16 @@ void NearMiss(Session& s, const Config& cfg, const std::vector<SvDynamicBody>& b
 
 void FilmLook(Session& s, const Config& cfg, int action, float focus);
 
-// The view the next skate session starts in: with CameraRemember the one
-// last used (or GTA's on-foot near/middle/far/first person when V changed it
-// on foot), else CameraView.
-int StartView(const Config& cfg) {
-    const auto eyes = [](int v) { return v == 4 ? 5 : v; }; // first person: the skater's eyes
-    if (!cfg.cameraRemember) return eyes(std::clamp(cfg.cameraView, 0, 5));
-    const int foot = Call<int>(gta::GET_FOLLOW_PED_CAM_VIEW_MODE);
-    if (g_lastView >= 0 && foot == g_footModeAtLeave) return g_lastView;
-    for (int v = 1; v <= 4; ++v)
-        if (kFootMode[v] == foot) return eyes(v);
-    return eyes(g_lastView >= 0 ? g_lastView : std::clamp(cfg.cameraView, 0, 5));
-}
-
-// Leaving skate mode: the view is kept for the next session, and walking goes
-// on at the same distance (GTA's near/middle/far/first person).
+// GTA remembers its current on-foot mode; only the camera kind crosses sessions.
 void RememberView(Session& s, const Config& cfg) {
-    if (s.view < 0) return;
-    g_lastView = s.view;
-    if (cfg.cameraRemember && kFootMode[s.view] >= 0) Call<void>(gta::SET_FOLLOW_PED_CAM_VIEW_MODE, kFootMode[s.view]);
-    g_footModeAtLeave = Call<int>(gta::GET_FOLLOW_PED_CAM_VIEW_MODE);
+    if (cfg.cameraRemember && s.view >= 0) g_lastView = g_gtaView ? 1 : s.view;
 }
 
 // Hands the player back to GTA. `voluntary`: Y held or the menu; the GTA
 // ped takes Skate's current place and facing, whether riding or on foot.
 // Otherwise (menu, death, runtime error, network) the ped is put where the
 // skater last was.
+void CinemaViewportRoom(bool filming);
 void Leave(Session& s, const Config& cfg, const char* why, bool voluntary) {
     RememberView(s, cfg);
     FilmLook(s, cfg, 0, 0.0f);
@@ -1253,6 +1396,7 @@ void Leave(Session& s, const Config& cfg, const char* why, bool voluntary) {
         g_runtime.ActionCam(0, {}, {}, 0.0f, none);
         s.action = 0;
     }
+    CinemaViewportRoom(false);
     s.radioTuned = false, s.radioCheck = 0;
     if (!SkateOwnsPlayer(s)) return;
     const bool wasSkating = s.state == LifeState::Skating;
@@ -1284,7 +1428,6 @@ void Leave(Session& s, const Config& cfg, const char* why, bool voluntary) {
         s.fadingCamUntil = GetTickCount() + kHandOffMs;
     }
     s.cam = 0;
-    s.gtaCam = false;
     if (s.ped && Call<BOOL>(gta::DOES_ENTITY_EXIST, s.ped)) {
         const SvVec3 p = s.last.skater_position;
         const bool finite = std::isfinite(p.x) && std::isfinite(p.y) && std::isfinite(p.z);
@@ -1435,6 +1578,12 @@ std::string g_slowCompatLayer;
 
 // The Skate session exists and the collision working set covers the player.
 bool AreaReady(const char*& why) {
+    SvOutput o{};
+    g_runtime.Output(o);
+    if (o.status == SV_STATUS_ERROR) {
+        why = "Skate runtime error";
+        return false;
+    }
     SvLifecycleState l{};
     if (!g_runtime.LifecycleState(l)) {
         why = "no lifecycle state";
@@ -1538,6 +1687,7 @@ void TryEnter(Session& s, const Config& cfg, bool strict) {
     SendCharacter(s, g_config);
     SetState(s, LifeState::Entering, strict ? "board action" : "menu");
     Logf("SkateV Legacy: entering off the board at %.2f %.2f %.2f heading %.1f", spawn.position.x, spawn.position.y, spawn.position.z, spawn.heading_degrees);
+    s.entryAt = spawn.position, s.entrySettleUntil = GetTickCount() + 1500;
 }
 
 // Tells the runtime which GTA character wears Skate's pose: the player's own
@@ -1583,13 +1733,23 @@ void SendCharacter(const Session& s, const Config& cfg) {
 void BeginActive(Session& s, const Config& cfg) {
     s.tracks.Reset();
     s.firstTrack = {};
+    ApplyWheelGlow(cfg);
     if (cfg.drawBoard) boardnative::Start(g_gameDir + L"SkateVLegacy.ini",
         std::filesystem::u8path(cfg.dataRoot).wstring(), Log);
     if (cfg.posePed) pedcollision::Start(g_gameDir + L"SkateVLegacy.ini",
         std::filesystem::u8path(cfg.dataRoot).wstring(), Log);
     if (s.fadingCam && Call<BOOL>(gta::DOES_CAM_EXIST, s.fadingCam)) Call<void>(gta::DESTROY_CAM, s.fadingCam, 0);
     s.fadingCam = 0;
-    s.cam = Call<Cam>(gta::CREATE_CAM, "DEFAULT_SCRIPTED_CAMERA", 1);
+    const int footMode = Call<int>(gta::GET_FOLLOW_PED_CAM_VIEW_MODE);
+    s.view = camera::StartView(cfg.cameraView, cfg.cameraRemember, g_lastView, footMode);
+    // A remembered GTA view must not change the on-foot mode on entry.
+    const int entryMode = camera::EntryFootMode(cfg.cameraView, cfg.cameraRemember, g_lastView);
+    if (entryMode >= 0) Call<void>(gta::SET_FOLLOW_PED_CAM_VIEW_MODE, entryMode);
+    g_gtaView = camera::GameplayView(s.view, cfg.gtaCamera, s.action);
+    if (g_gtaView) s.view = camera::ViewFromFootMode(Call<int>(gta::GET_FOLLOW_PED_CAM_VIEW_MODE));
+    g_lastView = s.view;
+    Logf("SkateV Legacy: camera session start: %s", camera::Name(s.view));
+    s.cam = Call<Cam>(gta::CREATE_CAM, "DEFAULT_SCRIPTED_CAMERA", 0);
     s.dynamicDue = 1.0f; // gather on the first skating frame
     {
         const Vector3 at = Call<Vector3>(gta::GET_FINAL_RENDERED_CAM_COORD);
@@ -1597,11 +1757,16 @@ void BeginActive(Session& s, const Config& cfg) {
         Call<void>(gta::SET_CAM_COORD, s.cam, at.x, at.y, at.z);
         Call<void>(gta::SET_CAM_ROT, s.cam, rot.x, rot.y, rot.z, 2);
     }
-    Call<void>(gta::SET_CAM_ACTIVE, s.cam, 1);
-    Call<void>(gta::RENDER_SCRIPT_CAMS, 1, 1, kHandOffMs, 1, 0, 0);
+    Call<void>(gta::SET_CAM_ACTIVE, s.cam, g_gtaView ? 0 : 1);
+    Call<void>(gta::RENDER_SCRIPT_CAMS, g_gtaView ? 0 : 1, 1, g_gtaView ? 0 : kHandOffMs, 1, 0, 0);
     s.poseFadedIn = false;
     s.poseFadingOut = false;
     s.watchTick = 0, s.watchSince = GetTickCount(), s.watchFrames = 0;
+    // rc7 test: leaving mid-fall (through a hole) froze the session in its
+    // wipeout; the next entry ended it at once and counted the old fall as a
+    // 13.8 m/s hit (pain, 89 s limp). Fresh hit and ground history per entry.
+    s.hitSamples = 0, s.hitsFrom = GetTickCount() + 1000;
+    s.lastGroundValid = false, s.rescueCheck = GetTickCount();
     s.armed = s.aiming = false;
     s.nativeFire = 0, s.fireWas = false, s.wheelOpen = false;
     liveclip::Suspend(s.ped, false);
@@ -1688,13 +1853,6 @@ bool SkateMouseLook() {
            Call<BOOL>(gta::IS_USING_KEYBOARD_AND_MOUSE, 0);
 }
 
-void ReadSkateCameraLook(float& x, float& y) {
-    x = y = 0.0f;
-    if (!SkateMouseLook()) return;
-    x = Call<float>(gta::GET_DISABLED_CONTROL_NORMAL, 0, 1);
-    y = Call<float>(gta::GET_DISABLED_CONTROL_NORMAL, 0, 2);
-}
-
 void DisableControllerCameraLook(bool aiming) {
     if (!g_controller || aiming || g_weaponWheel) return;
     // These two axes must stay suppressed even after a long idle interval.
@@ -1706,6 +1864,7 @@ void DisableControllerCameraLook(bool aiming) {
 void DisableSkateControls(std::uint16_t buttons, bool aiming) {
     if (menu::IsOpen()) return; // the open menu disables every control but pause
     const bool mouseLook = SkateMouseLook();
+    const bool gtaKeyboard = Call<BOOL>(gta::IS_USING_KEYBOARD_AND_MOUSE, 2) != 0;
     bool skip[360]{};
     for (int c = 0; c < 360; ++c) {
         // INPUT_WEAPON_WHEEL_UD/LR/NEXT/PREV, SELECT_NEXT/PREV_WEAPON, SELECT_WEAPON
@@ -1713,8 +1872,8 @@ void DisableSkateControls(std::uint16_t buttons, bool aiming) {
         skip[c] = (g_weaponWheel && ((c >= 12 && c <= 17) || c == 37 || c == 1 || c == 2)) ||
                   c == 199 || c == 200 || c == 170 || c == 288 || c == 289 || (c >= 296 && c <= 328) || c == 349 ||
                   (c == 19 && !(buttons & 0x0100)) ||
-                  (c == 244 && g_keyboard && !g_controller) || // keyboard and mouse: M stays GTA's interaction menu
-                  ((g_gtaView || g_orbitOn) && (c == 1 || c == 2) && mouseLook) ||
+                  (c == 244 && gtaKeyboard) || // keyboard and mouse: M stays GTA's interaction menu
+                  (g_gtaView && (((c == 1 || c == 2) && mouseLook) || c == 26 || c == 0)) || // GTA's look, look behind, V
                   (aiming && (c == 1 || c == 2 || c == 24 || c == 25 || c == 45 || (c >= 270 && c <= 273) || (c >= 290 && c <= 295)));
         if (skip[c]) continue;
         // GTA's value this frame whether or not it is disabled (scripts run after the input update).
@@ -1919,7 +2078,7 @@ void GunProbe(Session& s, const char* state) {
 
 // GTA's camera takes over looking from where Skate's camera was (aim, wheel).
 void GameplayCam(Session& s) {
-    if (s.cam) {
+    if (s.cam && !g_gtaView) {
         const Vector3 rot = Call<Vector3>(gta::GET_CAM_ROT, s.cam, 2);
         Call<void>(gta::SET_GAMEPLAY_CAM_RELATIVE_HEADING, rot.z - Call<float>(gta::GET_ENTITY_HEADING, s.ped));
         Call<void>(gta::SET_GAMEPLAY_CAM_RELATIVE_PITCH, rot.x, 1.0f);
@@ -1942,10 +2101,19 @@ void BoardControls(Session& s, const Config& cfg, SvPad& pad) {
     // Gun away, LB + d-pad left/right steps the radio (Skate 3's TRAX layout; LB + up/down is
     // Skate's session marker). The plain d-pad is Skate's gestures; a direction set to None
     // does not reach Skate.
-    if (cfg.radioControls && !s.armed && (buttons & 0x0100)) {
+    // Pure left/right only: a slightly diagonal LB + up/down (Skate's marker) must not step it.
+    if (cfg.radioControls && !s.armed && (buttons & 0x0100) && !(buttons & 0x0003)) {
         if (pressed & 0x0008) StepRadio(s, 1);  // right: next station
         if (pressed & 0x0004) StepRadio(s, -1); // left: previous
+        // rc7 test, "radio still overlapping with everything else": the same
+        // combo also reached Skate as its checkpoint (LB + left) and object
+        // dropper (LB + right). The radio owns it now; Skate does not see it.
+        pad.buttons &= static_cast<std::uint16_t>(~0x000Cu);
     }
+    // GTA's own radio controls (next/previous station and track, radio wheel)
+    // would change the radio again on the same buttons and keys while skating.
+    for (int group : {0, 2})
+        for (int c = 81; c <= 85; ++c) Call<void>(gta::DISABLE_CONTROL_ACTION, group, c, 1);
     if (!(buttons & 0x0100))
         for (int d = 0; d < 4; ++d)
             if (cfg.gestures[d] < 0) pad.buttons &= static_cast<std::uint16_t>(~(1u << d));
@@ -2371,130 +2539,11 @@ void ConstrainCameraEye(Session& s, const float (&anchor)[3], float (&eye)[3], i
     eye[0] = end.x + d[0] * k, eye[1] = end.y + d[1] * k, eye[2] = end.z + d[2] * k;
 }
 
-// Third person while skating (views near, middle, far), like GTA's follow
-// camera but on the script camera: it follows the board, not the body, so
-// flips, grabs and bails never swing it into the skater; ollies barely lift
-// it (the height follows slowly). It swings in behind the direction of
-// travel; the mouse turns it round and up or down, and after 2 s without the
-// mouse it swings back behind. A wall between it and the skater pulls it in.
-void OrbitCamera(Session& s, const SvOutput& o, const Config& cfg) {
-    static const float kDist[4] = {0.0f, 3.0f, 4.3f, 6.0f}, kLift[4] = {0.0f, 0.35f, 0.55f, 0.85f};
-    static float at[3], yaw = 0.0f, userYaw = 0.0f, userPitch = 0.0f, dist = 0.0f;
-    static ULONGLONG lastLook = 0, lastFrame = 0;
-    const ULONGLONG now = GetTickCount64();
-    const float dt = std::clamp(Call<float>(gta::GET_FRAME_TIME), 0.001f, 0.1f);
-    // The skater (their body, smoothed) or the board (CameraFocus): either way
-    // the smoothing below keeps flips and grabs from swinging the camera.
-    const SvVec3 f = cfg.cameraOnBoard ? o.board_position : o.skater_position;
-    // Skate's root is at ground contact (the feet), the board a hand above
-    // it: chest height above either.
-    const float lift = cfg.cameraOnBoard ? 1.15f : 1.25f;
-    const float board[3] = {f.x, f.y, f.z + lift};
-    auto ease = [&](float rate) { return 1.0f - std::exp(-rate * dt); };
-    auto wrap = [](float a) { return std::fmod(a + 540.0f, 360.0f) - 180.0f; };
-    const float speed = std::hypot(o.velocity.x, o.velocity.y);
-    if (now - lastFrame > 500) { // a new session (or the menu was open): start behind the skater
-        for (int i = 0; i < 3; ++i) at[i] = board[i];
-        yaw = o.skater_heading_degrees, userYaw = 0.0f, userPitch = 0.0f, dist = kDist[s.view];
-    }
-    lastFrame = now;
-    at[0] += (board[0] - at[0]) * ease(14.0f);
-    at[1] += (board[1] - at[1]) * ease(14.0f);
-    // Height: slow up (ollies), quicker down (drops), so the view stays calm.
-    at[2] += (board[2] - at[2]) * ease(board[2] < at[2] ? 6.0f : 2.5f);
-    if (std::fabs(board[2] - at[2]) > 3.0f) at[2] = board[2] + (at[2] > board[2] ? 3.0f : -3.0f);
-    const float travel = speed > 1.5f ? std::atan2(-o.velocity.x, o.velocity.y) * 57.29578f : yaw;
-    // Swings in behind the travel slowly: it stays where it is a while.
-    yaw += wrap(travel - yaw) * ease(speed > 1.5f ? 1.1f : 0.0f);
-    {
-        float mx = 0.0f, my = 0.0f;
-        ReadSkateCameraLook(mx, my);
-        if (std::fabs(mx) > 0.0005f || std::fabs(my) > 0.0005f) {
-            userYaw = wrap(userYaw - mx * 9.0f);
-            userPitch = std::clamp(userPitch - my * 6.0f, -50.0f, 35.0f);
-            lastLook = now;
-        }
-    }
-    if (now - lastLook > 2000 && speed > 1.5f) userYaw *= 1.0f - ease(1.8f), userPitch *= 1.0f - ease(1.8f);
-    const float camYaw = yaw + userYaw, pitch = -12.0f + userPitch;
-    const float h = camYaw * 0.017453292f, pr = pitch * 0.017453292f;
-    const float dir[3] = {-std::sin(h) * std::cos(pr), std::cos(h) * std::cos(pr), std::sin(pr)};
-    const float aim[3] = {at[0], at[1], at[2] + kLift[s.view]};
-    // A wall or car between the skater and the camera pulls the camera in front of it.
-    float want = kDist[s.view];
-    const float behind[3] = {aim[0] - dir[0] * want, aim[1] - dir[1] * want, aim[2] - dir[2] * want};
-    const int test = Call<int>(gta::START_EXPENSIVE_SYNCHRONOUS_SHAPE_TEST_LOS_PROBE, aim[0], aim[1], aim[2], behind[0], behind[1], behind[2],
-                               1 /* the map only: cars, poles and props passing by no longer pull it in */, s.ped, 7);
-    BOOL hit = 0;
-    Vector3 end{}, normal{};
-    Entity entity = 0;
-    if (Call<int>(gta::GET_SHAPE_TEST_RESULT, test, &hit, &end, &normal, &entity) == 2 && hit) {
-        const float d = std::sqrt((end.x - aim[0]) * (end.x - aim[0]) + (end.y - aim[1]) * (end.y - aim[1]) + (end.z - aim[2]) * (end.z - aim[2]));
-        // A preferred follow distance must not put the eye behind a nearby
-        // wall. The normal 1.6 m comfort distance cannot win over collision.
-        want = std::max(0.0f, d - 0.3f);
-    }
-    // In quickly but smoothly, out slowly: no jumps into the skater and back.
-    dist += (want - dist) * ease(want < dist ? 8.0f : 1.5f);
-    dist = std::min(dist, want); // never ease through the obstruction on the way in
-    float eye[3] = {aim[0] - dir[0] * dist, aim[1] - dir[1] * dist, aim[2] - dir[2] * dist};
-    // Never under the ground (slopes, stairs, the skater below the camera):
-    // at least 0.3 m above what is under the eye.
-    {
-        const int down = Call<int>(gta::START_EXPENSIVE_SYNCHRONOUS_SHAPE_TEST_LOS_PROBE, eye[0], eye[1], eye[2] + 1.5f, eye[0], eye[1],
-                                   eye[2] - 2.0f, 1, s.ped, 7);
-        BOOL under = 0;
-        Vector3 ground{}, n{};
-        Entity e = 0;
-        if (Call<int>(gta::GET_SHAPE_TEST_RESULT, down, &under, &ground, &n, &e) == 2 && under && n.z > 0.5f &&
-            ground.z <= eye[2] + 0.3f && eye[2] < ground.z + 0.3f)
-            eye[2] = ground.z + 0.3f;
-    }
-    // The smoothed target can lag below a rising ramp. A final trace from
-    // the actual chest also catches walls/ceilings after ground clearance.
-    ConstrainCameraEye(s, board, eye, 1);
-    Call<void>(gta::SET_CAM_COORD, s.cam, eye[0], eye[1], eye[2]);
-    Call<void>(gta::SET_CAM_ROT, s.cam, pitch, 0.0f, camYaw, 2);
-    Call<void>(gta::SET_CAM_FOV, s.cam, std::clamp(55.0f * cfg.fovScale, 20.0f, 120.0f));
-    g_orbitYaw = camYaw;
-}
-
-// The skater's eyes (view 5, as GTAxSkate's own mod had it): the script
-// camera at the head, looking where the board goes; the mouse looks round
-// (up to 150 degrees each way) and the view drifts back ahead after 1.5 s.
-float g_head[3] = {0, 0, 0}; // the head bone in Skate's pose this frame (world)
-bool g_headValid = false;
-
-void HeadCamera(Session& s, const SvOutput& o) {
-    static float yaw = 0.0f, pitch = 0.0f;
-    static ULONGLONG lastLook = 0;
-    float mx = 0.0f, my = 0.0f;
-    ReadSkateCameraLook(mx, my);
-    const ULONGLONG now = GetTickCount64();
-    if (std::fabs(mx) > 0.001f || std::fabs(my) > 0.001f) {
-        yaw = std::clamp(yaw - mx * 8.0f, -150.0f, 150.0f);
-        pitch = std::clamp(pitch - my * 6.0f, -70.0f, 60.0f);
-        lastLook = now;
-    } else if (now - lastLook > 1500) {
-        yaw *= 0.94f, pitch *= 0.94f;
-    }
-    // Skate's pose of this frame: GTA's own bone is a frame (or a whole
-    // animation) behind, which put the eye inside the head.
-    Vector3 head{};
-    if (g_headValid) head.x = g_head[0], head.y = g_head[1], head.z = g_head[2];
-    else head = Call<Vector3>(gta::GET_PED_BONE_COORDS, s.ped, 31086, 0.0f, 0.0f, 0.0f); // SKEL_Head
-    // Where the board goes (Skate's skater heading pointed backwards on the
-    // board); standing, the last way it went, at first the skater's.
-    static float ahead = NAN;
-    const float speed = std::hypot(o.velocity.x, o.velocity.y);
-    if (speed > 0.8f) ahead = std::atan2(-o.velocity.x, o.velocity.y) * 57.29578f;
-    else if (!std::isfinite(ahead)) ahead = o.skater_heading_degrees;
-    const float h = (ahead + yaw) * 0.017453292f;
-    const float fx = -std::sin(h), fy = std::cos(h);
-    Call<void>(gta::SET_CAM_COORD, s.cam, head.x + fx * 0.18f, head.y + fy * 0.18f, head.z + 0.10f);
-    Call<void>(gta::SET_CAM_ROT, s.cam, pitch - 8.0f, 0.0f, ahead + yaw, 2);
-    Call<void>(gta::SET_CAM_FOV, s.cam, 75.0f);
-    Call<void>(gta::SET_CAM_NEAR_CLIP, s.cam, 0.05f);
+// Report sudden turns of the optional action cameras.
+void LogCameraTurn(const char* reason, float before, float after, float pitchBefore, float pitchAfter) {
+    if (std::fabs(std::remainder(after - before, 360.0f)) > 10.0f || std::fabs(pitchAfter - pitchBefore) > 10.0f)
+        Logf("SkateV Legacy: camera auto orientation reason=%s yaw %.4f -> %.4f pitch %.4f -> %.4f",
+             reason, before, after, pitchBefore, pitchAfter);
 }
 
 // The cinematic camera or the skate filmer (R) on the script camera: the
@@ -2506,6 +2555,7 @@ void HeadCamera(Session& s, const SvOutput& o) {
 // focused on the skater (cinematic) and a handheld shake (strong for the
 // filmer, slight for the cinematic camera). `action` 0 takes it all off.
 int g_filmLook = 0;
+void FilmBars(int action);
 void FilmLook(Session& s, const Config& cfg, int action, float focus) {
     if (action != g_filmLook) {
         if (g_filmLook) {
@@ -2532,6 +2582,11 @@ void FilmLook(Session& s, const Config& cfg, int action, float focus) {
         Call<void>(gta::SET_CAM_FAR_DOF, s.cam, focus + 6.0f);
         Call<void>(gta::SET_CAM_DOF_STRENGTH, s.cam, 1.0f);
     }
+    FilmBars(action);
+}
+
+// The frame of a film look: 2.39:1 bars for the cinematic camera, 4:3 for the filmer.
+void FilmBars(int action) {
     const float aspect = Call<float>(gta::GET_ASPECT_RATIO, 0);
     if (action == 1 && aspect < 2.39f) {
         const float bar = (1.0f - aspect / 2.39f) * 0.5f;
@@ -2542,6 +2597,66 @@ void FilmLook(Session& s, const Config& cfg, int action, float focus) {
         Call<void>(gta::DRAW_RECT, bar * 0.5f, 0.5f, bar, 1.0f, 0, 0, 0, 255);
         Call<void>(gta::DRAW_RECT, 1.0f - bar * 0.5f, 0.5f, bar, 1.0f, 0, 0, 0, 255);
     }
+}
+
+// Preview in the settings menu (the maintainer, 2026-10-17): while a film look row is
+// selected the game shows that look (grade, strength, frame) behind the menu,
+// and every change shows at once. Leaving the row brings the picture back;
+// a running cinematic camera or filmer then puts its own look on again.
+void FilmLookPreview(Session& s, const Config& cfg) {
+    static int shown = 0;
+    static std::string look;
+    static float strength = -1.0f;
+    const std::string key = menu::SelectedKey();
+    const int want = key == "CinemaFilter" ? 1 : key == "FilmerFilter" ? 2 : key == "FilmFilterStrength" ? (g_filmLook ? g_filmLook : 1) : 0;
+    if (want) {
+        const std::string& wanted = want == 1 ? cfg.cinemaFilter : cfg.filmerFilter;
+        if (want != shown || wanted != look || cfg.filmFilterStrength != strength) {
+            Call<void>(gta::CLEAR_TIMECYCLE_MODIFIER);
+            if (!wanted.empty()) {
+                Call<void>(gta::SET_TIMECYCLE_MODIFIER, wanted.c_str());
+                Call<void>(gta::SET_TIMECYCLE_MODIFIER_STRENGTH, std::clamp(cfg.filmFilterStrength, 0.0f, 1.0f));
+            }
+            shown = want, look = wanted, strength = cfg.filmFilterStrength;
+        }
+        if (g_filmLook != want) FilmBars(want);
+    } else if (shown) {
+        Call<void>(gta::CLEAR_TIMECYCLE_MODIFIER);
+        shown = 0, look.clear(), strength = -1.0f;
+        if (g_filmLook) {
+            const int action = g_filmLook;
+            g_filmLook = 0;
+            FilmLook(s, cfg, action, 0.0f);
+        }
+    }
+}
+
+// GTA draws an interior only from the room the viewport is in. The cinematic
+// camera cuts between shots and GTA lost its room: the subway went black for
+// the whole shot (video 2026-10-17 13-25-29, 5:39-5:53). While it films the
+// player in an interior, the viewport takes the player's own room (a valid
+// interior/room pair); cleared outside and when the camera goes off.
+void CinemaViewportRoom(bool filming) {
+    static int forcedInterior = 0;
+    static std::uint32_t forcedRoom = 0;
+    int interior = 0;
+    std::uint32_t room = 0;
+    if (filming) {
+        const int ped = Call<int>(gta::PLAYER_PED_ID);
+        interior = Call<int>(gta::GET_INTERIOR_FROM_ENTITY, ped);
+        room = interior ? Call<std::uint32_t>(gta::GET_ROOM_KEY_FROM_ENTITY, ped) : 0;
+        if (!room) interior = 0;
+    }
+    if (interior) {
+        if (interior != forcedInterior || room != forcedRoom || Call<std::uint32_t>(gta::GET_ROOM_KEY_FOR_GAME_VIEWPORT) != room) {
+            Call<void>(gta::FORCE_ROOM_FOR_GAME_VIEWPORT, interior, room);
+            if (interior != forcedInterior || room != forcedRoom)
+                Logf("SkateV Legacy: cinematic camera draws from the player's room (interior %d room %u)", interior, room);
+        }
+    } else if (forcedInterior) {
+        Call<void>(gta::CLEAR_ROOM_FOR_GAME_VIEWPORT);
+    }
+    forcedInterior = interior, forcedRoom = room;
 }
 
 void ActionCamera(Session& s, const SvOutput& o, const Config& cfg) {
@@ -2573,7 +2688,10 @@ void ActionCamera(Session& s, const SvOutput& o, const Config& cfg) {
     const float dx = look[0] - eye[0], dy = look[1] - eye[1], dz = look[2] - eye[2];
     const float flat = std::sqrt(dx * dx + dy * dy);
     Call<void>(gta::SET_CAM_COORD, s.cam, eye[0], eye[1], eye[2]);
-    Call<void>(gta::SET_CAM_ROT, s.cam, std::atan2(dz, flat) * 57.29578f, 0.0f, std::atan2(-dx, dy) * 57.29578f, 2);
+    const Vector3 previous = Call<Vector3>(gta::GET_CAM_ROT, s.cam, 2);
+    const float yaw = std::atan2(-dx, dy) * 57.29578f, pitch = std::atan2(dz, flat) * 57.29578f;
+    LogCameraTurn(s.action == 1 ? "cinematic shot / obstruction" : "filmer shot / obstruction", previous.z, yaw, previous.x, pitch);
+    Call<void>(gta::SET_CAM_ROT, s.cam, pitch, 0.0f, yaw, 2);
     Call<void>(gta::SET_CAM_FOV, s.cam, std::clamp(shot[6], 10.0f, 120.0f));
     FilmLook(s, cfg, s.action, std::sqrt(dx * dx + dy * dy + dz * dz));
 }
@@ -2583,35 +2701,62 @@ void ActionCamera(Session& s, const SvOutput& o, const Config& cfg) {
 // turns. V (INPUT_NEXT_CAMERA) cycles them. In a GTA view the on-foot stick
 // is turned from Skate's camera into GTA's, so walking follows what is seen.
 void UpdateCameraView(Session& s, const Config& cfg, SvPad& pad) {
-    if (s.view < 0) {
-        s.view = StartView(cfg);
-        Logf("SkateV Legacy: camera view %d at the start", s.view);
+    // In GTA's views V is GTA's own (near, middle, far, first person, as on
+    // foot; DisableSkateControls leaves it enabled). When GTA's own cycle wraps
+    // from its last view back to near, the next view is SK8V's camera; V there
+    // goes back to GTA's near view. GTA switches a frame before our script
+    // sees V, so the wrap is read from GTA's mode, not from the key.
+    // rc9 test, "near is skipped again": the V that left SK8V's camera for
+    // GTA's near view also reached GTA's own camera, which went on to middle
+    // (log: near, then middle 0.1 s later). GTA's V is off until it is let go.
+    if (s.vHeld) {
+        if (Call<BOOL>(gta::IS_DISABLED_CONTROL_PRESSED, 0, 0)) {
+            Call<void>(gta::DISABLE_CONTROL_ACTION, 0, 0, 1);
+            Call<void>(gta::DISABLE_CONTROL_ACTION, 2, 0, 1);
+        } else {
+            s.vHeld = false;
+        }
     }
-    if (!menu::IsOpen() && Call<BOOL>(gta::IS_DISABLED_CONTROL_JUST_PRESSED, 0, 0)) {
-        do s.view = (s.view + 1) % 6; while (s.view == 4); // GTA's first person is not in the cycle
-        Logf("SkateV Legacy: camera view %d", s.view);
+    const int foot = Call<int>(gta::GET_FOLLOW_PED_CAM_VIEW_MODE);
+    if (g_gtaView) {
+        if (s.prevFoot >= 0 && foot != s.prevFoot && !menu::IsOpen()) {
+            s.view = camera::Wrapped(s.prevFoot, foot) ? 0 : camera::ViewFromFootMode(foot);
+            g_lastView = s.view;
+            Logf("SkateV Legacy: camera V: %s%s", camera::Name(s.view), cfg.gtaCamera ? " (GtaCamera override)" : "");
+        } else {
+            s.view = camera::ViewFromFootMode(foot);
+        }
+        s.prevFoot = s.view == 0 ? -1 : foot;
+    } else if (!KeysTaken() && Call<BOOL>(gta::IS_DISABLED_CONTROL_JUST_PRESSED, 0, 0)) {
+        s.view = 1;
+        Call<void>(gta::SET_FOLLOW_PED_CAM_VIEW_MODE, camera::FootMode(1));
+        s.prevFoot = camera::FootMode(1);
+        s.vHeld = true;
+        Call<void>(gta::DISABLE_CONTROL_ACTION, 0, 0, 1);
+        Call<void>(gta::DISABLE_CONTROL_ACTION, 2, 0, 1);
+        g_lastView = s.view;
+        Logf("SkateV Legacy: camera V: %s%s", camera::Name(s.view), cfg.gtaCamera ? " (GtaCamera override)" : "");
     }
     // R on the keyboard (the pad's reload is Skate's B): the cinematic camera,
     // the skate filmer, and back.
-    if (!menu::IsOpen() && !s.aiming && g_runtime.HasActionCam() && Call<BOOL>(gta::IS_USING_KEYBOARD_AND_MOUSE, 0) &&
+    if (!KeysTaken() && !s.aiming && g_runtime.HasActionCam() && Call<BOOL>(gta::IS_USING_KEYBOARD_AND_MOUSE, 0) &&
         Call<BOOL>(gta::IS_DISABLED_CONTROL_JUST_PRESSED, 0, 45)) {
         s.action = (s.action + 1) % 3;
         float none[7]{};
         g_runtime.ActionCam(0, {}, {}, 0.0f, none);
         Logf("SkateV Legacy: cinematic camera %s", s.action == 1 ? "on" : s.action == 2 ? "filmer" : "off");
     }
-    // GTA's gameplay camera only for first person: near, middle and far are
-    // OrbitCamera on the script camera (GTA's follow camera swung into the
-    // skater in tricks and did not change distance while the ped was held).
-    const bool gta = s.view == 4 && !s.action;
-    if (gta) Call<void>(gta::SET_FOLLOW_PED_CAM_VIEW_MODE, kFootMode[4]);
-    g_orbitOn = s.view >= 1 && s.view <= 3 && !s.action;
-    if (gta != g_gtaView && !s.aiming) {
-        if (s.cam) Call<void>(gta::RENDER_SCRIPT_CAMS, gta ? 0 : 1, 1, kAimBlendMs, 1, 0, 0);
+    const bool gta = camera::GameplayView(s.view, cfg.gtaCamera, s.action);
+    if (gta != g_gtaView) {
+        if (s.cam) {
+            Call<void>(gta::SET_CAM_ACTIVE, s.cam, gta ? 0 : 1);
+            if (!s.aiming && !s.wheelOpen)
+                Call<void>(gta::RENDER_SCRIPT_CAMS, gta ? 0 : 1, 1, kAimBlendMs, 1, 0, 0);
+        }
         g_gtaView = gta;
     }
-    if ((g_gtaView || g_orbitOn) && s.last.camera_valid && std::string_view(s.last.state_utf8).rfind("Biped", 0) == 0) {
-        const float yaw = g_gtaView ? Call<Vector3>(gta::GET_GAMEPLAY_CAM_ROT, 2).z : g_orbitYaw;
+    if (g_gtaView && s.last.camera_valid && std::string_view(s.last.state_utf8).rfind("Biped", 0) == 0) {
+        const float yaw = Call<Vector3>(gta::GET_GAMEPLAY_CAM_ROT, 2).z;
         const float d = (yaw - s.last.camera_rotation.z) * 0.017453292f;
         const float x = pad.left_x, y = pad.left_y, c = std::cos(d), sn = std::sin(d);
         pad.left_x = static_cast<std::int16_t>(std::clamp(x * c - y * sn, -32767.0f, 32767.0f));
@@ -2665,7 +2810,9 @@ void UpdateActive(Session& s, const Config& cfg, const SvPad& pad) {
     // gathered on the frames a step falls due, as fresh as before, not on
     // every rendered frame (at 185 fps the pool scan, its natives and the
     // runtime's prop triangles ran three times per step).
-    constexpr float kStep = 1.0f / 60.0f;
+    // Slow scenes are gathered less often (the maintainer 2026-10-17: only the samples
+    // needed for predictable movement); never more than once per frame or step.
+    const float kStep = s.dynamicEvery;
     s.dynamicDue = (std::min)(s.dynamicDue + in.dt_seconds, 1.0f);
     const bool gather = s.dynamicDue >= kStep;
     if (gather) s.dynamicDue = (std::min)(s.dynamicDue - kStep, kStep);
@@ -2676,15 +2823,22 @@ void UpdateActive(Session& s, const Config& cfg, const SvPad& pad) {
         s.world.SetPedParts(cfg.pedHitboxes);
         s.world.SetPedLaunch(cfg.pedLaunch, cfg.pedLaunchScale, cfg.pedLaunchLift, cfg.pedLaunchSpin);
         s.world.SetPedsSurvive(cfg.pedsSurvive);
+        s.world.SetPedBump(cfg.pedBump);
+        s.world.SetScratches(cfg.boardScratches);
         s.world.SetPedVoices(cfg.pedPain, cfg.pedGetUpSpeech);
         s.world.SetVehicleDamage(cfg.vehicleDamage, cfg.vehicleDamageScale, cfg.vehicleDamageMin, cfg.vehicleDamageRadius);
         std::vector<int> presentation = boardparts::Entities();
         presentation.push_back(boardnative::Entity());
-        s.world.Gather(s.ped, s.last.board_position, cfg.dynamicRadius, presentation);
+        if (const int ghost = objectdropper::Ghost()) presentation.push_back(ghost); // see-through, no collision
+        s.world.SetFixed(objectdropper::Objects());
+        const GatherArea area = GatherAreaFor(s.last.skater_position, s.last.board_position, s.last.velocity, cfg.dynamicRadius);
+        s.world.Gather(s.ped, area.centre, area.radius, presentation);
         s.world.SetVehiclePush(cfg.vehiclePush);
+        s.world.SetObjectPush(cfg.objectPush);
         if (const std::string line = s.world.TakePositionLog(); !line.empty()) Log(line.c_str());
         const auto& bodies = s.world.Bodies();
         g_runtime.SetDynamicBodies(bodies.data(), static_cast<std::uint32_t>(bodies.size()));
+        s.dynamicEvery = GatherInterval(s.last.velocity, bodies);
         if (cfg.pedHitboxes) {
             const auto& parts = s.world.PedParts();
             g_runtime.SetPedParts(parts.data(), static_cast<std::uint32_t>(parts.size()));
@@ -2737,6 +2891,57 @@ void UpdateActive(Session& s, const Config& cfg, const SvPad& pad) {
     }
 
     const SvVec3 p = o.skater_position;
+    // Skate's first frames after an entry can still carry the last session's
+    // skater (2026-10-20 log: "ped moved 203 m by something else" 64 ms after
+    // entering, skate mode off; Manatros: "teleporting between places when
+    // swapping skate and GTA mode"). Until Skate's skater is at the entry
+    // point, nothing is placed or judged from it.
+    if (static_cast<LONG>(GetTickCount() - s.entrySettleUntil) < 0) {
+        const float ex = p.x - s.entryAt.x, ey = p.y - s.entryAt.y, ez = p.z - s.entryAt.z;
+        if (!(ex * ex + ey * ey + ez * ez < 10.0f * 10.0f)) return;
+        s.entrySettleUntil = GetTickCount();
+    }
+    // Fell through a hole in Skate's collision where GTA has a floor (rc6 test:
+    // the same spot near (-147, 449) three times): put the ped back on GTA's
+    // ground; the teleport handling below then lets Skate follow once the
+    // collision there is built. Only when the skater is falling well below the
+    // height it last stood at and GTA reports a floor at that height.
+    // rc7 test (-182, 441): a bail fell through, and its state WipeoutGround
+    // counted as standing, so the old check (any "Ground" state, falling, floor
+    // within 1.5 m of the last height: fails on a slope) never fired. Now a
+    // bail does not count as standing (PhysicsGround is riding, BipedGround on
+    // foot), and a landed or slow body counts: well below the last standing
+    // height, GTA has a floor above the skater near that height, none under it.
+    // 2026-10-20: 1.5 m / 1 m (was 3 m / 2 m): back on top before the fall is
+    // seen (Manatros: "you fall through the map").
+    const std::string_view state(o.state_utf8);
+    const bool standing = state.find("Ground") != std::string_view::npos && state.rfind("Wipeout", 0) != 0;
+    if (standing && std::isfinite(p.z)) {
+        s.lastGround[0] = p.x, s.lastGround[1] = p.y, s.lastGround[2] = p.z, s.lastGroundValid = true;
+    } else if (s.lastGroundValid && std::isfinite(p.x + p.y + p.z) && p.z < s.lastGround[2] - 1.5f && s.placedValid &&
+               static_cast<LONG>(GetTickCount() - s.rescueCheck) >= 0) {
+        s.rescueCheck = GetTickCount() + 150;
+        float ground = 0.0f, below = 0.0f;
+        const bool above = Call<BOOL>(gta::GET_GROUND_Z_FOR_3D_COORD, p.x, p.y, s.lastGround[2] + 3.0f, &ground, 0, 0) &&
+                           ground > p.z + 1.0f && ground > s.lastGround[2] - 20.0f;
+        // GTA's world going on under the skater (off a bridge or a ledge): no rescue.
+        const bool under = Call<BOOL>(gta::GET_GROUND_Z_FOR_3D_COORD, p.x, p.y, p.z + 0.5f, &below, 0, 0) &&
+                           below < p.z + 0.5f;
+        if (above && !under) {
+            Logf("SkateV Legacy: fell through Skate's collision at (%.1f, %.1f, %.1f) where GTA has ground at z %.2f (last stood at (%.1f, %.1f, %.2f), state %s): back on GTA's ground",
+                 p.x, p.y, p.z, ground, s.lastGround[0], s.lastGround[1], s.lastGround[2], o.state_utf8);
+            Call<void>(gta::SET_ENTITY_COORDS_NO_OFFSET, s.ped, p.x, p.y, ground + 1.0f, 1, 1, 0);
+            s.lastGroundValid = false;
+            // As a teleport (below), at once: a move under 5 m would not be
+            // seen as one, and the next placement would undo it.
+            s.keepPlace = true;
+            Leave(s, cfg, "fell through", false);
+            s.keepPlace = false;
+            s.teleportWait = true;
+            TryEnter(s, cfg, false);
+            return;
+        }
+    }
     // keepTasks, keepIK, doWarp (CitizenFX docs; the pinned native DB calls
     // them axis flags). keepTasks 0 removed every task each tick: the live
     // clip, a vanilla clip and the aim task never ran. As SkateGTA-B4.
@@ -2824,9 +3029,6 @@ void UpdateActive(Session& s, const Config& cfg, const SvPad& pad) {
         static std::vector<float> s_pose(512 * 16);
         const std::uint32_t n = FreshPose(g_runtime.CharacterPose(s_pose.data(), 512), s_pose.data(), s_hitBones[0], o);
         const bool posed = n > 0 && static_cast<int>(n) == s_bones;
-        g_headValid = posed && s_hitBones[2] >= 0;
-        if (g_headValid)
-            for (int i = 0; i < 3; ++i) g_head[i] = s_pose[16 * s_hitBones[2] + 12 + i];
         if (posed) {
             posehook::PublishPose(s_pose.data(), static_cast<int>(n));
             ImpactGrunts(s, cfg, s_pose.data(), s_hitBones, o.tick);
@@ -2839,8 +3041,15 @@ void UpdateActive(Session& s, const Config& cfg, const SvPad& pad) {
 
     Lap(kPartPose);
     // CameraView=Skate (view 0): use SK8V's original output below.
-    // Orbit/head/action views are separate additions; never replace this path.
-    if (o.camera_valid) {
+    // GTA views leave this script camera unrendered; action cameras override it.
+    // Skate keeps its camera's state while switched off: its first frames
+    // after an entry came from where the last session ended (Manatros
+    // 2026-10-20: "the camera resets to a previous position where I was").
+    // A camera far from the skater is stale: the current view stays.
+    const float camDx = o.camera_position.x - o.skater_position.x, camDy = o.camera_position.y - o.skater_position.y,
+                camDz = o.camera_position.z - o.skater_position.z;
+    const bool camNear = camDx * camDx + camDy * camDy + camDz * camDz < 15.0f * 15.0f;
+    if (o.camera_valid && camNear) {
         Call<void>(gta::SET_CAM_COORD, s.cam, o.camera_position.x, o.camera_position.y, o.camera_position.z);
         Call<void>(gta::SET_CAM_ROT, s.cam, o.camera_rotation.x, o.camera_rotation.y, o.camera_rotation.z, 2);
         float fov = o.camera_fov * cfg.fovScale;
@@ -2853,20 +3062,15 @@ void UpdateActive(Session& s, const Config& cfg, const SvPad& pad) {
         Call<void>(gta::SET_CAM_ROT, s.cam, -12.0f, 0.0f, o.skater_heading_degrees, 2);
         Call<void>(gta::SET_CAM_FOV, s.cam, 60.0f);
     }
-    if (s.view >= 1 && s.view <= 3 && !s.action) OrbitCamera(s, o, cfg);
-    if (s.view == 5 && !s.action) HeadCamera(s, o);
     if (s.action) ActionCamera(s, o, cfg);
     else if (g_filmLook) FilmLook(s, cfg, 0, 0.0f);
+    CinemaViewportRoom(s.action != 0);
 
-    // Dev A/B (GtaCamera): GTA's gameplay camera renders instead of the script
-    // camera (as while aiming), so the frame report compares the two.
-    const bool gtaCam = cfg.gtaCamera && !s.aiming && !s.wheelOpen;
-    if (gtaCam != s.gtaCam) {
-        s.gtaCam = gtaCam;
-        if (gtaCam) GameplayCam(s);
-        else if (!s.aiming && !s.wheelOpen) Call<void>(gta::RENDER_SCRIPT_CAMS, 1, 1, kAimBlendMs, 1, 0, 0);
-    }
-    g_gtaCamFrames += s.gtaCam;
+    // GTA owns first-person head/hat hiding. Only shorten its near plane for
+    // the separate board presentation when it comes close during a grab.
+    if (g_gtaView && Call<int>(gta::GET_FOLLOW_PED_CAM_VIEW_MODE) == 4)
+        Call<void>(gta::SET_FIRST_PERSON_AIM_CAM_NEAR_CLIP_THIS_UPDATE, 0.05f);
+    g_gtaCamFrames += g_gtaView;
 
     Lap(kPartCamera);
     if (cfg.dynamicWorld) {
@@ -2904,6 +3108,7 @@ void UpdateActive(Session& s, const Config& cfg, const SvPad& pad) {
     if (!havePose || shopParts) boardnative::Tick(false, SvBoardPose{});
     if (!havePose) boardparts::Tick(false, SvBoardPose{});
     BoardWeather(s, cfg, nativeBoard ? &boardPose : nullptr);
+    if (nativeBoard) boardnative::GlowWheels(boardPose);
     if (cfg.drawSkater && !nativeBoard) DrawBoardMesh();
     if (g_quirkRequested.exchange(false) && cfg.backwardsMan) g_runtime.TriggerQuirk(0);
     if (cfg.skateHud && cfg.showDebug) { // dev only; the player sees hud_overlay
@@ -2944,8 +3149,16 @@ void LifecycleFrame(Session& s, const Config& cfg, bool f6) {
         posehook::Uninstall(Log);
         s.poseFadingOut = false;
     }
+    if (s.state != LifeState::Unprepared && s.state != LifeState::Preparing) {
+        LoadingSpinner(s, false);
+        if (!s.readyAnnounced) {
+            s.readyAnnounced = true;
+            if (s.state == LifeState::Ready) Notify(s, "GTAxSkate ready: pick the skateboard in the weapon wheel", 5000);
+        }
+    }
     switch (s.state) {
     case LifeState::Unprepared: {
+        if (Call<BOOL>(gta::DOES_ENTITY_EXIST, player) && !Call<BOOL>(gta::GET_IS_LOADING_SCREEN_ACTIVE)) LoadingSpinner(s, true);
         const bool loaded = Call<BOOL>(gta::DOES_ENTITY_EXIST, player) &&
                             Call<BOOL>(gta::IS_PLAYER_PLAYING, Call<Player>(gta::PLAYER_ID)) &&
                             !Call<BOOL>(gta::GET_IS_LOADING_SCREEN_ACTIVE) && Call<BOOL>(gta::IS_SCREEN_FADED_IN) &&
@@ -2969,10 +3182,17 @@ void LifecycleFrame(Session& s, const Config& cfg, bool f6) {
     case LifeState::Ready: {
         if (cfg.life.backgroundPrepare || s.trackingStarted) Track(s, false);
         if (s.state == LifeState::Preparing) {
-            SvLifecycleState l{};
-            if (g_runtime.LifecycleState(l) && l.prepared) {
-                Logf("SkateV Legacy: Skate session prepared in the background in %.0f ms", l.last_prepare_ms);
-                SetState(s, LifeState::Ready, "Skate prepared");
+            SvOutput o{};
+            g_runtime.Output(o);
+            if (o.status == SV_STATUS_ERROR) {
+                Logf("SkateV Legacy: background preparation failed: %s", g_runtime.StatusText().c_str());
+                SetState(s, LifeState::Ready, "background preparation failed");
+            } else {
+                SvLifecycleState l{};
+                if (g_runtime.LifecycleState(l) && l.prepared) {
+                    Logf("SkateV Legacy: Skate session prepared in the background in %.0f ms", l.last_prepare_ms);
+                    SetState(s, LifeState::Ready, "Skate prepared");
+                }
             }
         }
         const SvPad pad = ReadPad();
@@ -2986,26 +3206,11 @@ void LifecycleFrame(Session& s, const Config& cfg, bool f6) {
         // GTA (melee, the board shop's board on it); E or F gets on.
         const bool wheel = BoardWeaponTick(s, player) && !cfg.carryBoard;
         if (wheel) Log("SkateV Legacy: board picked in the weapon wheel");
-        // SkateMods: Y (E on the keyboard) with the board already in hand gets
-        // on too, so a refused or cancelled take-out can be tried again
-        // without picking the board in the wheel once more.
-        static bool s_yWas = false;
-        const bool yHeld = (pad.buttons & 0x8000) != 0;
-        const bool yBoard = yHeld && !s_yWas && s.boardWeaponWas && now >= s.suppressEnterUntil && !lifecycle::VehicleNear(player, 3.5f);
-        s_yWas = yHeld;
-        if (yBoard) Log("SkateV Legacy: Y with the board in hand");
-        // Keyboard: F on foot with no vehicle within 3.5 m gets on, as the weapon
-        // wheel does (near a vehicle F stays GTA's enter).
-        bool keyF = false;
-        if (g_fPressed && g_keyboard && !g_controller && !menu::IsOpen() && Call<BOOL>(gta::IS_PED_ON_FOOT, player)) {
-            const Vector3 at = Call<Vector3>(gta::GET_ENTITY_COORDS, player, 1);
-            if (!Call<BOOL>(gta::IS_ANY_VEHICLE_NEAR_POINT, at.x, at.y, at.z, 3.5f)) {
-                Call<void>(gta::DISABLE_CONTROL_ACTION, 0, 23, 1); // INPUT_ENTER
-                keyF = true;
-                Log("SkateV Legacy: F on the keyboard: board out");
-            }
-        }
-        if (f6 || wheel || yBoard || keyF) TryEnter(s, cfg, !f6);
+        // One way in, as SK8V 1.1.10: the board picked in the weapon wheel (or
+        // SK8V's menu action "Skate on / off"). Our F key and E/Y with the
+        // board in hand were removed (Manatros 2026-10-20: two different
+        // entries with different animations; "the weapon wheel is enough").
+        if (f6 || wheel) TryEnter(s, cfg, !f6);
         // Refused (vehicle, water, ...): no invisible weapon left in hand.
         if (wheel && s.state == LifeState::Ready) Call<void>(gta::SET_CURRENT_PED_WEAPON, player, 0xA2719263, 1);
         break;
@@ -3014,6 +3219,20 @@ void LifecycleFrame(Session& s, const Config& cfg, bool f6) {
         // Board action accepted but the session / this area is still being
         // built: GTA keeps the player meanwhile; a second press or the menu cancels.
         Track(s, false);
+        {
+            SvOutput o{};
+            g_runtime.Output(o);
+            if (o.status == SV_STATUS_ERROR) {
+                Notify(s, "Skate runtime error: " + g_runtime.StatusText(), 6000);
+                if (s.teleportWait) {
+                    Call<void>(gta::FREEZE_ENTITY_POSITION, player, 0);
+                    s.teleportWait = false;
+                }
+                Call<void>(gta::SET_CURRENT_PED_WEAPON, player, 0xA2719263, 1);
+                SetState(s, LifeState::Ready, "runtime error");
+                break;
+            }
+        }
         if (s.teleportWait) {
             // After a teleport: GTA streams collision here; the player stays put until it has.
             const Vector3 here = Call<Vector3>(gta::GET_ENTITY_COORDS, player, 1);
@@ -3078,19 +3297,9 @@ void LifecycleFrame(Session& s, const Config& cfg, bool f6) {
     case LifeState::Skating: {
         SvPad pad = ReadPad(); // once per frame
         if (cfg.skateHud && cfg.showInputs) DrawInputs(pad);
-        // Keyboard: F puts the board away in one press, as Y held does: Skate
-        // steps off first, then the board goes away. Read from the key itself
-        // (GTA's enter/exit is the pad's Y, whose tap mounts and dismounts).
-        // On foot (board in hand) F leaves at once: Y would mount the board first.
-        if (g_fPressed && g_keyboard && !g_controller && !menu::IsOpen() &&
-            std::string_view(s.last.state_utf8).rfind("Biped", 0) == 0) {
-            Leave(s, cfg, "F on foot", true);
-            break;
-        }
-        if (g_fPressed && g_keyboard && !g_controller && !menu::IsOpen())
-            s.keyLeaveUntil = now + cfg.putAwayHoldMs + 150;
-        if (s.keyLeaveUntil && now < s.keyLeaveUntil) pad.buttons |= 0x8000;
-        else s.keyLeaveUntil = 0;
+        // Leaving is SK8V's: hold Y (the keyboard's binding for it) puts the
+        // board away. Our F leave was removed with the F entry (Manatros
+        // 2026-10-20: "stay with the SK8V version mostly").
         UpdateCameraView(s, cfg, pad);
         // Hold Y to put the board away. The press still reaches Skate, so
         // it steps off first, then puts the board away while Y stays down.
@@ -3313,16 +3522,16 @@ void AppendDeveloperPage(std::vector<menu::Page>& pages, Session& s) {
     using namespace menu;
     for (auto& page : pages) if (page.title == "Presets") {
         page.items.push_back(Action("Developer - complete test baseline", [] {
-            ApplyPreset("Developer", {{"SkateHud", "1"}, {"ShowInputs", "1"}, {"ShowDebug", "1"},
+            ApplyPreset("Developer", {{"DevOptions", "1"}, {"SkateHud", "1"}, {"ShowInputs", "1"}, {"ShowDebug", "1"},
                 {"VerboseLog", "1"}, {"KeyboardHints", "1"}, {"TrickAnalyzer", "1"}, {"Hud", "1"},
-                {"HallOfMeatMetrics", "1"}, {"Stamina", "0"}, {"PedsSurvive", "1"}});
+                {"HallOfMeatMetrics", "1"}, {"Stamina", "0"}, {"PedsSurvive", "1"}, {"CollisionView", "1"}});
         }));
     }
     // Provenance stays in Developer. Source basis, compiled host and installer
     // receipt are different facts; none detects arbitrary third-party installs.
-    pages.push_back({"Developer", {
+    std::vector<Item> developer = {
         Action("Disable diagnostic overlays and verbose log", [] {
-            ApplySettings("Diagnostics off", {{"ShowInputs", "0"}, {"ShowDebug", "0"}, {"VerboseLog", "0"}});
+            ApplyBulk("Diagnostics off", {{"ShowInputs", "0"}, {"ShowDebug", "0"}, {"VerboseLog", "0"}, {"CollisionView", "0"}, {"ThreadCensus", "0"}});
         }),
         Action("Test controls: Advanced", [] { menu::OpenPage("Advanced"); }),
         Action("Skate cheats: Motorized / BackwardsMan / multipliers", [&s] {
@@ -3343,7 +3552,152 @@ void AppendDeveloperPage(std::vector<menu::Page>& pages, Session& s) {
         Action("LS Skate: not integrated", [&s] {
             Notify(s, "LS Skate is not integrated in this package. Its installed version is unavailable.", 7000);
         }),
-    }});
+    };
+    for (auto& page : pages) if (page.title == "Developer") {
+        // Below the World collision section (first), at the top of "More".
+        auto at = std::find_if(page.items.begin(), page.items.end(),
+                               [](const Item& it) { return it.kind == Kind::Heading && it.label == "More"; });
+        at = at == page.items.end() ? page.items.begin() : at + 1;
+        page.items.insert(at, std::make_move_iterator(developer.begin()), std::make_move_iterator(developer.end()));
+        return;
+    }
+    pages.push_back({"Developer", std::move(developer), "Advanced"});
+}
+
+// A menu row with its help text (rows without an INI key get none from the help table).
+menu::Item Helped(menu::Item item, std::string help) {
+    item.help = std::move(help);
+    return item;
+}
+
+void ApplyWorldOptions(const Config& c);
+
+// A virtual key's name as the keyboard shows it ("-" for none).
+std::string VirtualKeyName(unsigned vk) {
+    if (!vk) return "-";
+    LONG scan = static_cast<LONG>(MapVirtualKeyA(vk, MAPVK_VK_TO_VSC)) << 16;
+    if ((vk >= VK_PRIOR && vk <= VK_DOWN) || vk == VK_INSERT || vk == VK_DELETE) scan |= 1 << 24; // extended keys
+    char name[32];
+    if (!GetKeyNameTextA(scan, name, sizeof(name))) std::snprintf(name, sizeof(name), "0x%02X", vk);
+    return name;
+}
+
+// GTAxSkate's own settings, the package default (Manatros 2026-10-19: "best
+// faith GTA integration for the skate mechanics, just being fun in GTA without
+// really feeling like it isn't GTA"): Skate 3's riding with forgiving
+// landings, GTA's own cameras, radio, stamina, injuries and ragdolls, no
+// arcade overlays, developer views off. Applied once on a fresh install (no
+// saved User snapshot) and from Presets; only these keys change.
+const std::vector<std::pair<std::string, std::string>>& BestWorldSettings();
+const std::vector<std::pair<std::string, std::string>>& GtaxSkatePreset() {
+    static const auto settings = [] {
+      std::vector<std::pair<std::string, std::string>> values = {
+        // Riding: Skate 3's, forgiving (Easy: wide grind lock, assisted flips).
+        {"Difficulty", "Easy"}, {"Posture", "Normal"}, {"RidingStyle", "Default"}, {"TruckTightness", "0.7"},
+        {"WheelHardness", "0.7"}, {"Pop", "1"}, {"GrindPop", "1"}, {"PushSpeed", "1"}, {"PushPower", "1"}, {"Braking", "1"},
+        {"Steering", "1"}, {"Wobble", "1"}, {"OffboardJump", "1"}, {"Grip", "1"}, {"TurnPower", "1"}, {"ManualDrag", "1"},
+        {"HoldFakie", "0"}, {"HippieJump", "1"}, {"LipRule", "1"}, {"AirTimeLimit", "30"}, {"BailTimeLimit", "0"},
+        {"SkitchStandoff", "0"}, {"PutAwayHoldMs", "600"}, {"BackwardsMan", "0"},
+        {"EmoteUp", "Raise the roof"}, {"EmoteDown", "Dunno"}, {"EmoteLeft", "Shaka"}, {"EmoteRight", "Point"},
+        // GTA's cameras: the on-foot view carries into skating.
+        {"CameraView", "Near"}, {"CameraRemember", "1"}, {"Camera", "Low"}, {"CameraFovScale", "1"},
+        {"CinemaFilter", "NG_filmic01"}, {"FilmerFilter", "NG_filmic06"}, {"FilmFilterStrength", "0.85"},
+        // GTA's world: stamina skill, injuries, ragdolls, dents, its radio.
+        {"Stamina", "1"}, {"Injuries", "1"}, {"GtaDelegation", "1"}, {"SwimDepth", "1"}, {"BoardAim", "1"},
+        {"DynamicRadius", "35"}, {"PedHitboxes", "1"}, {"PedLaunch", "0"}, {"PedsSurvive", "1"},
+        {"PedLaunchScale", "1"}, {"PedLaunchLift", "0.3"}, {"PedLaunchSpin", "1"}, {"VehicleDamage", "1"},
+        {"VehicleDamageScale", "0.3"}, {"VehicleDamageRadius", "60"}, {"PedBumpImpulse", "180"}, {"BoardScratches", "1"},
+        {"VehiclePush", "1"}, {"ObjectPush", "0.25"}, {"DevOptions", "0"},
+        {"SkateRadio", ""}, {"RadioControls", "1"}, {"AudioGtaGainDb", "1.4"}, {"BoardActionInMissions", "0"},
+        {"BoardTracks", "1"}, {"Snow", "0"}, {"WheelGlow", "0"}, {"BoardMaterial", "Off"}, {"CarryBoard", "0"},
+        {"GpsWhileSkating", "1"}, {"SkateSpots", "1"}, {"WheelsFromPaint", "1"}, {"BailPain", "13"},
+        // On screen: GTA's HUD only, no Skate 3 arcade overlays.
+        {"SkateHud", "1"}, {"Hud", "0"}, {"TrickAnalyzer", "0"}, {"KeyboardHints", "0"},
+        {"HallOfMeat", "0"}, {"HallOfMeatMetrics", "0"}, {"HallOfMeatXray", "0"},
+        // Developer views and logs are for testing, not play.
+        {"ShowInputs", "0"}, {"ShowDebug", "0"}, {"VerboseLog", "0"}, {"CollisionView", "0"}, {"ThreadCensus", "0"},
+        {"GunProbe", "0"}, {"StallSampler", "0"}, {"GtaCamera", "0"},
+      };
+      const auto& world = BestWorldSettings();
+      values.insert(values.end(), world.begin(), world.end());
+      return values;
+    }();
+    return settings;
+}
+
+// Best-case world collision settings (Manatros 2026-10-25: every test runs with
+// the best settings; a changed setting warns that collision can break and the
+// reset restores these). Same values as the GTAxSkate preset.
+bool g_plainGtaCompare = false;
+constexpr unsigned kHostOnlyWorldSwitch = ~0u;
+struct WorldSwitch { const char* key; const char* name; bool Config::*value; unsigned id; bool best; };
+const WorldSwitch kWorldSwitches[] = {
+    {"DetailedStairs", "Stairs as steps", &Config::detailedStairs, 0, true},
+    {"StepRails", "Grind every stair step", &Config::stepRails, 10, false},
+    {"TrackRails", "Grind train tracks", &Config::trackRails, 2, true},
+    {"ObjectRails", "Grind standing objects", &Config::objectRails, 4, true},
+    {"TubeRails", "Grind tubes", &Config::tubeRails, 5, true},
+    {"VisualRails", "Rails from visible models", &Config::visualRails, 6, true},
+    {"RailTops", "Grind lines on top of rails", &Config::railTops, 3, true},
+    {"CurbBevels", "Curb bevels", &Config::curbBevels, 7, true},
+    {"HighResParks", "High-res skateparks", &Config::highResParks, 14, true},
+    {"UnflaggedStairs", "Unmarked stairs as steps (test)", &Config::unflaggedStairs, 9, false},
+    {"DynamicWorld", "Nearby entities collide", &Config::dynamicWorld, kHostOnlyWorldSwitch, true},
+};
+const std::vector<std::pair<std::string, std::string>>& BestWorldSettings() {
+    static const auto best = [] {
+        std::vector<std::pair<std::string, std::string>> values;
+        for (const auto& w : kWorldSwitches) values.emplace_back(w.key, w.best ? "1" : "0");
+        return values;
+    }();
+    return best;
+}
+bool WorldAtBest(const Config& c) {
+    for (const auto& w : kWorldSwitches) if (c.*(w.value) != w.best) return false;
+    return true;
+}
+// Pure saved-state description: stale comparison state must not obscure what
+// a test start is overriding. WorldState describes the active session instead.
+std::string SavedWorldState(const Config& c, bool values = false) {
+    std::string changed;
+    for (const auto& w : kWorldSwitches) if (c.*(w.value) != w.best) {
+        if (!changed.empty()) changed += ", ";
+        changed += w.name;
+        if (values) changed += c.*(w.value) ? "=1" : "=0";
+    }
+    return changed.empty() ? "best" : "custom: " + changed;
+}
+std::string WorldState(const Config& c, bool values = false) {
+    return g_plainGtaCompare ? "COMPARE (plain GTA)" : SavedWorldState(c, values);
+}
+#ifndef GTAXSKATE_TEST_WORLD_BASELINE
+#define GTAXSKATE_TEST_WORLD_BASELINE 0
+#endif
+constexpr bool kTestWorldBaseline = GTAXSKATE_TEST_WORLD_BASELINE != 0;
+void NormalizeTestWorldConfig(Config& c, bool enabled) {
+    if (enabled) for (const auto& w : kWorldSwitches) c.*(w.value) = w.best;
+}
+std::string WorldLabel() { return "World collision: " + WorldState(g_config); }
+
+// Inside a preset or reset (many keys at once) the warning waits until the
+// end (peer review 2026-10-26: it fired once per key, half-applied).
+static int g_bulkSettings = 0;
+
+bool ApplyBulk(const std::string& name, const std::vector<std::pair<std::string, std::string>>& settings) {
+    ++g_bulkSettings;
+    const bool ok = menu::ApplySettings(name, settings);
+    --g_bulkSettings;
+    return ok;
+}
+
+// A world switch changed in the menu: apply it, and warn when it leaves the
+// best-case settings.
+void WorldChanged(Session& s, const char* key) {
+    ApplyWorldOptions(g_config);
+    if (g_bulkSettings == 0) for (const auto& w : kWorldSwitches)
+        if (std::string(key) == w.key && g_config.*(w.value) != w.best)
+            Notify(s, std::string("World collision: ") + w.name + " changed from its best value (" +
+                   (w.best ? "on" : "off") + "). The status row at the top of World collision resets it.", 8000);
 }
 
 std::vector<menu::Page> MenuPages(Session& s) {
@@ -3400,6 +3754,15 @@ std::vector<menu::Page> MenuPages(Session& s) {
         Choice("Radio when skating", "SkateRadio", {"", "RADIO_19_USER"}, {"As it is", "Self Radio"}, Bound("SkateRadio")),
         Number("Camera FOV scale", "CameraFovScale", D.fovScale, 0.5f, 1.5f, 0.05f, Fixed("x%.2f"), Bound("CameraFovScale")),
         Choice("Board tracks", "BoardTracks", {"1", "0"}, {"On", "Off"}, Bound("BoardTracks")),
+        Number("Glowing wheels", "WheelGlow", 0, 0, 1, 0.05f,
+               [](float v) { return v == 0.0f ? std::string("Off") : Fixed("%.0f%%")(v * 100.0f); },
+               Bound("WheelGlow", [] { ApplyWheelGlow(g_config); })),
+        Choice("Wheel glow colour", "WheelGlowColour", {"Wheel colour", "White", "Red", "Orange", "Yellow", "Green", "Cyan", "Blue", "Purple", "Pink"},
+               {"Wheel colour", "White", "Red", "Orange", "Yellow", "Green", "Cyan", "Blue", "Purple", "Pink"},
+               Bound("WheelGlowColour", [] { ApplyWheelGlow(g_config); })),
+        Choice("Board material (test)", "BoardMaterial", {"Vehicle", "Ped", "Off"},
+               {"Like a car (no snow)", "Like a character (old)", "Plain object (snow lands)"},
+               Bound("BoardMaterial", [] { boardstencil::SetMaterial(BoardMaterialClass(g_config)); })),
         Choice("Snow", "Snow", {"0", "1", "2"}, {"Auto (GTA's snow and weather)", "Always (a trainer's snow)", "Never"},
                Bound("Snow")),
     }});
@@ -3423,22 +3786,25 @@ std::vector<menu::Page> MenuPages(Session& s) {
     }});
 
     pages.push_back({"Peds and vehicles", {
-        Flag("Nearby entities collide", "DynamicWorld", D.dynamicWorld, Bound("DynamicWorld")),
         Number("Collision radius", "DynamicRadius", D.dynamicRadius, 10, 80, 5, Fixed("%.0f m"), Bound("DynamicRadius")),
         Flag("Peds as body parts", "PedHitboxes", D.pedHitboxes, Bound("PedHitboxes")),
         Flag("Launch peds", "PedLaunch", D.pedLaunch, Bound("PedLaunch")),
         Flag("Knocked peds survive", "PedsSurvive", D.pedsSurvive, Bound("PedsSurvive")),
+        Number("Ped falls only above (lighter: a bump)", "PedBumpImpulse", D.pedBump, 0, 600, 20,
+               [](float v) { return v == 0.0f ? std::string("Always falls") : Fixed("%.0f N s")(v); }, Bound("PedBumpImpulse")),
         Number("Launch strength", "PedLaunchScale", D.pedLaunchScale, 0, 3, 0.1f, Fixed("x%.1f"), Bound("PedLaunchScale")),
         Number("Launch lift", "PedLaunchLift", D.pedLaunchLift, 0, 1, 0.1f, Fixed("%.1f"), Bound("PedLaunchLift")),
         Number("Launch tumble", "PedLaunchSpin", D.pedLaunchSpin, 0, 3, 0.1f, Fixed("x%.1f"), Bound("PedLaunchSpin")),
         Choice("Struck ped get-up line", "PedGetUpSpeech", {D.pedGetUpSpeech, "0"}, {"On", "Off"}, Bound("PedGetUpSpeech")),
         Flag("Dent vehicles", "VehicleDamage", D.vehicleDamage, Bound("VehicleDamage")),
+        Flag("Light hits scratch cars", "BoardScratches", D.boardScratches, Bound("BoardScratches")),
         Number("Dent strength", "VehicleDamageScale", D.vehicleDamageScale, 0, 2, 0.05f, Fixed("x%.2f"), Bound("VehicleDamageScale")),
         // Contributed by GTAxSkate (vehicle shapes): the dent's size and threshold
         // here too, and how hard the board pushes cars.
         Number("Dent size", "VehicleDamageRadius", D.vehicleDamageRadius, 0, 300, 10, Fixed("%.0f"), Bound("VehicleDamageRadius")),
         Number("Dent only from hits over", "VehicleDamageMin", D.vehicleDamageMin, 0, 2000, 50, Fixed("%.0f N s"), Bound("VehicleDamageMin")),
         Number("How hard the skater pushes cars", "VehiclePush", D.vehiclePush, 0, 1, 0.05f, Fixed("x%.2f"), Bound("VehiclePush")),
+        Number("How hard the skater pushes objects", "ObjectPush", D.objectPush, 0, 1, 0.05f, Fixed("x%.2f"), Bound("ObjectPush")),
     }});
 
     pages.push_back({"BackwardsMan", {
@@ -3519,14 +3885,13 @@ std::vector<menu::Page> MenuPages(Session& s) {
     // in (V cycles them while skating; R on the keyboard: cinematic camera,
     // skate filmer), Skate 3's camera height, the field of view.
     pages.push_back({"Camera", {
-        Choice("Camera follows", "CameraFocus", {"Skater", "Board"}, {"The skater", "The board"}, Bound("CameraFocus")),
-        Choice("Keep the view (walking and skating)", "CameraRemember", {"1", "0"},
+        Choice("Standard view", "CameraView", {"Skate", "Near", "Middle", "Far", "Head"},
+               {"Original SK8V / Skate 3", "GTA near", "GTA middle", "GTA far", "GTA first person"}, Bound("CameraView")),
+        Choice("Remember last view", "CameraRemember", {"1", "0"},
                {"On: the view last used", "Off: always the standard view"}, Bound("CameraRemember")),
-        Choice("Standard view (V cycles)", "CameraView", {"Skate", "Near", "Middle", "Far", "FirstPerson", "Head"},
-               {"Original SK8V / Skate 3", "Near", "Middle", "Far", "First person", "First person (skater's eyes)"}, Bound("CameraView")),
         Choice("Original SK8V camera height", "Camera", {"High", "Low"}, {"High (Skate 3 default)", "Low"},
                Bound("Camera", [] { g_runtime.SetCameraType(g_config.cameraType); })),
-        Number("Field of view scale", "CameraFovScale", D.fovScale, 0.5f, 1.5f, 0.05f, Fixed("x%.2f"), Bound("CameraFovScale")),
+        Number("SK8V field of view scale", "CameraFovScale", D.fovScale, 0.5f, 1.5f, 0.05f, Fixed("x%.2f"), Bound("CameraFovScale")),
         Choice("Cinematic camera look (R)", "CinemaFilter", {"NG_filmic01", "NG_filmic02", "NG_filmic03", "NG_filmic04", "NG_filmic05", "NG_filmic09", "NG_filmic13", "NG_filmic20", "none"},
                {"Film 1", "Film 2", "Film 3", "Film 4", "Film 5", "Film 9", "Film 13", "Film 20", "None"}, Bound("CinemaFilter")),
         Choice("Skate filmer look (R twice)", "FilmerFilter", {"NG_filmic06", "NG_filmic07", "NG_filmic08", "NG_filmic10", "NG_filmic11", "NG_filmic12", "NG_filmic15", "NG_filmic18", "none"},
@@ -3559,6 +3924,17 @@ std::vector<menu::Page> MenuPages(Session& s) {
         Action("GPS: nearest clothing store (boards)", [] { g_routeNotice = skatemap::RouteToClothingStore(); }),
         Action("GPS: nearest skate spot", [] { g_routeNotice = skatemap::RouteToSkateSpot(); }),
         Action("GPS: remove the waypoint", [] { g_routeNotice = skatemap::ClearRoute(); }),
+        Helped(menu::Key("Object dropper key", [] { return VirtualKeyName(g_config.dropperKey); }, [](int vk) {
+                   g_config.dropperKey = static_cast<unsigned>(vk);
+                   char v[16];
+                   std::snprintf(v, sizeof(v), "0x%02X", vk);
+                   WritePrivateProfileStringW(L"SkateV", L"DropperKey", util::Wide(v).c_str(), (g_gameDir + L"SkateVLegacy.ini").c_str());
+               }),
+               "The key that opens and closes the object dropper (default Insert; F9 is Menyoo's Spooner)."),
+        Helped(Action("Object dropper: build a park here", [] { objectdropper::RequestOpen(); }),
+               "Drop ramps, rails, benches and stunt ramps around you; the keys show on screen."),
+        Helped(Action("Object dropper: remove all objects", [] { objectdropper::RequestClear(); }),
+               "Removes every object you dropped."),
     }});
 
     pages.push_back({"Dev", {
@@ -3570,6 +3946,70 @@ std::vector<menu::Page> MenuPages(Session& s) {
         Number("Aim twist limit", "AimTwist", D.aimTwist, 20, 180, 10, Fixed("%.0f deg"), Bound("AimTwist")),
         Flag("Log GTA's gun state", "GunProbe", D.gunProbe, Bound("GunProbe")),
         Flag("Skate with GTA's camera (frame cost A/B)", "GtaCamera", D.gtaCamera, Bound("GtaCamera")),
+        Flag("Collision view (floor, walls, grind rails)", "CollisionView", D.collisionView,
+             Bound("CollisionView", [] { collisionview::Set(g_config.collisionView, g_config.collisionViewRange); })),
+        Number("Collision view range", "CollisionViewRange", D.collisionViewRange, 2, 30, 1, Fixed("%.0f m"),
+               Bound("CollisionViewRange", [] { collisionview::Set(g_config.collisionView, g_config.collisionViewRange); })),
+        [] {
+            auto item = Action("World collision: best", [] {
+                g_plainGtaCompare = false;
+                ApplyBulk("Best world collision", BestWorldSettings());
+                ApplyWorldOptions(g_config);
+            });
+            item.labelText = WorldLabel;
+            return item;
+        }(),
+        [] {
+            auto item = Flag("Compare: plain GTA collision", "", false, [](const std::string& value) {
+                g_plainGtaCompare = value == "1";
+                ApplyWorldOptions(g_config);
+            });
+            item.current = [] { return g_plainGtaCompare ? "1" : "0"; };
+            return item;
+        }(),
+        // Exact positions for reports (2026-10-25: "the spot over there"):
+        // the log line names the spot, the place and the facing.
+        Action("Mark this spot (position to the log)", [&s] {
+            static int marks = 0;
+            const Ped ped = Call<Ped>(gta::PLAYER_PED_ID);
+            const Vector3 p = Call<Vector3>(gta::GET_ENTITY_COORDS, ped, 1);
+            const float heading = Call<float>(gta::GET_ENTITY_HEADING, ped);
+            char text[160];
+            std::snprintf(text, sizeof(text), "MARK %d at %.2f %.2f %.2f heading %.0f", ++marks, p.x, p.y, p.z, heading);
+            std::string message = text;
+            using Describe = std::uint32_t(__cdecl*)(SvVec3, float);
+            if (const HMODULE m = GetModuleHandleW(L"SkateVRuntime.dll"))
+                if (const auto describe = reinterpret_cast<Describe>(GetProcAddress(m, "sv_describe_spot")))
+                    if (describe({p.x, p.y, p.z}, 1.5f)) message += " (details in SkateVRuntime.log)";
+            Notify(s, message, 6000);
+        }),
+        Helped(Flag("Stairs as steps", "DetailedStairs", D.detailedStairs, Bound("DetailedStairs", [&s] { WorldChanged(s, "DetailedStairs"); })),
+               "Stairs collide as steps (best: on). Off: SK8V's smooth ramps."),
+        Helped(Flag("Grind every stair step", "StepRails", D.stepRails, Bound("StepRails", [&s] { WorldChanged(s, "StepRails"); })),
+               "Adds grind lines to every stair step (best: off)."),
+        Helped(Flag("Grind train tracks", "TrackRails", D.trackRails, Bound("TrackRails", [&s] { WorldChanged(s, "TrackRails"); })),
+               "Adds grind lines along train tracks (best: on)."),
+        Helped(Flag("Grind standing objects", "ObjectRails", D.objectRails, Bound("ObjectRails", [&s] { WorldChanged(s, "ObjectRails"); })),
+               "Adds grind lines on standing objects (best: on)."),
+        Helped(Flag("Grind tubes", "TubeRails", D.tubeRails, Bound("TubeRails", [&s] { WorldChanged(s, "TubeRails"); })),
+               "Finds grind lines on tubes, coping and bars (best: on)."),
+        Helped(Flag("Rails from visible models", "VisualRails", D.visualRails, Bound("VisualRails", [&s] { WorldChanged(s, "VisualRails"); })),
+               "Finds rails in visible models without collision (best: on)."),
+        Helped(Flag("Grind lines on top of rails", "RailTops", D.railTops, Bound("RailTops", [&s] { WorldChanged(s, "RailTops"); })),
+               "Adds grind lines on rail tops (best: on)."),
+        Helped(Flag("Curb bevels", "CurbBevels", D.curbBevels, Bound("CurbBevels", [&s] { WorldChanged(s, "CurbBevels"); })),
+               "Adds no-grind bevels to curbs (best: on)."),
+        Helped(Flag("High-res skateparks", "HighResParks", D.highResParks, Bound("HighResParks", [&s] { WorldChanged(s, "HighResParks"); })),
+               "Uses visible skatepark surfaces (best: on). Off: GTA collision."),
+        Helped(Flag("Unmarked stairs as steps (test)", "UnflaggedStairs", D.unflaggedStairs, Bound("UnflaggedStairs", [&s] { WorldChanged(s, "UnflaggedStairs"); })),
+               "Treats unmarked stairs as steps for testing (best: off)."),
+        Helped(Flag("Nearby entities collide", "DynamicWorld", D.dynamicWorld, Bound("DynamicWorld", [&s] { WorldChanged(s, "DynamicWorld"); })),
+               "Vehicles, people and props near you collide with the board (best: on)."),
+        Action("Reset all settings to GTAxSkate defaults", [&s] {
+            ApplyBulk("GTAxSkate", GtaxSkatePreset());
+            Notify(s, "All settings reset to the GTAxSkate defaults.", 5000);
+        }),
+        Flag("Developer options in this menu", "DevOptions", D.devOptions, Bound("DevOptions")),
         Flag("Debug text HUD", "ShowDebug", D.showDebug, Bound("ShowDebug")),
         Flag("Verbose log", "VerboseLog", D.verboseLog, Bound("VerboseLog", [] { util::g_verbose = g_config.verboseLog; g_runtime.SetVerboseLog(g_config.verboseLog); })),
         Flag("Thread CPU scan (may cause stutter; verbose log)", "ThreadCensus", D.threadCensus, Bound("ThreadCensus", [] { threadcensus::Reset(); })),
@@ -3604,6 +4044,8 @@ std::vector<menu::Page> MenuPages(Session& s) {
     // Advanced is an explicit category; uncommon tuning no longer fills the main pages.
     std::vector<Page> sorted = {
         {"Presets", {
+            Helped(Action("GTAxSkate - skating that feels like GTA (default)", [] { ApplyBulk("GTAxSkate", GtaxSkatePreset()); }),
+                   "Skate 3's riding with GTA's cameras, radio, stamina, injuries and HUD; no arcade overlays. Every value stays adjustable afterwards."),
             Action("SK8V - official default settings", [] {
                 ApplyPreset("SK8V", {});
             }),
@@ -3619,37 +4061,135 @@ std::vector<menu::Page> MenuPages(Session& s) {
                     {"HallOfMeatXray", "0"}, {"TrickAnalyzer", "0"}, {"BackwardsMan", "0"},
                     {"PedsSurvive", "0"}, {"PedLaunch", "0"}, {"PedLaunchScale", "0"},
                     {"PedLaunchLift", "0"}, {"PedLaunchSpin", "0"}, {"VehicleDamage", "0"},
-                    {"VehiclePush", "0"}, {"Injuries", "1"}, {"Stamina", "1"}, {"KeyboardHints", "0"}});
+                    {"VehiclePush", "0"}, {"ObjectPush", "0"}, {"Injuries", "1"}, {"Stamina", "1"}, {"KeyboardHints", "0"}});
             }),
             Action("User - restore my last manual settings", [] { RestoreUserPreset(); }),
             Action("Custom - save current settings", [] { SaveCustomPreset(); }),
             Action("Custom - restore saved settings", [] { RestoreCustomPreset(); }),
         }},
-        {"Skating", {}}, {"Camera", {}}, {"Keyboard keys", {}},
-        {"Controller and HUD", {}}, {"World and roleplay", {}}, {"Audio", {}},
-        {"Interaction", {}}, {"Advanced", {}}
+        {"Skating", {}}, {"Board", {}}, {"Camera", {}}, {"Controls", {}}, {"HUD", {}},
+        {"World", {}}, {"Audio and radio", {}}, {"Advanced", {}},
+        // Sub-pages are listed as rows on their parent (Back returns there).
+        {"Board in hand", {}, "Board"}, {"Keyboard keys", {}, "Controls"},
+        {"Skate physics", {}, "Advanced"}, {"Peds and vehicles", {}, "Advanced"},
+        {"Hall of Meat details", {}, "Advanced"}, {"BackwardsMan", {}, "Advanced"}, {"Developer", {}, "Advanced"},
     };
     const auto destination = [](const Page& page, const Item& item) -> std::string {
         const std::string& k = item.key;
-        if (page.title == "Dev" || page.title == "BackwardsMan" || page.title == "Board in hand") return "Advanced";
+        const auto any = [&k](std::initializer_list<const char*> keys) {
+            return std::any_of(keys.begin(), keys.end(), [&k](const char* x) { return k == x; });
+        };
+        if (page.title == "Dev") {
+            // All world collision rows in one place at the top of World
+            // (Manatros 2026-10-26: "idk what the settings do anymore and what
+            // settings are best"); the technical ones only with DevOptions.
+            if (std::any_of(std::begin(kWorldSwitches), std::end(kWorldSwitches),
+                            [&k](const WorldSwitch& w) { return k == w.key; })) return "World";
+            if (k.empty()) for (const char* label : {"World collision:", "Compare: plain GTA", "Mark this spot", "Reset all settings"})
+                if (item.label.rfind(label, 0) == 0) return "World";
+            if (any({"GpsWhileSkating", "SkateSpots"})) return "World";
+            if (k == "DevOptions") return "Advanced";
+            if (any({"BoardShop", "WheelsFromPaint"})) return "Board";
+            return "Developer";
+        }
+        if (page.title == "Interaction") return "World";
+        if (page.title == "Audio") return "Audio and radio";
+        if (page.title == "Controller and HUD") {
+            if (any({"KeyboardHints", "SkateHud", "Hud", "TrickAnalyzer"})) return "HUD";
+            if (k == "RadioControls") return "Audio and radio";
+            return "Controls";
+        }
         if (page.title == "Peds and vehicles") {
-            if (k == "PedsSurvive" || k == "PedLaunch" || k == "VehicleDamage" || k == "DynamicWorld") return "World and roleplay";
-            return "Advanced";
+            if (any({"PedsSurvive", "PedLaunch", "PedBumpImpulse", "VehicleDamage", "BoardScratches", "DynamicWorld", "VehiclePush", "ObjectPush"})) return "World";
+            return "Peds and vehicles";
         }
         if (page.title == "Hall of Meat and records") {
-            if (k == "Injuries") return "World and roleplay";
-            if (k == "HallOfMeat" || k.empty()) return "Controller and HUD";
-            return "Advanced";
+            if (k == "Injuries") return "World";
+            if (k == "HallOfMeat" || k.empty()) return "HUD";
+            return "Hall of Meat details";
         }
         if (page.title == "Skating") {
-            if (k == "Camera" || k == "CameraFovScale") return ""; // already on Camera
-            if (k == "SkateRadio") return "Audio";
-            if (k == "GtaDelegation" || k == "BoardAim" || k == "Stamina") return "World and roleplay";
-            if (k.empty() || k == "Stance" || k == "Difficulty" || k == "Posture" || k == "RidingStyle" ||
-                k == "TruckTightness" || k == "WheelHardness" || k == "Pop" || k == "GrindPop") return "Skating";
-            return "Advanced";
+            if (any({"Camera", "CameraFovScale"})) return ""; // already on Camera
+            if (k == "SkateRadio") return "Audio and radio";
+            if (k == "PutAwayHoldMs") return "Controls";
+            if (any({"GtaDelegation", "SwimDepth", "BoardAim", "Stamina"})) return "World";
+            if (any({"BoardTracks", "WheelGlow", "WheelGlowColour", "BoardMaterial", "Snow"})) return "Board";
+            if (k.empty() || any({"Stance", "Difficulty", "Posture", "RidingStyle", "TruckTightness", "WheelHardness", "Pop", "GrindPop",
+                                  "HippieJump", "EmoteUp", "EmoteDown", "EmoteLeft", "EmoteRight"})) return "Skating";
+            return "Skate physics";
         }
         return page.title;
+    };
+    // What each row does, shown under the rows with its default (the maintainer: clearer menu).
+    static const std::map<std::string, std::string> help = {
+        {"Stance", "Regular rides left foot forward, Goofy right foot forward."},
+        {"Difficulty", "How forgiving landings and balance are. Easy suits first rides; Hardcore is closest to real skating."},
+        {"Posture", "How the skater stands on the board."},
+        {"RidingStyle", "The skater's riding animations."},
+        {"TruckTightness", "Loose trucks turn sharper, tight trucks are steadier at speed."},
+        {"WheelHardness", "Soft wheels grip and roll quietly, hard wheels slide and roll faster on smooth ground."},
+        {"Pop", "How high ollies and pops go."},
+        {"GrindPop", "How high you pop out of grinds and slides."},
+        {"PushSpeed", "Top speed from pushing."},
+        {"PushPower", "How much each push adds."},
+        {"Braking", "How hard the foot brake stops you."},
+        {"Steering", "How fast the board turns."},
+        {"Wobble", "Speed wobble at high speed."},
+        {"OffboardJump", "Jump height on foot."},
+        {"Grip", "How well the wheels hold the ground in turns."},
+        {"TurnPower", "Turning power at low speed."},
+        {"ManualDrag", "How fast manuals slow you down."},
+        {"HoldFakie", "Keep the fakie stance after landing backwards."},
+        {"HippieJump", "Height of the hippie jump (you jump, the board rolls under)."},
+        {"LipRule", "How ramp lips (coping) catch the board."},
+        {"AirTimeLimit", "Bail after this long in the air (0 = never)."},
+        {"BailTimeLimit", "Lie on the ground at most this long after a bail (0 = no limit)."},
+        {"SkitchStandoff", "Distance kept behind a car while skitching."},
+        {"SwimDepth", "Water depth where GTA's swimming takes over."},
+        {"PutAwayHoldMs", "How long Y (E) must be held to put the board away."},
+        {"BoardTracks", "Marks the board leaves on the ground."},
+        {"WheelGlow", "Lights the wheels and the ground under them. Off by default; raise it for brighter glow."},
+        {"CollisionView", "Draws what Skate collides with: green floor, cyan bank, red wall, purple underside, grey no grind (curb bevels, stair steps), orange moving objects, yellow grind rails."},
+        {"CollisionViewRange", "How far around the player the collision view draws."},
+        {"WheelGlowColour", "The colour of the glowing wheels: the wheels' own colour by default, or a fixed one."},
+        {"BoardMaterial", "Test: how GTA's lighting treats the board. 'Like a character' adds GTA's character fill light (the lamp look)."},
+        {"Snow", "Board tracks and spray in snow."},
+        {"CameraRemember", "Remember SK8V or GTA. GTA keeps its current on-foot view on entry; the first session uses the standard view."},
+        {"CameraView", "The view skate mode starts in. V cycles the views while skating."},
+        {"Camera", "Height of the original SK8V / Skate 3 camera."},
+        {"CameraFovScale", "Wider or narrower view for the original SK8V camera."},
+        {"CinemaFilter", "Colour look of the cinematic camera (R). Shows behind the menu while selected."},
+        {"FilmerFilter", "Colour look of the skate filmer (R twice). Shows behind the menu while selected."},
+        {"FilmFilterStrength", "How strong the film look is. Shows behind the menu while selected."},
+        {"MenuButton", "Controller buttons that open this menu."},
+        {"GunButton", "Controller buttons that take a gun out or away."},
+        {"AimButton", "Controller buttons that aim while skating."},
+        {"FireButton", "Controller buttons that fire while skating."},
+        {"BackwardsManChord", "Controller buttons that trigger BackwardsMan."},
+        {"BoardActionInMissions", "Allow skating during story missions."},
+        {"RadioControls", "Change the radio with LB and the d-pad while skating."},
+        {"Keyboard", "Skate with keyboard and mouse. The keys are set on the Keyboard keys page."},
+        {"KeyboardHints", "List of keys on the left of the screen."},
+        {"SkateHud", "All Skate overlays at once: trick display, records, Hall of Meat."},
+        {"Hud", "Skate 3's trick and score display."},
+        {"TrickAnalyzer", "Shows how each trick was performed."},
+        {"HallOfMeat", "Skate 3's bail scoring: broken bones earn points."},
+        {"HallOfMeatMetrics", "Every Hall of Meat panel, not only the main score."},
+        {"HallOfMeatXray", "X-ray of the broken bones after a bail."},
+        {"Injuries", "Limp after hard bails, like a GTA injury."},
+        {"PedsSurvive", "People you knock over get up again."},
+        {"PedLaunch", "People you hit fly away."},
+        {"VehicleDamage", "The board and skater dent cars they hit."},
+        {"DynamicWorld", "Cars, people and objects near you are solid for the board."},
+        {"GtaDelegation", "Let GTA handle swimming and climbing."},
+        {"BoardAim", "Allow guns while skating."},
+        {"Stamina", "Your character's GTA stamina skill sets push and pop."},
+        {"SkateRadio", "Which radio plays while skating."},
+        {"AudioGtaGainDb", "Volume of the Skate sounds."},
+        {"AudioMasterGain", "Overall Skate sound level."},
+        {"AudioOutput", "Play Skate sound through GTA's audio or directly."},
+        {"CarryBoard", "The board stays in your hand after taking it from the weapon wheel."},
+        {"BackwardsMan", "Assist for the BackwardsMan trick."},
     };
     for (Page& page : pages) for (Item& item : page.items) {
         const std::string target = destination(page, item);
@@ -3657,12 +4197,162 @@ std::vector<menu::Page> MenuPages(Session& s) {
             // Duplicate developer rows use the player's existing row and range.
             const bool duplicate = !item.key.empty() && std::any_of(out.items.begin(), out.items.end(),
                 [&](const Item& previous) { return previous.key == item.key; });
-            if (!duplicate) out.items.push_back(std::move(item));
+            if (!duplicate) {
+                if (item.help.empty())
+                    if (const auto h = help.find(item.key); h != help.end()) item.help = h->second;
+                out.items.push_back(std::move(item));
+            }
             break;
         }
     }
+    // Section headings inside the pages (Manatros 2026-10-19: group stuff better).
+    // A row matches by INI key, or by label start for rows without a key; rows
+    // that match no group follow under "More".
+    using Groups = std::vector<std::pair<const char*, std::vector<const char*>>>;
+    const std::map<std::string, Groups> groups = {
+        {"Skating", {{"Basics", {"Skate on", "Stance", "Difficulty"}},
+                     {"Board feel", {"TruckTightness", "WheelHardness", "Pop", "GrindPop", "HippieJump"}},
+                     {"Style and emotes", {"Posture", "RidingStyle", "EmoteUp", "EmoteDown", "EmoteLeft", "EmoteRight"}}}},
+        {"Board", {{"Look", {"WheelGlow", "WheelGlowColour", "BoardMaterial"}},
+                   {"Marks on the ground", {"BoardTracks", "Snow"}},
+                   {"Board shop", {"BoardShop", "WheelsFromPaint"}}}},
+        {"Camera", {{"Views", {"CameraView", "CameraRemember", "Camera", "CameraFovScale"}},
+                    {"Cinematic camera (R)", {"CinemaFilter", "FilmerFilter", "FilmFilterStrength"}}}},
+        {"Controls", {{"Keyboard", {"Keyboard", "PutAwayHoldMs"}},
+                      {"Controller buttons", {"MenuButton", "GunButton", "AimButton", "FireButton", "BackwardsManChord"}},
+                      {"Missions", {"BoardActionInMissions"}}}},
+        {"HUD", {{"On screen", {"SkateHud", "Hud", "TrickAnalyzer", "KeyboardHints"}},
+                 {"Hall of Meat", {"HallOfMeat", "Show records"}}}},
+        {"World", {{"World collision", {"World collision:", "Compare: plain GTA", "Mark this spot", "DetailedStairs", "StepRails", "TrackRails", "ObjectRails",
+                                        "TubeRails", "VisualRails", "RailTops", "CurbBevels", "HighResParks", "UnflaggedStairs", "DynamicWorld", "Reset all settings"}},
+                   {"What the board hits", {"VehiclePush", "ObjectPush", "VehicleDamage", "BoardScratches"}},
+                   {"People", {"PedsSurvive", "PedLaunch", "PedBumpImpulse", "Injuries"}},
+                   {"On foot", {"GtaDelegation", "SwimDepth", "BoardAim", "Stamina"}},
+                   {"Build a park", {"Object dropper"}},
+                   {"GPS", {"GPS", "GpsWhileSkating", "SkateSpots"}}}},
+        {"Audio and radio", {{"Radio", {"SkateRadio", "RadioControls"}},
+                             {"Skate sound", {"AudioGtaGainDb", "AudioMasterGain", "AudioOutput"}}}},
+    };
+    for (Page& page : sorted) {
+        const auto found = groups.find(page.title);
+        if (found == groups.end()) continue;
+        const auto matches = [](const Item& item, const char* m) {
+            return item.key.empty() ? item.label.rfind(m, 0) == 0 : item.key == m;
+        };
+        std::vector<Item> rest = std::move(page.items), out;
+        for (const auto& [heading, members] : found->second) {
+            std::vector<Item> section;
+            for (auto it = rest.begin(); it != rest.end();) {
+                if (std::any_of(members.begin(), members.end(), [&](const char* m) { return matches(*it, m); }))
+                    section.push_back(std::move(*it)), it = rest.erase(it);
+                else
+                    ++it;
+            }
+            if (section.empty()) continue;
+            out.push_back(menu::Heading(heading));
+            for (Item& item : section) out.push_back(std::move(item));
+        }
+        if (!rest.empty()) {
+            out.push_back(menu::Heading("More"));
+            for (Item& item : rest) out.push_back(std::move(item));
+        }
+        page.items = std::move(out);
+    }
     return sorted;
 
+}
+
+// The runtime and its Skate session preload (assets, ~12 s) start on their own
+// thread when GTA loads this ASI, during GTA's loading screen, so Skate is
+// ready when the player can first press F. Nothing here calls a GTA native.
+HANDLE g_earlyRuntime = nullptr;
+bool g_earlyLoaded = false;
+std::string g_earlyError;
+
+// GTAxSkate's world switches to the runtime (optional export sv_set_world_option;
+// an older runtime keeps its defaults): 0 DetailedStairs, 2 TrackRails,
+// 3 RailTops, 4 ObjectRails, 5 TubeRails, 6 VisualRails, 7 CurbBevels, 8 BakedWorld.
+// Components the installer put in (SkateVLegacy.components.txt, "name=0|1"
+// lines; no file: an install made before it existed, so everything counts).
+bool ComponentInstalled(const char* name) {
+    static const std::map<std::string, bool> parts = [] {
+        std::map<std::string, bool> found;
+        std::ifstream in(g_gameDir + L"SkateVLegacy.components.txt");
+        for (std::string line; std::getline(in, line);) {
+            const auto eq = line.find('=');
+            if (eq == std::string::npos) continue;
+            std::string key = line.substr(0, eq), value = line.substr(eq + 1);
+            while (!value.empty() && (value.back() == '\r' || value.back() == ' ')) value.pop_back();
+            found[key] = value == "1";
+        }
+        return found;
+    }();
+    const auto it = parts.find(name);
+    return it == parts.end() || it->second;
+}
+
+// A cleaner menu (Manatros 2026-10-24): developer and technical options show
+// only with DevOptions on; options of components the installer left out do
+// not show at all. Hidden rows keep their saved values.
+void HideUnavailable(std::vector<menu::Page>& pages) {
+    static const std::set<std::string> dev = {"CurbBevels", "RailTops", "VisualRails", "TubeRails", "UnflaggedStairs", "HighResParks"};
+    static const std::map<std::string, const char*> component = {
+        {"BoardShop", "boards"}, {"WheelsFromPaint", "boards"}, {"WheelGlow", "glow"}, {"WheelGlowColour", "glow"},
+        {"SkateRadio", "music"}, {"VisualRails", "world"}, {"HighResParks", "world"}};
+    for (auto& page : pages) {
+        if (page.title == "Developer") page.visible = [] { return g_config.devOptions; };
+        for (auto& item : page.items) {
+            const bool isDev = dev.count(item.key) > 0;
+            const auto part = component.find(item.key);
+            const char* needs = part == component.end() ? nullptr : part->second;
+            if (!isDev && !needs) continue;
+            item.visible = [isDev, needs] {
+                return (!isDev || g_config.devOptions) && (!needs || ComponentInstalled(needs));
+            };
+        }
+    }
+}
+
+void SetWorldOption(std::uint32_t id, bool on) {
+    using Fn = void(__cdecl*)(std::uint32_t, std::uint32_t);
+    if (const HMODULE m = GetModuleHandleW(L"SkateVRuntime.dll"))
+        if (const auto set = reinterpret_cast<Fn>(GetProcAddress(m, "sv_set_world_option"))) set(id, on ? 1u : 0u);
+}
+
+template <class Set>
+void SendWorldOptions(const Config& c, Set set) {
+    for (const auto& w : kWorldSwitches) if (w.id != kHostOnlyWorldSwitch)
+        set(w.id, !g_plainGtaCompare && c.*(w.value));
+    set(8, !g_plainGtaCompare);
+}
+
+void ApplyWorldOptions(const Config& c) {
+    SendWorldOptions(c, SetWorldOption);
+    collisionview::SetWorldState("World collision: " + WorldState(c));
+    // Once per change (a reset applies every switch in turn).
+    static std::string last;
+    const std::string state = "world settings: " + WorldState(c, true);
+    if (state != last) Log(state.c_str()), last = state;
+}
+
+bool LoadRuntime(const Config& cfg, std::string& error) {
+    SetEnvironmentVariableA("SKATEV_PED_LAUNCH", cfg.pedLaunch ? "1" : "0");
+    return g_runtime.Load((g_gameDir + L"SkateVRuntime.dll").c_str(), cfg.dataRoot, cfg.worldCache,
+                          util::Narrow(g_logDir + L"SkateVRuntime.log"),
+                          static_cast<std::uint32_t>(cfg.skaterTriangles > 0 ? cfg.skaterTriangles : 0),
+                          1u /* Ped presentation */ | (cfg.hallOfMeat ? 2u : 0u) |
+                              (cfg.hallOfMeatMetrics ? 4u : 0u) | (cfg.goofy ? 8u : 0u),
+                          error);
+}
+
+DWORD WINAPI EarlyRuntime(void*) {
+    if (!IsSupportedLegacy(ReadHostVersion())) return 0;
+    Config cfg = LoadConfig();
+    NormalizeTestWorldConfig(cfg, kTestWorldBaseline);
+    if (!cfg.loadRuntime) return 0;
+    Log("SkateV Legacy: runtime loading early (during GTA's loading screen)");
+    g_earlyLoaded = LoadRuntime(cfg, g_earlyError);
+    return 0;
 }
 
 void ScriptMain() {
@@ -3699,19 +4389,31 @@ void ScriptMain() {
     }
 
     g_config = LoadConfig();
+    if (kTestWorldBaseline) {
+        const std::string saved = SavedWorldState(g_config, true);
+        const bool compared = g_plainGtaCompare;
+        NormalizeTestWorldConfig(g_config, true);
+        g_plainGtaCompare = false;
+        Logf("test world baseline: best at startup; saved world settings: %s; previous comparison: %s",
+             saved.c_str(), compared ? "on" : "off");
+    }
     const Config& cfg = g_config;
     util::g_verbose = cfg.verboseLog;
     std::string error;
     if (!cfg.loadRuntime) {
         error = "Runtime=0 in SkateVLegacy.ini";
         Log("SkateV Legacy: Runtime=0, Skate runtime not loaded (frame-timing log only)");
-    } else if (SetEnvironmentVariableA("SKATEV_PED_LAUNCH", cfg.pedLaunch ? "1" : "0"),
-               !g_runtime.Load((g_gameDir + L"SkateVRuntime.dll").c_str(), cfg.dataRoot, cfg.worldCache,
-                        util::Narrow(g_logDir + L"SkateVRuntime.log"),
-                        static_cast<std::uint32_t>(cfg.skaterTriangles > 0 ? cfg.skaterTriangles : 0),
-                        1u /* Ped presentation */ | (cfg.hallOfMeat ? 2u : 0u) |
-                            (cfg.hallOfMeatMetrics ? 4u : 0u) | (cfg.goofy ? 8u : 0u),
-                        error)) {
+    } else if (![&] {
+                   // First start: take the early load's result (a script restart
+                   // after a save load goes through Load's reuse path instead).
+                   if (!g_earlyRuntime) return LoadRuntime(cfg, error);
+                   WaitForSingleObject(g_earlyRuntime, INFINITE);
+                   CloseHandle(g_earlyRuntime);
+                   g_earlyRuntime = nullptr;
+                   if (g_earlyLoaded) return true;
+                   error.clear();
+                   return LoadRuntime(cfg, error);
+               }()) {
         Logf("SkateV Legacy: runtime unavailable: %s", error.c_str());
     } else {
         Logf("SkateV Legacy: runtime ABI %u loaded (host ABI %u); data '%s' cache '%s'", g_runtime.ApiVersion(),
@@ -3730,6 +4432,7 @@ void ScriptMain() {
         hudoverlay::Start(g_gameDir + L"SkateVLegacy.ini", g_runtime.Handle(), Log);
         hudoverlay::SetTrickAnalyzer(cfg.trickAnalyzer);
         hudoverlay::SetVisible(cfg.skateHud && cfg.hud);
+        boardstencil::SetMaterial(BoardMaterialClass(cfg));
         boardstencil::Start(Log);
         recordsui::Start(g_runtime.Handle(), Log);
         Logf("SkateV Legacy: Hall of Meat %s (%s)", cfg.hallOfMeat ? "on" : "off",
@@ -3770,18 +4473,27 @@ void ScriptMain() {
                 const float wheels = g_config.wheelsFromPaint && hardness >= 0.0f ? hardness : g_config.wheelHardness;
                 if (g_runtime.SetEquipment(g_config.truckTightness, wheels) && hardness >= 0.0f)
                     Logf("board shop: painted wheels ride at hardness %.2f", wheels);
+                ApplyWheelGlow(g_config);
             });
     }
 
     // Skate audio inside GTA's audio engine (P0-3b); runtime may be absent.
     gtaaudio::Start(g_gameDir + L"SkateVLegacy.ini", GetModuleHandleW(L"SkateVRuntime.dll"), g_runtime.Handle(), Log);
+    collisionview::Start(GetModuleHandleW(L"SkateVRuntime.dll"));
+    collisionview::Set(cfg.collisionView, cfg.collisionViewRange);
+    ApplyWorldOptions(cfg);
     Logf("SkateV Legacy: menu button %04x (missions %s), background prepare %s", cfg.life.menuButton,
          cfg.life.inMissions ? "allowed" : "blocked", cfg.life.backgroundPrepare ? "on" : "off");
     Session s;
     g_hallOfMeatOn = cfg.hallOfMeat;
     auto pages = MenuPages(s);
     AppendDeveloperPage(pages, s);
+    HideUnavailable(pages);
     menu::Start(g_gameDir + L"SkateVLegacy.ini", std::move(pages), RawPadButtons, Log);
+    // A fresh install starts with GTAxSkate's settings (never over saved ones).
+    ++g_bulkSettings;
+    if (menu::FirstRunPreset("GTAxSkate", GtaxSkatePreset())) Log("SkateV Legacy: first start, GTAxSkate settings applied");
+    --g_bulkSettings;
     FrameMonitor monitor;
     stall::SetLog(Log);
     // Line= may list several files separated by ';': the Dev menu replays the
@@ -3845,6 +4557,26 @@ void ScriptMain() {
                 Call<void>(gta::HUD_FORCE_WEAPON_WHEEL, 0);
             }
             EnforceHeldPed(s);
+            // The object dropper (Interaction page): on foot in GTA or in skate mode.
+            const Ped player = Call<Ped>(gta::PLAYER_PED_ID);
+            const bool onFoot = (s.state == LifeState::Ready || s.state == LifeState::Preparing) &&
+                                Call<BOOL>(gta::IS_PED_ON_FOOT, player) && !Call<BOOL>(gta::IS_ENTITY_DEAD, player, 0);
+            const bool dropAllowed = (onFoot || s.state == LifeState::Skating) && !menu::IsOpen() && !boardshop::IsOpen() &&
+                                     !gta::FrontendActive();
+            const SvPad dropPad = objectdropper::IsOpen() ? ReadPadRaw() : SvPad{};
+            if (g_dropperToggle.exchange(false)) {
+                if (objectdropper::IsOpen()) objectdropper::RequestClose();
+                else objectdropper::RequestOpen();
+            }
+            const bool dropperWasOpen = objectdropper::IsOpen();
+            objectdropper::Tick(player, dropAllowed, g_controller, dropPad, Log);
+            // The dropper's camera is gone: skating goes back to SK8V's camera.
+            if (dropperWasOpen && !objectdropper::IsOpen() && s.state == LifeState::Skating && s.cam && !g_gtaView) {
+                Call<void>(gta::SET_CAM_ACTIVE, s.cam, 1);
+                Call<void>(gta::RENDER_SCRIPT_CAMS, 1, 1, 300, 1, 0, 0);
+            }
+            if (const char* notice = objectdropper::TakeNotice()) Notify(s, notice, 3000);
+            collisionview::Tick(player);
             Lap(kPartAfter);
         } else if (f6) {
             Notify(s, "runtime unavailable: " + error);
@@ -3866,14 +4598,17 @@ void ScriptMain() {
         // GTA's interaction menu (INPUT_INTERACTION_MENU, Back) shares Back with the board's
         // weapon wheel and the menu chord: blocked while either is held and just after.
         const bool chord = cfg.life.menuButton && (raw & cfg.life.menuButton) == cfg.life.menuButton;
-        if (chord || menu::IsOpen() || (s.state == LifeState::Skating && (raw & cfg.gunButton)))
+        const bool gtaKeyboard = Call<BOOL>(gta::IS_USING_KEYBOARD_AND_MOUSE, 2) != 0;
+        if (!gtaKeyboard && (chord || menu::IsOpen() || (s.state == LifeState::Skating && (raw & cfg.gunButton))))
             s.backBlockUntil = GetTickCount() + 500;
-        if (static_cast<int>(GetTickCount() - s.backBlockUntil) < 0)
+        const bool backBlocked = static_cast<int>(GetTickCount() - s.backBlockUntil) < 0;
+        if (interactionmenu::SuppressBack(gtaKeyboard, backBlocked))
             for (int group : {0, 2}) Call<void>(gta::DISABLE_CONTROL_ACTION, group, 244, 1);
         if (g_menuToggle.exchange(false)) {
             if (recordsui::Showing()) recordsui::NextPage();  // '/' also closes the records board
             else menu::Toggle();
         }
+        FilmLookPreview(s, cfg); // under the menu: drawn first
         menu::Tick();
         if (g_routeNotice) Notify(s, g_routeNotice, 3000), g_routeNotice = nullptr;
         Lap(kPartMenu);
@@ -3883,9 +4618,10 @@ void ScriptMain() {
         Lap(kPartRecords);
         gtaaudio::Tick(s.state == LifeState::Skating);
         Lap(kPartAudio);
-        if (s.state == LifeState::Skating && g_keyboard && !g_controller && g_config.skateHud && g_config.keyboardHints && !menu::IsOpen())
+        if (s.state == LifeState::Skating && g_keyboard && !g_controller && g_config.skateHud && g_config.keyboardHints && !menu::IsOpen() &&
+            !objectdropper::IsOpen())
             DrawKeyboardHints(std::string_view(s.last.state_utf8).rfind("Biped", 0) == 0);
-        skatemap::Tick(SkateOwnsPlayer(s), g_config.gpsWhileSkating, g_config.skateSpots);
+        skatemap::Tick(SkateOwnsPlayer(s), g_config.gpsWhileSkating, g_config.skateSpots, boardshop::BeachShopAvailable());
         // M while skating: GTA's own interaction menu. It did not open because
         // Skate holds the player frozen (IS_ENTITY_STATIC; control, on foot,
         // in air all as on foot): while M is down and briefly after, the
@@ -3893,14 +4629,21 @@ void ScriptMain() {
         // moves). Whether GTA's menu script runs is logged.
         {
             static ULONGLONG s_thawUntil = 0, s_checkAt = 0;
+            static bool s_wasDown = false, s_enabled = false;
             const ULONGLONG now64 = GetTickCount64();
-            const bool mDown = s.state == LifeState::Skating && Call<BOOL>(gta::IS_USING_KEYBOARD_AND_MOUSE, 0) &&
-                               !gta::FrontendActive() && !menu::IsOpen() && Call<BOOL>(gta::IS_DISABLED_CONTROL_PRESSED, 0, 244);
+            const bool mDown = s.state == LifeState::Skating && gtaKeyboard &&
+                               !gta::FrontendActive() && !menu::IsOpen() && !objectdropper::IsOpen() &&
+                               (Call<BOOL>(gta::IS_CONTROL_PRESSED, 0, 244) || Call<BOOL>(gta::IS_DISABLED_CONTROL_PRESSED, 0, 244));
             static ULONGLONG s_menuUntil = 0;
             static int s_before = -1;
             const int menus = Call<int>(gta::GET_NUMBER_OF_THREADS_RUNNING_THE_SCRIPT_WITH_THIS_HASH, util::Joaat("pi_menu"));
+            if (mDown && !s_wasDown) {
+                s_checkAt = now64 + 600;
+                s_before = menus;
+                s_enabled = Call<BOOL>(gta::IS_CONTROL_ENABLED, 0, 244) && Call<BOOL>(gta::IS_CONTROL_ENABLED, 2, 244);
+            }
+            s_wasDown = mDown;
             if (mDown) {
-                if (!s_thawUntil || now64 >= s_thawUntil) s_checkAt = now64 + 600, s_before = menus;
                 s_thawUntil = now64 + 400;
                 s_menuUntil = now64 + 30000;
             }
@@ -3917,7 +4660,8 @@ void ScriptMain() {
             }
             if (s_checkAt && now64 >= s_checkAt) {
                 s_checkAt = 0;
-                Logf("SkateV Legacy: M while skating: GTA's menu script pi_menu threads %d (before the press %d)", menus, s_before);
+                Logf("SkateV Legacy: M while skating: enabled=%d, device=keyboard, interaction menu opened=%d (pi_menu threads %d->%d, Back blocked=%d)",
+                     s_enabled ? 1 : 0, s_before == 0 && menus > 0 ? 1 : 0, s_before, menus, backBlocked ? 1 : 0);
             }
         }
         StaminaTick(s.state == LifeState::Skating, s.last);
@@ -3925,10 +4669,13 @@ void ScriptMain() {
         // The shop opens on foot: in GTA, or walking in Skate mode (not on the board).
         if (s.state == LifeState::Skating)
             boardshop::Riding(s.last.state_utf8, std::sqrt(s.last.velocity.x * s.last.velocity.x + s.last.velocity.y * s.last.velocity.y));
-        boardshop::Tick(SkateOwnsPlayer(s) && !(s.state == LifeState::Skating &&
+        boardshop::Tick(SkateOwnsPlayer(s) && !objectdropper::IsOpen() && !(s.state == LifeState::Skating &&
                                                 std::string_view(s.last.state_utf8).rfind("Biped", 0) == 0),
                         cfg.carryBoard && s.state == LifeState::Ready);
         physlevel::Tick();
+        // Last control override: menu/dropper/shop paths above may disable 244.
+        if (s.state == LifeState::Skating && interactionmenu::Allowed(gtaKeyboard, menu::IsOpen(), objectdropper::IsOpen(), backBlocked))
+            for (int group : {0, 2}) Call<void>(gta::ENABLE_CONTROL_ACTION, group, 244, true);
         Lap(kPartLevel);
         monitor.Work(monitor.Now() - workStart);
         WAIT(0);
@@ -3950,6 +4697,8 @@ BOOL APIENTRY DllMain(HMODULE module, DWORD reason, LPVOID reserved) {
         packloader::Install(g_gameDir, Log);
         keyboardHandlerRegister(Keyboard);
         scriptRegister(module, ScriptMain);
+        // Runs once the loader lock is released (after DllMain returns).
+        g_earlyRuntime = CreateThread(nullptr, 0, EarlyRuntime, nullptr, 0, nullptr);
     } else if (reason == DLL_PROCESS_DETACH) {
         keyboardHandlerUnregister(Keyboard);
         scriptUnregister(module);

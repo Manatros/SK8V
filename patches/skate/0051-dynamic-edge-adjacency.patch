@@ -1,0 +1,341 @@
+--- a/crates/skate-host/src/physics/bridge.rs
++++ b/crates/skate-host/src/physics/bridge.rs
+@@ -233,15 +233,17 @@ impl Session {
+     pub fn set_dynamic_surfaces(&mut self, triangles: &[([[f32; 3]; 3], u32, u32)]) -> usize {
+         use skate_core::{math::Vector3, physics::board_world::WorldTriangle};
+         let material = self.physics.floor_material();
++        let edges = dynamic_edges(triangles);
+         let (built, entities): (Vec<_>, Vec<_>) = triangles
+             .iter()
+-            .filter_map(|(points, tag, surface)| {
++            .zip(&edges)
++            .filter_map(|((points, tag, surface), &(flags, cosines))| {
+                 WorldTriangle::from_vertices(
+                     points.map(|p| Vector3::new(p[0], p[1], p[2])),
+                     material,
+                     *surface & 0xf7ff,
+-                    0x1e1,
+-                    [-1.; 3],
++                    flags,
++                    cosines,
+                     0.,
+                 )
+                 .map(|t| (t, *tag))
+@@ -638,3 +640,141 @@ pub struct GrabLine {
+     pub points: [[f32; 4]; 2],
+     pub approach: [f32; 4],
+ }
++
++/// SkateV: edge data for host triangles, per entity (`tag`), by the static
++/// map's rule (`skate_world::mesh_edges`, 1 mm welding). With the old 0x1e1 /
++/// -1 cosines every seam between two triangles of a ramp was a convex edge
++/// that took contacts: dropped ramps braked the board on any slope ("the
++/// slightest slope slows you down"). Host triangles stay two-sided; an edge
++/// with no neighbour keeps -1 (takes contacts, as before).
++/// Host shapes are rigid templates, so each entity's result is kept while it
++/// sends the same number of triangles (5580 triangles cost ~1.7 ms to build,
++/// and batches arrive every frame).
++fn dynamic_edges(triangles: &[([[f32; 3]; 3], u32, u32)]) -> Vec<(u32, [f32; 3])> {
++    type Edges = Vec<(u32, [f32; 3])>;
++    thread_local! {
++        static KEPT: std::cell::RefCell<std::collections::HashMap<u32, Edges>> = Default::default();
++    }
++    KEPT.with_borrow_mut(|kept| {
++        let mut seen = std::collections::HashMap::with_capacity(kept.len());
++        let out = dynamic_edges_with(triangles, |tag, count, build| {
++            let edges = match kept.remove(&tag) {
++                Some(e) if e.len() == count => e,
++                _ => build(),
++            };
++            seen.insert(tag, edges.clone());
++            edges
++        });
++        *kept = seen;
++        out
++    })
++}
++
++fn dynamic_edges_with(
++    triangles: &[([[f32; 3]; 3], u32, u32)],
++    mut entity: impl FnMut(u32, usize, &dyn Fn() -> Vec<(u32, [f32; 3])>) -> Vec<(u32, [f32; 3])>,
++) -> Vec<(u32, [f32; 3])> {
++    const BASE: u32 = 0x1e1;
++    let mut out = vec![(BASE, [-1.; 3]); triangles.len()];
++    let mut order: Vec<usize> = (0..triangles.len()).collect();
++    order.sort_by_key(|&i| triangles[i].1);
++    for group in order.chunk_by(|&a, &b| triangles[a].1 == triangles[b].1) {
++        let edges = entity(triangles[group[0]].1, group.len(), &|| entity_edges(triangles, group));
++        for (k, &i) in group.iter().enumerate() {
++            out[i] = edges[k];
++        }
++    }
++    out
++}
++
++fn entity_edges(triangles: &[([[f32; 3]; 3], u32, u32)], group: &[usize]) -> Vec<(u32, [f32; 3])> {
++    const BASE: u32 = 0x1e1;
++    let mut out = Vec::with_capacity(group.len());
++    {
++        let mut welded = std::collections::HashMap::<[i64; 3], usize>::new();
++        let mut positions = Vec::new();
++        let mut vertices = Vec::with_capacity(group.len());
++        let mut normals = Vec::with_capacity(group.len());
++        for &i in group {
++            let points = triangles[i].0;
++            vertices.push(points.map(|p| {
++                let key = p.map(|v| (f64::from(v) * 1000.0).round() as i64);
++                *welded.entry(key).or_insert_with(|| {
++                    positions.push(Vec3::from_array(p));
++                    positions.len() - 1
++                })
++            }));
++            let [a, b, c] = points.map(Vec3::from_array);
++            normals.push((b - a).cross(c - a).try_normalize().unwrap_or(Vec3::ZERO));
++        }
++        let (flags, cosines) = crate::skate_world::mesh_edges(&positions, &vertices, &normals, BASE);
++        for k in 0..group.len() {
++            let mut c = cosines[k];
++            for (edge, cosine) in c.iter_mut().enumerate() {
++                // Still convex at cosine 1: no neighbour was found.
++                if flags[k] & (0x20 << edge) != 0 && *cosine == 1. {
++                    *cosine = -1.;
++                }
++            }
++            out.push((flags[k], c));
++        }
++    }
++    out
++}
++
++#[cfg(test)]
++mod dynamic_edge_tests {
++    use super::dynamic_edges;
++
++    // A 1 m quad (two triangles, diagonal 0-2) and a wall standing on its far edge.
++    const A: [f32; 3] = [0., 0., 0.];
++    const B: [f32; 3] = [1., 0., 0.];
++    const C: [f32; 3] = [1., 0., 1.];
++    const D: [f32; 3] = [0., 0., 1.];
++
++    fn edge_of(t: &[[f32; 3]; 3], p: [f32; 3], q: [f32; 3]) -> usize {
++        (0..3).find(|&e| { let (a, b) = (t[e], t[(e + 1) % 3]); (a == p && b == q) || (a == q && b == p) }).unwrap()
++    }
++
++    #[test]
++    fn a_seam_inside_a_flat_face_takes_no_edge_contact() {
++        let tris = [([A, B, C], 7, 0), ([A, C, D], 7, 0)];
++        let edges = dynamic_edges(&tris);
++        let e = edge_of(&tris[0].0, A, C);
++        assert_eq!(edges[0].0 & (0x20 << e), 0, "the diagonal is no convex edge");
++        assert_eq!(edges[0].1[e], 1.);
++        let outer = edge_of(&tris[0].0, A, B);
++        assert_ne!(edges[0].0 & (0x20 << outer), 0);
++        assert_eq!(edges[0].1[outer], -1., "an open edge keeps taking contacts");
++    }
++
++    #[test]
++    fn a_real_corner_stays_a_convex_edge() {
++        // A box's top (z = 1, facing up) meets its front (y = 0, facing -y) along C-D.
++        let tris = [([D, C, [1., 1., 1.]], 3, 0), ([A, B, C], 3, 0), ([A, C, D], 3, 0)];
++        let edges = dynamic_edges(&tris);
++        let shared = edge_of(&tris[0].0, D, C);
++        assert_ne!(edges[0].0 & (0x20 << shared), 0, "a box corner is convex");
++        assert!(edges[0].1[shared].abs() < 1e-5, "faces at 90 degrees: cosine 0, got {}", edges[0].1[shared]);
++    }
++
++    #[test]
++    fn a_moved_entity_keeps_its_edges_and_a_new_shape_is_built_anew() {
++        let moved = |dx: f32| [A, B, C, D].map(|p| [p[0] + dx, p[1], p[2]]);
++        let quad = |p: [[f32; 3]; 4]| [([p[0], p[1], p[2]], 9, 0), ([p[0], p[2], p[3]], 9, 0)];
++        let first = dynamic_edges(&quad(moved(0.)));
++        assert_eq!(dynamic_edges(&quad(moved(5.))), first);
++        // Same tag, one triangle: built for that shape, not the kept quad.
++        let single = dynamic_edges(&[([A, B, C], 9, 0)]);
++        assert!(single[0].1.iter().all(|&c| c == -1.), "{single:?}");
++    }
++
++    #[test]
++    fn different_entities_are_never_joined() {
++        let tris = [([A, B, C], 1, 0), ([A, C, D], 2, 0)];
++        let edges = dynamic_edges(&tris);
++        let e = edge_of(&tris[0].0, A, C);
++        assert_ne!(edges[0].0 & (0x20 << e), 0);
++        assert_eq!(edges[0].1[e], -1.);
++    }
++}
+--- a/crates/skate-host/src/skate_world.rs
++++ b/crates/skate-host/src/skate_world.rs
+@@ -241,16 +241,96 @@ pub(crate) fn collision_world(
+         vertices.push(ids);
+         normals.push(normal);
+     }
+-    let mut cosines = vec![[1.; 3]; vertices.len()];
+-    let mut flags =
+-        vec![TriangleFeature::ONE_SIDED | TriangleFeature::USE_EDGE_COSINES | 0xe0; vertices.len()];
++    let base = TriangleFeature::ONE_SIDED | TriangleFeature::USE_EDGE_COSINES | 0xe0;
+     // Fully native maps need no reconstructed adjacency. Mixed maps still
+     // include every face when finding neighbors for their authored geometry.
+-    if map
++    let (mut flags, mut cosines) = if map
+         .geometry
+         .collision
+         .iter()
+         .any(|t| t.native_edges.is_none())
++    {
++        mesh_edges(&positions, &vertices, &normals, base)
++    } else {
++        (vec![base; vertices.len()], vec![[1.; 3]; vertices.len()])
++    };
++    let mut triangles = Vec::with_capacity(vertices.len());
++    let mut packed_surfaces = Vec::with_capacity(vertices.len());
++    for (i, source) in map.geometry.collision.iter().enumerate() {
++        if let Some(edges) = source.native_edges {
++            (flags[i], cosines[i]) = decode_native_edges(edges)?;
++        }
++        let m = &map.materials[source.material as usize - 1];
++        // Exact EncodeRwSurfaceId mapping from the reference native adapter.
++        packed_surfaces.push((m.audio | (m.physics << 7) | (m.pattern << 12)) as u16);
++        // Welding is only for adjacency. Moving contact vertices to their
++        // welded representatives can collapse narrow MW2 collision triangles.
++        let points = source.points.map(|p| Vector3::new(p[0], p[1], p[2]));
++        // Keep the supplied game's original static-world contact combine values.
++        // The native map bridge supplies packed surfaces, not a guessed split of
++        // the package's single friction scalar into static/dynamic coefficients.
++        triangles.push(
++            WorldTriangle::from_vertices(
++                points,
++                material,
++                source.surface,
++                flags[i],
++                cosines[i],
++                0.,
++            )
++            .ok_or_else(|| {
++                format!(
++                    "Invalid SKATE collision volume at triangle {i}: {:?}",
++                    source.points
++                )
++            })?,
++        );
++    }
++    // Portable maps have no native cluster hierarchy. Bound contiguous ranges
++    // once at load time so the existing BVH can reject distant geometry. Keep
++    // triangle order and mesh identity/filter values: contact tie-breaking,
++    // packed surfaces and adjacency must not change with this acceleration.
++    let mut meshes = Vec::new();
++    for start in (0..triangles.len()).step_by(64) {
++        let end = (start + 64).min(triangles.len());
++        let bounds = Bounds::from_points(
++            triangles[start..end]
++                .iter()
++                .flat_map(|t| t.triangle.vertices),
++        )
++        .ok_or("SKATE collision bounds empty")?;
++        meshes.push(QueryMesh {
++            geometry: 0,
++            rejection_flags: 0,
++            triangle_range: start..end,
++            local_to_world: RetailAffineTransform::IDENTITY,
++            world_to_local: RetailAffineTransform::IDENTITY,
++            local_bounds: bounds,
++            matching_group: -1,
++            pool: QueryPool::Ground,
++        });
++    }
++    let metadata = QueryMetadata {
++        packed_surfaces,
++        meshes,
++        static_edges: vec![],
++        island_flags: 0,
++    };
++    let mut world = BoardWorld::with_query_metadata(triangles, metadata).map_err(str::to_owned)?;
++    if map.name == "IW4L collision" {
++        world.enable_imported_floor_seams();
++    }
++    Ok(world)
++}
++
++/// SkateV: edge flags and cosines from welded adjacency (the map rule above,
++/// shared with host triangles in `set_dynamic_surfaces`): an edge whose
++/// neighbour is coplanar or folds back is no convex edge, and a vertex on one
++/// plane, a two-plane crease or a concave crease is disabled. `base` holds the
++/// sidedness bits and every edge convex.
++pub(crate) fn mesh_edges(positions: &[Vec3], vertices: &[[usize; 3]], normals: &[Vec3], base: u32) -> (Vec<u32>, Vec<[f32; 3]>) {
++    let mut cosines = vec![[1.; 3]; vertices.len()];
++    let mut flags = vec![base; vertices.len()];
+     {
+         // Brush faces can make an edge non-manifold. Collect every incident
+         // face before choosing adjacency so a floor prefers its coplanar
+@@ -340,71 +420,5 @@ pub(crate) fn collision_world(
+             }
+         }
+     }
+-    let mut triangles = Vec::with_capacity(vertices.len());
+-    let mut packed_surfaces = Vec::with_capacity(vertices.len());
+-    for (i, source) in map.geometry.collision.iter().enumerate() {
+-        if let Some(edges) = source.native_edges {
+-            (flags[i], cosines[i]) = decode_native_edges(edges)?;
+-        }
+-        let m = &map.materials[source.material as usize - 1];
+-        // Exact EncodeRwSurfaceId mapping from the reference native adapter.
+-        packed_surfaces.push((m.audio | (m.physics << 7) | (m.pattern << 12)) as u16);
+-        // Welding is only for adjacency. Moving contact vertices to their
+-        // welded representatives can collapse narrow MW2 collision triangles.
+-        let points = source.points.map(|p| Vector3::new(p[0], p[1], p[2]));
+-        // Keep the supplied game's original static-world contact combine values.
+-        // The native map bridge supplies packed surfaces, not a guessed split of
+-        // the package's single friction scalar into static/dynamic coefficients.
+-        triangles.push(
+-            WorldTriangle::from_vertices(
+-                points,
+-                material,
+-                source.surface,
+-                flags[i],
+-                cosines[i],
+-                0.,
+-            )
+-            .ok_or_else(|| {
+-                format!(
+-                    "Invalid SKATE collision volume at triangle {i}: {:?}",
+-                    source.points
+-                )
+-            })?,
+-        );
+-    }
+-    // Portable maps have no native cluster hierarchy. Bound contiguous ranges
+-    // once at load time so the existing BVH can reject distant geometry. Keep
+-    // triangle order and mesh identity/filter values: contact tie-breaking,
+-    // packed surfaces and adjacency must not change with this acceleration.
+-    let mut meshes = Vec::new();
+-    for start in (0..triangles.len()).step_by(64) {
+-        let end = (start + 64).min(triangles.len());
+-        let bounds = Bounds::from_points(
+-            triangles[start..end]
+-                .iter()
+-                .flat_map(|t| t.triangle.vertices),
+-        )
+-        .ok_or("SKATE collision bounds empty")?;
+-        meshes.push(QueryMesh {
+-            geometry: 0,
+-            rejection_flags: 0,
+-            triangle_range: start..end,
+-            local_to_world: RetailAffineTransform::IDENTITY,
+-            world_to_local: RetailAffineTransform::IDENTITY,
+-            local_bounds: bounds,
+-            matching_group: -1,
+-            pool: QueryPool::Ground,
+-        });
+-    }
+-    let metadata = QueryMetadata {
+-        packed_surfaces,
+-        meshes,
+-        static_edges: vec![],
+-        island_flags: 0,
+-    };
+-    let mut world = BoardWorld::with_query_metadata(triangles, metadata).map_err(str::to_owned)?;
+-    if map.name == "IW4L collision" {
+-        world.enable_imported_floor_seams();
+-    }
+-    Ok(world)
++    (flags, cosines)
+ }

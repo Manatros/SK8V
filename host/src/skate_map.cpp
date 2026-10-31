@@ -25,6 +25,29 @@ constexpr int kSpotColour = 5;  // yellow
 constexpr int kWaypointSprite = 8;
 
 std::vector<int> g_spots;
+// The boardwalk's board shop (board_shop.cpp kBeachShop): always on the map,
+// not short range, so it can be found (Manatros 2026-10-26: "set a marker to
+// the shop so I know where to go").
+constexpr float kShopX = -1224.45f, kShopY = -1442.68f;
+constexpr int kShopSprite = 73, kShopColour = 5;
+int g_shop = 0;
+
+void ShopBlip(bool on) {
+    if (!on) {
+        if (g_shop && Call<BOOL>(DOES_BLIP_EXIST, g_shop)) Call<void>(REMOVE_BLIP, &g_shop);
+        g_shop = 0;
+        return;
+    }
+    if (g_shop && Call<BOOL>(DOES_BLIP_EXIST, g_shop)) return;
+    g_shop = Call<int>(ADD_BLIP_FOR_COORD, kShopX, kShopY, 0.0f);
+    if (!g_shop) return;
+    Call<void>(SET_BLIP_SPRITE, g_shop, kShopSprite);
+    Call<void>(SET_BLIP_COLOUR, g_shop, kShopColour);
+    Call<void>(SET_BLIP_AS_SHORT_RANGE, g_shop, FALSE);
+    Call<void>(BEGIN_TEXT_COMMAND_SET_BLIP_NAME, "STRING");
+    Call<void>(ADD_TEXT_COMPONENT_SUBSTRING_PLAYER_NAME, "Skate Shop");
+    Call<void>(END_TEXT_COMMAND_SET_BLIP_NAME, g_shop);
+}
 bool g_route = false;
 float g_routeX = 0.0f, g_routeY = 0.0f;
 DWORD g_nextCheck = 0;
@@ -67,11 +90,12 @@ void Spots(bool on) {
 
 } // namespace
 
-void Tick(bool skating, bool gps, bool spots) {
+void Tick(bool skating, bool gps, bool spots, bool shop) {
     const DWORD now = GetTickCount();
     if (static_cast<LONG>(now - g_nextCheck) < 0) return;
     g_nextCheck = now + 1000;  // once a second is plenty for both
     Spots(spots);
+    ShopBlip(shop);
     // GTA draws the route to the waypoint only on foot or in a vehicle; in
     // Skate mode the player is neither, so it is drawn here (as a vehicle's).
     if (gps && skating && Call<BOOL>(IS_WAYPOINT_ACTIVE)) {
@@ -122,6 +146,8 @@ const char* ClearRoute() {
 void Clear() {
     if (g_route) SetRoute(false);
     Spots(false);
+    if (g_shop && Call<BOOL>(DOES_BLIP_EXIST, g_shop)) Call<void>(REMOVE_BLIP, &g_shop);
+    g_shop = 0;
 }
 
 } // namespace skatemap

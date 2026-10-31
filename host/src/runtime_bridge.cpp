@@ -73,6 +73,7 @@ bool RuntimeBridge::Load(const wchar_t* dllPath, const std::string& dataRoot, co
     optional(shopStart_, "sv_shop_start");
     optional(shopCharacter_, "sv_shop_character");
     optional(shopOpen_, "sv_shop_open");
+    optional(shopOpenAt_, "sv_shop_open_at");
     optional(shopClose_, "sv_shop_close");
     optional(shopInput_, "sv_shop_input");
     optional(shopText_, "sv_shop_text");
@@ -327,6 +328,11 @@ bool RuntimeBridge::ShopCharacter(const std::string& who) {
 
 bool RuntimeBridge::ShopOpen(int tier) {
     return runtime_ && shopOpen_ && shopOpen_(runtime_, static_cast<std::uint32_t>(tier)) != 0;
+}
+
+bool RuntimeBridge::ShopOpenAt(int tier, float x, float y, unsigned day) {
+    if (runtime_ && shopOpenAt_) return shopOpenAt_(runtime_, static_cast<std::uint32_t>(tier), x, y, day) != 0;
+    return tier < 2 && ShopOpen(tier);
 }
 
 void RuntimeBridge::ShopClose() {

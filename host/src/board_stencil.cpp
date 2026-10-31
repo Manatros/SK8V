@@ -18,12 +18,13 @@ namespace {
 
 // ID3D11DeviceContext vtable slots (d3d11.h declaration order).
 constexpr int kDrawIndexed = 12, kDrawIndexedInstanced = 20;
-constexpr UINT kMaterialMask = 7, kInterior = 8, kPed = 1;
+constexpr UINT kMaterialMask = 7, kInterior = 8;
 
 using DrawIndexedFn = void(STDMETHODCALLTYPE*)(ID3D11DeviceContext*, UINT, UINT, INT);
 using DrawIndexedInstancedFn = void(STDMETHODCALLTYPE*)(ID3D11DeviceContext*, UINT, UINT, UINT, INT, UINT);
 
 std::atomic<bool> g_active{false}, g_installed{false};
+std::atomic<unsigned> g_material{2};
 std::atomic<unsigned> g_all{0}, g_immediate{0}, g_deferred{0}, g_seen{0}, g_gbuffer{0}, g_marked{0}, g_logged{0};
 void (*g_log)(const char*) = nullptr;
 
@@ -53,8 +54,14 @@ bool Matches(ID3D11ShaderResourceView* srv) {
 }
 
 // Per thread (a deferred context records on its own thread): SRV -> board?
+// Keyed by the view AND the resource behind it: GTA frees and recreates
+// textures while streaming (metro, interiors), a new view can reuse a freed
+// pointer, and a pointer-only cache then marked that texture as the board
+// (2026-10-20: garbage textures on the metro floor/ceiling, also in plain
+// SK8V 1.1.10 with no other mods).
 struct CacheEntry {
     const void* srv;
+    const void* res;
     bool board;
 };
 thread_local CacheEntry t_cache[4096];
@@ -64,9 +71,12 @@ bool BoardBound(ID3D11DeviceContext* c) {
     ID3D11ShaderResourceView* srv = nullptr;
     c->PSGetShaderResources(0, 1, &srv);
     if (!srv) return false;
+    ID3D11Resource* res = nullptr;
+    srv->GetResource(&res);
     CacheEntry& e = t_cache[(reinterpret_cast<std::uintptr_t>(srv) >> 4) & 4095];
-    if (e.srv != srv) e = {srv, Matches(srv)};
+    if (e.srv != srv || e.res != res) e = {srv, res, res && Matches(srv)};
     const bool board = e.board;
+    if (res) res->Release();
     srv->Release();
     return board;
 }
@@ -77,6 +87,8 @@ template <typename Draw>
 void Marked(ID3D11DeviceContext* c, Draw draw) {
     g_all.fetch_add(1, std::memory_order_relaxed);
     if (!g_active.load(std::memory_order_relaxed)) return draw();
+    const UINT material = g_material.load(std::memory_order_relaxed);
+    if (!material) return draw();
     (c->GetType() == D3D11_DEVICE_CONTEXT_DEFERRED ? g_deferred : g_immediate).fetch_add(1, std::memory_order_relaxed);
     if (!BoardBound(c)) return draw();
     g_seen.fetch_add(1, std::memory_order_relaxed);
@@ -92,7 +104,7 @@ void Marked(ID3D11DeviceContext* c, Draw draw) {
         if (dss) dss->Release();
         return draw();
     }
-    c->OMSetDepthStencilState(dss, (ref & ~kMaterialMask) | kPed);
+    c->OMSetDepthStencilState(dss, (ref & ~kMaterialMask) | material);
     draw();
     c->OMSetDepthStencilState(dss, ref);
     dss->Release();
@@ -290,6 +302,7 @@ void Stop() {
 }
 
 void SetActive(bool on) { g_active.store(on, std::memory_order_relaxed); }
+void SetMaterial(unsigned material) { g_material.store(material & kMaterialMask, std::memory_order_relaxed); }
 
 Stats Take() {
     return {g_immediate.exchange(0), g_deferred.exchange(0), g_seen.exchange(0), g_gbuffer.exchange(0),

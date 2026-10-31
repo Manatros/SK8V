@@ -20,7 +20,7 @@ pub fn enabled(layer: &Path) -> Option<HashSet<String>> {
     Some(parse(&content, &setup))
 }
 
-fn parse(content: &str, setup: &str) -> HashSet<String> {
+pub(crate) fn parse(content: &str, setup: &str) -> HashSet<String> {
     let run: HashSet<&str> = tag_texts(setup, "Item").into_iter().collect();
     let mut out = HashSet::new();
     for set in content.split("<changeSetName>").skip(1) {

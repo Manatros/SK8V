@@ -1,0 +1,45 @@
+--- a/crates/skate-host/src/physics/bridge.rs
++++ b/crates/skate-host/src/physics/bridge.rs
+@@ -112,6 +112,14 @@
+         self.skater.trajectory.bind_grind_world(prepared.grind);
+         Ok(())
+     }
++    /// Replace only grind geometry; static contact collision stays installed.
++    pub fn set_grind_rails(&mut self, rails: Vec<Vec<[f32; 3]>>) -> Result<(), String> {
++        let map = collision_map(Vec::new(), Vec::new(), rails, [0.; 3], 0.);
++        let grind = std::sync::Arc::new(crate::grind_world::StaticProvider::new(Some(&map))?);
++        self.physics.grind_world = std::sync::Arc::clone(&grind);
++        self.skater.trajectory.bind_grind_world(grind);
++        Ok(())
++    }
+     pub fn period(&self) -> f32 {
+         self.physics.period().as_secs_f32()
+     }
+@@ -279,7 +287,8 @@
+     /// plus 1 cm (a numeric guard so the endpoints are strictly inside), in
+     /// the car's model z; a line above its top (a bus or truck bumper) is
+     /// lowered to that top minus 1 cm. While a line is held its height is kept.
+-    pub fn set_grab_lines(&mut self, lines: &[GrabLine]) -> Result<(), String> {
++    /// Returns the accepted lines after reach clamping, including an empty set.
++    pub fn set_grab_lines(&mut self, lines: &[GrabLine]) -> Result<Vec<GrabLine>, String> {
+         use skate_core::player::offboard::grab_scene::{AssemblyData, Descriptor, Geometry};
+         use skate_core::player::offboard::grab_scene::registry::{Object, Provider, Spline};
+         use skate_core::player::state::PhysicalStateId;
+@@ -291,7 +300,7 @@
+         let floor = frame[3][1] + (s.detect_offset_8e3c[1] - s.detect_extents_978b[1]) + 0.01;
+         let ceiling = frame[3][1] + (s.detect_offset_8e3c[1] + s.detect_extents_978b[1]) - 0.01;
+         let mut heights = std::collections::HashMap::new();
+-        let lines: Vec<GrabLine> = lines.iter().map(|l| {
++        let lines: Vec<GrabLine> = lines.iter().filter(|l| l.tag != 0).map(|l| {
+             let mut l = *l;
+             let up = l.frame[2][1];
+             let z = match (held == Some(l.tag), self.grab_heights.get(&l.tag)) {
+@@ -339,7 +348,7 @@
+             .collect();
+         self.physics.offboard_grab_scene =
+             super::offboard::grab_scene::Registry::new(&self.physics.world, objects, Vec::new())?;
+-        Ok(())
++        Ok(lines)
+     }
+     /// SkateV contact exchange: the moving host entities near the skater,
+     /// sampled by the host (replaces the previous set). Entities without a

@@ -2763,6 +2763,7 @@ name = "skatev-runtime"
 version = "0.2.0"
 dependencies = [
  "bevy_math",
+ "flate2",
  "libm",
  "png 0.17.16",
  "rustc-hash",
@@ -2780,8 +2781,11 @@ dependencies = [
 name = "skatev-world-cache"
 version = "0.2.0"
 dependencies = [
+ "anyhow",
+ "bevy_math",
  "gta-archives",
  "rage-formats",
+ "skatev-runtime",
  "svwc",
 ]
 

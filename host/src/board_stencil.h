@@ -18,6 +18,11 @@ namespace boardstencil {
 void Start(void (*log)(const char*));
 void Stop();
 void SetActive(bool on);
+// The material the board's G-buffer draws are re-marked with (low 3 bits).
+// the maintainer 2026-10-17: with 1 (ped) the board looked "constantly beneath a lamp",
+// everywhere: GTA lights material 1 like a character. 2 (vehicle) keeps the
+// snow off without that; 0 leaves the draws alone (lit as a plain object).
+void SetMaterial(unsigned material);
 // Since the last call, while active: indexed draws on the immediate and
 // deferred contexts, those with the board's texture bound, those
 // into the G-buffer, and those re-marked.

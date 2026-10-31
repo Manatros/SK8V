@@ -576,8 +576,7 @@ impl<R: Read + Seek> Ground<R> {
         if !(tile_size.is_finite() && tile_size > 0.0) {
             return Err(bad("invalid tile size"));
         }
-        let section = crate::packed::read_section(&mut reader)?;
-        let mut maps_from = io::Cursor::new(section);
+        let mut maps_from = crate::packed::read_section(&mut reader)?;
         let mut maps = Vec::with_capacity(map_count as usize);
         for _ in 0..map_count {
             let mut wh = [0u8; 5];
@@ -606,6 +605,8 @@ impl<R: Read + Seek> Ground<R> {
             map.visible = visible;
             maps.push(map);
         }
+        // The whole frame, as decode_all checked it (Codex review).
+        io::copy(&mut maps_from, &mut io::sink())?;
         let mut tiles = HashMap::with_capacity(tile_count as usize);
         if version >= 5 {
             let mut table = Vec::with_capacity(tile_count as usize);
@@ -783,6 +784,15 @@ mod tests {
         }
         // 4 triangles, 4 shared corners per layer: smaller than the raw records.
         assert!(bytes.len() < 4 * TRIANGLE_BYTES + 300, "{}", bytes.len());
+    }
+
+    #[test]
+    #[ignore]
+    fn the_full_ground_loads() {
+        let g = Ground::open(std::path::Path::new(&std::env::var("SKATEV_GROUND").unwrap())).unwrap();
+        let bits: usize = g.maps.iter().map(|m| m.values.len()).sum();
+        println!("{} maps, {} values, {} tiles", g.map_count, bits, g.tile_keys().len());
+        assert!(g.map_count > 0);
     }
 
     #[test]

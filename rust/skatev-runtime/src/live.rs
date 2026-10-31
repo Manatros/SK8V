@@ -105,6 +105,12 @@ pub struct Level {
     pub image: (usize, usize),
 }
 
+/// GTAxSkate DetailedStairs (Dev page, default on, Manatros 2026-10-19):
+/// stair ramps are rebuilt as steps from GTA's detailed copy
+/// (`svwc::clean::stairs_from_detail`). Off, the map is SK8V's.
+pub static DETAILED_STAIRS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+
+
 /// What one pass found (logged beside the build).
 #[derive(Default, Debug, Clone, PartialEq)]
 pub struct Census {
@@ -131,6 +137,20 @@ pub struct Census {
     /// theirs that went in (`svwc::clean::fill_gaps`).
     pub spare: usize,
     pub filled: usize,
+    /// Triangles carrying GTA's STAIRS flag.
+    pub stair_flagged: usize,
+    /// Rails from GTA's capsule and cylinder polygons (`tubes.rs`).
+    pub tube_rails: usize,
+    /// Stair ramp triangles replaced by the detailed copy's steps, and the
+    /// step triangles that went in (`svwc::clean::stairs_from_detail`).
+    pub stair_ramps: usize,
+    /// High-res parks: GTA triangles replaced, visible triangles added.
+    pub park_replaced: usize,
+    pub park_added: usize,
+    /// Faces dropped as hidden layers (`svwc::clean::drop_hidden_layers`).
+    pub hidden: usize,
+    pub steps: usize,
+    pub coplanar: usize,
 }
 
 impl Census {
@@ -146,9 +166,9 @@ impl std::fmt::Display for Census {
         write!(
             f,
             "live physics level: {} slots ({} stale), {} BVH bounds, {} in reach: {} bounds used ({} static composites, {} children used, {} left out by flags), {} left out by include flags, {} unreadable; \
-             {} triangles + {} primitive polygons, {} vegetation volumes, {} repeats and {} foliage-over-ground dropped; {} gap triangles from {} bullet/camera-only bounds",
+             {} triangles + {} primitive polygons, {} vegetation volumes, {} repeats and {} foliage-over-ground dropped; {} bullet/camera-only bounds (stairs only); {} hidden layers dropped; high-res parks {} GTA triangles replaced by {}; {} STAIRS-flagged triangles, {} stair ramp triangles replaced by {} step triangles; {} tube rails",
             self.slots, self.stale, self.bvh, self.in_range, self.bounds, self.composites, self.children_used, self.children_filtered, self.filtered, self.failed, self.triangles, self.primitives,
-            self.vegetation, self.repeats, self.over_ground, self.filled, self.spare
+            self.vegetation, self.repeats, self.over_ground, self.spare, self.hidden, self.park_replaced, self.park_added, self.stair_flagged, self.stair_ramps, self.steps, self.tube_rails
         )
     }
 }
@@ -445,6 +465,13 @@ impl Level {
     /// by a script or trainer, stunt props in the Rockstar Editor's director
     /// mode) is in the table like any other. Nearest match within 0.25 m.
     pub fn model_at(&self, position: Vec3, axes: [Vec3; 3]) -> Result<Vec<Tri>, String> {
+        self.model_near(position, axes, 0.25)
+    }
+
+    /// As `model_at`, matching within `reach` metres (a moving vehicle has
+    /// gone on since the host sampled it). A vehicle's instance carries its
+    /// own copy of the fragment's bound, so this is that car's collision.
+    pub fn model_near(&self, position: Vec3, axes: [Vec3; 3], reach: f32) -> Result<Vec<Tri>, String> {
         let unit = axes.map(|a| a.normalize_or_zero());
         let mut best: Option<(f32, usize)> = None;
         self.slots(|index, inst, _| {
@@ -458,7 +485,7 @@ impl Level {
             }
             let d = vec3_at(&ih, 0x50).distance(position);
             let aligned = (0..3).all(|k| vec3_at(&ih, 0x20 + k * 16).normalize_or_zero().dot(unit[k]) > 0.99);
-            if d < 0.25 && aligned && best.is_none_or(|(b, _)| d < b) {
+            if d < reach && aligned && best.is_none_or(|(b, _)| d < b) {
                 best = Some((d, inst));
             }
         })?;
@@ -487,7 +514,7 @@ impl Level {
         let mut tris = Vec::new();
         for b in found.iter().filter(|b| !b.spare) {
             match b.kind {
-                BOUND_BVH | 4 => decode_geometry(b, clip, &mut tris, &mut census),
+                BOUND_BVH | 4 => decode_geometry(b, clip, &mut tris, None, &mut census),
                 _ => decode_primitive(b, clip, &mut tris, &mut census),
             }
         }
@@ -498,15 +525,40 @@ impl Level {
     }
 
     /// Triangles of the static map within `half` of `centre` (GTA space),
-    /// plus what was found and the bounds read.
-    pub fn walk(&self, centre: [f32; 2], half: f32) -> Result<(Vec<Tri>, Census, Vec<Seen>), String> {
+    /// plus what was found, the bounds read and where the rebuilt stair
+    /// steps are in the triangles (`stairs_from_detail`).
+    pub fn walk(&self, centre: [f32; 2], half: f32) -> Result<(Vec<Tri>, Census, Vec<Seen>, Cleaned), String> {
+        self.walk_patch(centre, half, None)
+    }
+
+    /// Read only the live cells needed by a hybrid area. Restrict geometry
+    /// before cleanup/edge finding, rather than building the whole live area
+    /// and throwing almost all of it away afterward.
+    pub fn walk_selected(&self, centre: [f32; 2], half: f32, selection: &crate::tiles::Selection) -> Result<(Vec<Tri>, Census, Vec<Seen>, Cleaned), String> {
+        self.walk_patch(centre, half, Some(selection))
+    }
+
+    fn walk_patch(&self, centre: [f32; 2], half: f32, selection: Option<&crate::tiles::Selection>) -> Result<(Vec<Tri>, Census, Vec<Seen>, Cleaned), String> {
         let mut census = Census::default();
         let mut tris = Vec::new();
+        // STAIRS material flag per triangle of `tris`.
+        let mut stairs = Vec::new();
         let mut found = Vec::new();
-        self.bvh_in_reach(centre, half, &mut census, |b| found.push(b))?;
-        let clip = (centre[0] - half - EDGE, centre[1] - half - EDGE, centre[0] + half + EDGE, centre[1] + half + EDGE);
+        let clip = selection.map(patch_clip).unwrap_or((centre[0] - half - EDGE, centre[1] - half - EDGE, centre[0] + half + EDGE, centre[1] + half + EDGE));
+        // Selected ownership cells extend to their complete borders, not just
+        // the nominal area's square. Their context must participate in the
+        // bound census too, including at the outer edge of the working set.
+        let read_half = if selection.is_some() {
+            (centre[0]-clip.0).abs().max((centre[1]-clip.1).abs())
+                .max((clip.2-centre[0]).abs()).max((clip.3-centre[1]).abs())
+        } else { half };
+        self.bvh_in_reach(centre, read_half, &mut census, |b| found.push(b))?;
         let (mut extra, mut extra_census) = (Vec::new(), Census::default());
+        svwc::bounds::take_tubes(); // this read's tubes only
         for b in &found {
+            if selection.is_some_and(|s| !patch_box(s, [b.at[0] - b.reach, b.at[1] - b.reach], [b.at[0] + b.reach, b.at[1] + b.reach], PATCH_CONTEXT)) {
+                continue;
+            }
             let (out, counts) = if b.spare {
                 census.spare += 1;
                 (&mut extra, &mut extra_census)
@@ -515,19 +567,289 @@ impl Level {
                 (&mut tris, &mut census)
             };
             match b.kind {
-                BOUND_BVH | 4 => decode_geometry(b, clip, out, counts),
+                BOUND_BVH | 4 => decode_geometry(b, clip, out, if b.spare { None } else { Some(&mut stairs) }, counts),
                 _ => decode_primitive(b, clip, out, counts),
+            }
+            if !b.spare {
+                stairs.resize(tris.len(), false);
             }
         }
         census.failed += extra_census.failed;
         if census.slots < 8 {
             return Err(format!("physics level table at {:#x} holds only {} instances", self.base, census.slots));
         }
-        census.repeats = svwc::clean::drop_repeats(&mut tris);
-        census.over_ground = svwc::clean::drop_over_ground(&mut tris);
-        census.filled = svwc::clean::fill_gaps(&mut tris, extra);
-        Ok((tris, census, found.iter().map(Bvh::seen).collect()))
+        // GTA's tubes (coping, handrails, railing bars) as rails (tubes.rs).
+        let mut tubes = svwc::bounds::take_tubes();
+        if let Some(selection) = selection {
+            retain_patch_geometry(&mut tris, &mut stairs, &mut extra, selection);
+            tubes.retain(|(a, b, r)| {
+                patch_box(selection, [a[0].min(b[0]) - r, a[1].min(b[1]) - r],
+                    [a[0].max(b[0]) + r, a[1].max(b[1]) + r], PATCH_CONTEXT)
+            });
+        }
+        census.tube_rails = crate::tubes::set(&tubes);
+        let cleaned = clean_static(&mut tris, &stairs, &tubes, extra, &mut census, false);
+        Ok((tris, census, found.iter().map(Bvh::seen).collect(), cleaned))
     }
+}
+
+// Closed-solid ownership needs 12 m plus its 1 m guard; this also covers the
+// rail coverage rule's 8 m probes. Share that limit with the ply filter so a
+// patch does not slice a nearby solid open and change its ownership result.
+const PATCH_CONTEXT: f32 = crate::plies::SOLID_CONTEXT;
+
+fn patch_clip(s: &crate::tiles::Selection) -> (f32, f32, f32, f32) {
+    s.missing.iter().fold((f32::INFINITY, f32::INFINITY, f32::NEG_INFINITY, f32::NEG_INFINITY), |(x0, y0, x1, y1), &(x, y)| {
+        (x0.min(x as f32 * s.size - PATCH_CONTEXT), y0.min(y as f32 * s.size - PATCH_CONTEXT),
+         x1.max((x as f32 + 1.) * s.size + PATCH_CONTEXT), y1.max((y as f32 + 1.) * s.size + PATCH_CONTEXT))
+    })
+}
+
+fn patch_box(s: &crate::tiles::Selection, min: [f32; 2], max: [f32; 2], padding: f32) -> bool {
+    s.missing.iter().any(|&(x, y)| {
+        min[0] <= (x as f32 + 1.) * s.size + padding && max[0] >= x as f32 * s.size - padding
+            && min[1] <= (y as f32 + 1.) * s.size + padding && max[1] >= y as f32 * s.size - padding
+    })
+}
+
+fn patch_triangle(s: &crate::tiles::Selection, t: &Tri) -> bool {
+    patch_box(s, [t.v.iter().map(|p| p[0]).fold(f32::INFINITY, f32::min), t.v.iter().map(|p| p[1]).fold(f32::INFINITY, f32::min)],
+        [t.v.iter().map(|p| p[0]).fold(f32::NEG_INFINITY, f32::max), t.v.iter().map(|p| p[1]).fold(f32::NEG_INFINITY, f32::max)], PATCH_CONTEXT)
+}
+
+fn retain_patch_geometry(tris: &mut Vec<Tri>, stairs: &mut Vec<bool>, extra: &mut Vec<Tri>, s: &crate::tiles::Selection) {
+    let mut kept_stairs = Vec::new();
+    let mut i = 0;
+    tris.retain(|t| {
+        let keep = patch_triangle(s, t);
+        if keep { kept_stairs.push(stairs.get(i).copied().unwrap_or(false)); }
+        i += 1;
+        keep
+    });
+    *stairs = kept_stairs;
+    extra.retain(|t| patch_triangle(s, t));
+}
+
+#[cfg(test)]
+mod patch_tests {
+    use super::*;
+
+    fn selection() -> crate::tiles::Selection {
+        crate::tiles::Selection { size:64., baked:Default::default(), missing:vec![(0,0),(1,0)], live_only:vec![(0,0)],stale:0 }
+    }
+
+    #[test]
+    fn patch_geometry_keeps_nearby_context_and_stair_alignment() {
+        let s = selection();
+        let tri = |x:f32| Tri { v:[[x,2.,0.],[x+1.,2.,0.],[x,3.,0.]], material:1 };
+        let mut tris = vec![tri(-15.),tri(-7.),tri(130.),tri(1000.)];
+        let mut stairs = vec![false,true,false,true];
+        let mut extra = tris.clone();
+        retain_patch_geometry(&mut tris,&mut stairs,&mut extra,&s);
+        assert_eq!(tris.len(),2, "far-away geometry is removed before cleanup and rail generation");
+        assert_eq!(stairs,[true,false]);
+        assert_eq!(extra.len(),2);
+        assert_eq!(patch_clip(&s),(-13.,-13.,141.,77.));
+        let crossing = Tri { v:[[-200.,2.,0.],[200.,2.,0.],[200.,3.,0.]], material:1 };
+        assert!(patch_triangle(&s,&crossing), "a face crossing the patch is retained with all corners outside");
+    }
+
+    #[test]
+    fn patch_context_preserves_closed_solids_beyond_eight_metres() {
+        let bar = |x0:f32,x1:f32,top:f32,depth:f32| {
+            let p = |x:f32,y:f32,z:f32| Vec3::new(x,32.+y,z);
+            let (a,b,c,d) = (p(x0,-0.1,top),p(x1,-0.1,top),p(x1,0.1,top),p(x0,0.1,top));
+            let down = Vec3::Z*depth;
+            let quads = [[a,b,c,d],[d-down,c-down,b-down,a-down],
+                [a-down,b-down,b,a],[c-down,d-down,d,c],
+                [d-down,a-down,a,d],[b-down,c-down,c,b]];
+            quads.into_iter().flat_map(|q| [[q[0],q[1],q[2]],[q[0],q[2],q[3]]]).collect::<Vec<_>>()
+        };
+        // This long solid's closing cap is 10.5 m beyond the cell edge.
+        // Omitting it makes the solid appear open to the buried-face filter.
+        let mut full = bar(-10.5,1.,1.,1.);
+        full.extend(bar(0.5,2.5,0.8,0.5));
+        let expected = crate::plies::buried_faces(&full);
+        assert!(expected.contains(&20) && expected.contains(&21), "the inner cap is buried: {expected:?}");
+        let mut tris:Vec<_> = full.iter().map(|t| Tri { v:t.map(|p| p.to_array()), material:1 }).collect();
+        let mut stairs = vec![false;tris.len()];
+        let s = crate::tiles::Selection { size:64.,baked:Default::default(),missing:vec![(0,0)],live_only:vec![(0,0)],stale:0 };
+        retain_patch_geometry(&mut tris,&mut stairs,&mut Vec::new(),&s);
+        assert_eq!(tris.len(),full.len(),"closed-solid context stays complete");
+        let filtered:Vec<_> = tris.iter().map(|t| t.v.map(Vec3::from_array)).collect();
+        assert_eq!(crate::plies::buried_faces(&filtered),expected);
+    }
+}
+
+/// Provenance bits of static triangle tags. The static layout uses bits 0-15
+/// (surface, seam pattern) and 30 (NO_GRIND); 28-31 only mark moving bodies.
+/// A baked tile keeps both stair variants and the gap-fill floors marked, so
+/// the in-game settings choose without a rebake (2026-10-24: the stairs
+/// setting had no effect on baked areas).
+pub const URAMP_TAG: u32 = 1 << 22;
+/// A step rebuilt by the unflagged detector (UnflaggedStairs on).
+pub const USTEP_TAG: u32 = 1 << 23;
+/// A gap-fill floor (GTA's bullet/camera copy or the prebaked floor map) in
+/// tiles baked before 2026-10-26; no longer made (design
+/// 2026-10-26-one-source-collision 4.1) and never shown.
+pub const FALLBACK_TAG: u32 = 1 << 24;
+/// A step rebuilt from a STAIRS-flagged ramp (DetailedStairs on).
+pub const STEP_TAG: u32 = 1 << 25;
+/// The STAIRS-flagged ramp a step replaced (DetailedStairs off).
+pub const RAMP_TAG: u32 = 1 << 26;
+/// From GTA's live collision at play time, not from a baked tile.
+pub const LIVE_TAG: u32 = 1 << 27;
+/// Thin solid box under a tube or visible-model rail, in tiles baked before
+/// 2026-10-26; no longer made (design 4.5) and never shown. They came after
+/// the 2026-10-20 13:28 test where the Vespucci park felt right; the 10-24
+/// tests report invisible edges, a launching lip at rail ends and boxes not
+/// lining up with the rail.
+pub const RAILBOX_TAG: u32 = 1 << 29;
+/// A triangle of a park's visible model (HighResParks on, visparks.rs).
+pub const PARKMESH_TAG: u32 = 1 << 19;
+/// A GTA park triangle the visible model replaces (shown with HighResParks off).
+pub const PARKGTA_TAG: u32 = 1 << 18;
+/// With PARKMESH: the uncovered piece of a GTA park triangle the visible
+/// model cut (design 2026-10-26-one-source-collision 1.3), not a visible one.
+pub const PARKCUT_TAG: u32 = 1 << 17;
+pub const PROVENANCE_TAGS: u32 = PARKMESH_TAG | PARKGTA_TAG | PARKCUT_TAG | URAMP_TAG | USTEP_TAG | FALLBACK_TAG | STEP_TAG | RAMP_TAG | LIVE_TAG;
+/// GTAxSkate StepRails (World page, default off): every stair nose grindable.
+pub static STEP_RAILS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Whether a static triangle with these provenance bits belongs to the world
+/// under the current settings.
+pub fn shown(tag: u32) -> bool {
+    use std::sync::atomic::Ordering::Relaxed;
+    let detailed = DETAILED_STAIRS.load(Relaxed);
+    let unflagged = detailed && crate::stairs::ENABLED.load(Relaxed);
+    let parks = crate::visparks::HIGH_RES_PARKS.load(Relaxed);
+    !((tag & PARKMESH_TAG != 0 && !parks)
+        || (tag & PARKGTA_TAG != 0 && parks)
+        || (tag & STEP_TAG != 0 && !detailed)
+        || (tag & RAMP_TAG != 0 && detailed)
+        || (tag & USTEP_TAG != 0 && !unflagged)
+        || (tag & URAMP_TAG != 0 && unflagged)
+        || tag & (FALLBACK_TAG | RAILBOX_TAG) != 0)
+}
+
+/// What `clean_static` adds to each triangle's tag (by `svwc::surfaces::key`)
+/// and, for a bake, the triangles of the other setting of each switch.
+#[derive(Default)]
+pub struct Cleaned {
+    pub tags: rustc_hash::FxHashMap<u64, u32>,
+    pub alternatives: Vec<(Tri, u32)>,
+    /// Added park triangles: the GTA triangle whose surface record they take.
+    pub surface_from: rustc_hash::FxHashMap<u64, u64>,
+}
+
+impl Cleaned {
+    pub fn tag_of(&self, t: &Tri) -> u32 {
+        self.tags.get(&svwc::surfaces::key(&t.v)).copied().unwrap_or(0)
+    }
+
+    /// The key of the surface record (audio, seam) a triangle uses: its own,
+    /// or for an added park triangle that of the GTA triangle it replaced.
+    pub fn surface_key(&self, t: &Tri) -> u64 {
+        let k = svwc::surfaces::key(&t.v);
+        self.surface_from.get(&k).copied().unwrap_or(k)
+    }
+}
+
+/// The same static cleanup for live bounds and offline resources. `variants`
+/// (the bake): both stair variants and every gap fill, marked; otherwise the
+/// current settings apply directly.
+pub fn clean_static(tris: &mut Vec<Tri>, stairs: &[bool], tubes: &[(svwc::bounds::V3, svwc::bounds::V3, f32)], mut extra: Vec<Tri>, census: &mut Census, variants: bool) -> Cleaned {
+    use std::sync::atomic::Ordering::Relaxed;
+    let mut cleaned = Cleaned::default();
+    let no_grind = skate_host::bridge::NO_GRIND_TAG;
+    let detailed = variants || DETAILED_STAIRS.load(Relaxed);
+    // Only GTA's own STAIRS-flagged ramps: unflagged candidates (steep
+    // slopes, park ramps) matched coping tubes and other detail as
+    // "flights" and cut holes into bowls and slopes (2026-10-20). No park
+    // candidates either (2026-10-23 22:05: "the bowl recognises as stairs").
+    let (mut steps, ramps) = if detailed {
+        census.stair_flagged = stairs.iter().filter(|&&s| s).count();
+        svwc::clean::stairs_from_detail_keeping(tris, stairs, &[], &mut extra)
+    } else {
+        (Vec::new(), Vec::new())
+    };
+    // Walking ramps over steps the same collision already has (Vespucci
+    // park, 2026-10-25 marks 3/4/7/8): the steps stay, the ramp becomes the
+    // DetailedStairs-off variant like a flagged one.
+    // Pieces with nothing under them stay, shown like steps (2026-10-25
+    // 19:50: the ramp was the only floor at the foot of the pool stairs).
+    let (over_steps, ramp_pieces) = if detailed { svwc::clean::ramps_over_steps(tris) } else { (Vec::new(), Vec::new()) };
+    steps.extend(ramp_pieces);
+    let ramps: Vec<Tri> = ramps.into_iter().chain(over_steps).collect();
+    // Unflagged concrete flights (stairs.rs, A: opt-in), clear of coping tubes.
+    let unflagged = variants || (detailed && crate::stairs::ENABLED.load(Relaxed));
+    let (unflagged_steps, unflagged_ramps) = if unflagged {
+        crate::stairs::rebuild_keeping(tris, tubes)
+    } else {
+        (Vec::new(), Vec::new())
+    };
+    // High-res parks (design 2026-10-25-park-surfaces-from-visible): GTA's
+    // coarse park collision replaced like for like by the visible model;
+    // stairs (ramps, steps, ramp pieces) never take part.
+    let mut park_added: Vec<Tri> = Vec::new();
+    // Live cells need DetailedStairs on: only then are the stair ramps and
+    // steps known and kept out (peer review 2026-10-26).
+    if variants || (detailed && crate::visparks::HIGH_RES_PARKS.load(Relaxed)) {
+        let stairs: Vec<Tri> = ramps.iter().chain(&steps).chain(&unflagged_steps).chain(&unflagged_ramps).copied().collect();
+        let parks = crate::visparks::replace(tris, &stairs);
+        census.park_replaced = parks.removed.len();
+        census.park_added = parks.added.len();
+        if variants {
+            // GTA's park as it was, cleaned of its own repeats and hidden
+            // layers like the rest (2026-10-26 park bake: 142 m2 layered).
+            let mut removed = parks.removed;
+            svwc::clean::drop_repeats(&mut removed);
+            svwc::clean::drop_hidden_layers(&mut removed, |_| true, |_| true);
+            cleaned.alternatives.extend(removed.into_iter().map(|t| (t, PARKGTA_TAG)));
+        }
+        for ((t, from), cut) in parks.added.iter().zip(parks.surface_from).zip(parks.cut) {
+            let k = svwc::surfaces::key(&t.v);
+            *cleaned.tags.entry(k).or_default() |= PARKMESH_TAG | if cut { PARKCUT_TAG } else { 0 };
+            cleaned.surface_from.insert(k, from);
+        }
+        park_added = parks.added;
+    }
+    census.stair_ramps = ramps.len() + if variants { 0 } else { unflagged_ramps.len() };
+    if variants {
+        cleaned.alternatives.extend(ramps.into_iter().map(|t| (t, RAMP_TAG)));
+        for t in &unflagged_ramps {
+            cleaned.tags.insert(svwc::surfaces::key(&t.v), URAMP_TAG);
+        }
+        tris.extend(unflagged_ramps);
+        cleaned.alternatives.extend(unflagged_steps.into_iter().map(|t| (t, USTEP_TAG | no_grind)));
+    } else {
+        steps.extend(unflagged_steps);
+    }
+    census.steps = steps.len();
+    census.repeats = svwc::clean::drop_repeats(tris);
+    census.over_ground = svwc::clean::drop_over_ground(tris);
+    for t in &steps {
+        cleaned.tags.insert(svwc::surfaces::key(&t.v), STEP_TAG | no_grind);
+    }
+    tris.extend(steps);
+    // No gap fills (design 2026-10-26-one-source-collision 4.1, Manatros:
+    // "remove unnecessary fallbacks, they just muddy the waters"): GTA's
+    // bullet/camera copy only serves the stair rebuild above.
+    drop(extra);
+    census.coplanar = svwc::clean::drop_coplanar_layers(tris);
+    // Faces fully covered by a parallel face close in front (design 2).
+    // Switchable variants (steps, unflagged ramps) neither go nor cover.
+    let tag = |t: &Tri| cleaned.tags.get(&svwc::surfaces::key(&t.v)).copied().unwrap_or(0);
+    let switchable = |t: &Tri| tag(t) & (STEP_TAG | URAMP_TAG) != 0;
+    census.hidden = svwc::clean::drop_hidden_layers(tris, |t| !switchable(t), |t| !switchable(t));
+    // The parks' visible surfaces after every cleanup pass: the repeat and
+    // coplanar-layer passes dropped some of them as layers of the visible
+    // model and left floors without collision (2026-10-26 park bakes). The
+    // hidden-layer pass runs again with them: only park triangles may go
+    // (a GTA face must stay for HighResParks off), covered by anything.
+    tris.extend(park_added);
+    census.hidden += svwc::clean::drop_hidden_layers(tris, |t| tag(t) & PARKMESH_TAG != 0, |t| !switchable(t));
+    cleaned
 }
 
 /// `parent` placed by `child`: the child's frame first, then the parent's
@@ -612,7 +934,7 @@ fn decode_primitive(b: &Bvh, clip: (f32, f32, f32, f32), out: &mut Vec<Tri>, cen
 /// byte 0 & 7), quantum `+0x90`, centre `+0xA0`, vertices `+0xB0` (i16 x 3),
 /// counts `+0xD0`/`+0xD4`, materials `+0xF0` (8 B), polygon material index
 /// `+0x118`, material count `+0x120`, decoded by `svwc::bounds::geometry`.
-fn decode_geometry(b: &Bvh, clip: (f32, f32, f32, f32), out: &mut Vec<Tri>, census: &mut Census) {
+fn decode_geometry(b: &Bvh, clip: (f32, f32, f32, f32), out: &mut Vec<Tri>, stairs: Option<&mut Vec<bool>>, census: &mut Census) {
     let mut h = [0u8; 0x130];
     if !read_mem(b.bound, &mut h) {
         census.failed += 1;
@@ -644,7 +966,8 @@ fn decode_geometry(b: &Bvh, clip: (f32, f32, f32, f32), out: &mut Vec<Tri>, cens
         poly_material.clear();
     }
     let mut counts = Counts::default();
-    svwc::bounds::geometry(
+    let mut unused = Vec::new();
+    svwc::bounds::geometry_marked(
         &vb,
         &pb,
         &material_table,
@@ -654,6 +977,7 @@ fn decode_geometry(b: &Bvh, clip: (f32, f32, f32, f32), out: &mut Vec<Tri>, cens
         &b.place(),
         clip,
         out,
+        stairs.unwrap_or(&mut unused),
         &mut counts,
     );
     census.add(counts);
@@ -752,7 +1076,7 @@ mod tests {
             table.put((3 + k) * STRIDE, &(f.inst.at() | 2).to_le_bytes());
         }
         let level = Level { base: table.at() as usize, image: (0x1000, 0x7FFF_0000_0000) };
-        let (tris, census, seen) = level.walk([0.0, 0.0], 128.0).expect("walk");
+        let (tris, census, seen, _) = level.walk([0.0, 0.0], 128.0).expect("walk");
         assert_eq!(census.bvh, 10);
         assert_eq!(census.in_range, 2, "the far one and the fillers are out of reach");
         assert_eq!((census.spare, census.filtered, census.filled), (1, 0, 0), "the bullet-only copy repeats the map: nothing to fill");
@@ -842,7 +1166,7 @@ mod tests {
             table.put((3 + k) * STRIDE, &(f.inst.at() | 2).to_le_bytes());
         }
         let level = Level { base: table.at() as usize, image: (0x1000, 0x7FFF_0000_0000) };
-        let (tris, census, _) = level.walk([0.0, 0.0], 128.0).expect("walk");
+        let (tris, census, _, _) = level.walk([0.0, 0.0], 128.0).expect("walk");
         assert_eq!(census.composites, 1, "{census}");
         assert_eq!(census.children_used, 2, "the bullet-only child is only a gap filler: {census}");
         assert_eq!((census.spare, census.filled, census.children_filtered), (1, 0, 0), "{census}");
@@ -851,5 +1175,35 @@ mod tests {
         // The composite's mesh child sits at the child frame's offset (5, 0, 0).
         assert!(tris.iter().any(|t| t.v[0] == [6.0, 2.0, 3.0] && t.material == 4), "{census}");
         assert!(tris.iter().filter(|t| t.material == 9).all(|t| t.v.iter().all(|p| p[1] >= 50.0)), "box child offset by its frame");
+    }
+}
+
+#[cfg(test)]
+mod provenance_tests {
+    use super::*;
+
+    #[test]
+    fn settings_pick_one_stair_variant_and_never_a_fallback() {
+        // Defaults: detailed stairs on, unflagged off.
+        assert!(shown(STEP_TAG) && !shown(RAMP_TAG));
+        assert!(!shown(USTEP_TAG) && shown(URAMP_TAG));
+        assert!(shown(LIVE_TAG) && shown(0));
+        // Gap fills and rail boxes of older tiles never show (design 2026-10-26 4.4).
+        assert!(!shown(FALLBACK_TAG) && !shown(RAILBOX_TAG) && !shown(RAILBOX_TAG | 3));
+    }
+
+    #[test]
+    fn a_bake_keeps_the_flagged_ramp_beside_its_steps() {
+        let (a, b, c, d) = ([0., 0., 0.18], [2., 0., 0.18], [2., 1.2, 0.72], [0., 1.2, 0.72]);
+        let mut tris = vec![Tri { v: [a, b, c], material: 1 }, Tri { v: [a, c, d], material: 1 },
+            Tri { v: [[5., 5., 0.], [6., 5., 0.], [5., 6., 0.]], material: 2 }];
+        let cleaned = clean_static(&mut tris, &[true, true, false], &[], Vec::new(), &mut Census::default(), true);
+        let ramps: Vec<_> = cleaned.alternatives.iter().filter(|(_, t)| t & RAMP_TAG != 0).collect();
+        assert_eq!(ramps.len(), 2, "both ramp triangles kept as the other variant");
+        let steps = tris.iter().filter(|t| cleaned.tag_of(t) & STEP_TAG != 0).count();
+        assert!(steps >= 6, "steps built into the world: {steps}");
+        assert!(tris.iter().filter(|t| cleaned.tag_of(t) & STEP_TAG != 0)
+            .all(|t| cleaned.tag_of(t) & skate_host::bridge::NO_GRIND_TAG != 0), "no grinding on step faces");
+        assert!(!tris.iter().any(|t| t.v == [a, b, c]), "the ramp is not in the world");
     }
 }

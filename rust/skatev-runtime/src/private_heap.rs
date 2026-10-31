@@ -9,7 +9,7 @@
 //! 16-byte aligned blocks; larger alignments over-allocate and keep the
 //! original pointer just before the aligned block.
 use std::alloc::{GlobalAlloc, Layout};
-use std::sync::atomic::{AtomicIsize, Ordering};
+use std::sync::atomic::{AtomicIsize, AtomicUsize, Ordering};
 
 type Handle = isize;
 
@@ -27,6 +27,13 @@ const HEAP_ZERO_MEMORY: u32 = 0x8;
 const MIN_ALIGN: usize = 16;
 
 static HEAP: AtomicIsize = AtomicIsize::new(0);
+/// Bytes the runtime holds right now (requested sizes), for the memory log:
+/// GTA's process grew to 10 GB in the rc7 test and nothing said whose it was.
+static LIVE: AtomicUsize = AtomicUsize::new(0);
+
+pub fn live_bytes() -> usize {
+    LIVE.load(Ordering::Relaxed)
+}
 
 fn heap() -> Handle {
     let h = HEAP.load(Ordering::Acquire);
@@ -57,22 +64,36 @@ pub struct PrivateHeap;
 
 unsafe impl GlobalAlloc for PrivateHeap {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        unsafe { allocate(layout, 0) }
+        let p = unsafe { allocate(layout, 0) };
+        if !p.is_null() {
+            LIVE.fetch_add(layout.size(), Ordering::Relaxed);
+        }
+        p
     }
 
     unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
-        unsafe { allocate(layout, HEAP_ZERO_MEMORY) }
+        let p = unsafe { allocate(layout, HEAP_ZERO_MEMORY) };
+        if !p.is_null() {
+            LIVE.fetch_add(layout.size(), Ordering::Relaxed);
+        }
+        p
     }
 
     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
         let h = HEAP.load(Ordering::Acquire);
         let block = if simple(layout) { ptr } else { unsafe { *(ptr as *mut *mut u8).sub(1) } };
         unsafe { HeapFree(h, 0, block) };
+        LIVE.fetch_sub(layout.size(), Ordering::Relaxed);
     }
 
     unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
         if simple(layout) && layout.align() <= new_size {
-            return unsafe { HeapReAlloc(HEAP.load(Ordering::Acquire), 0, ptr, new_size) };
+            let p = unsafe { HeapReAlloc(HEAP.load(Ordering::Acquire), 0, ptr, new_size) };
+            if !p.is_null() {
+                LIVE.fetch_add(new_size, Ordering::Relaxed);
+                LIVE.fetch_sub(layout.size(), Ordering::Relaxed);
+            }
+            return p;
         }
         // Over-aligned: allocate, copy, free (std's default strategy).
         let Ok(new_layout) = Layout::from_size_align(new_size, layout.align()) else { return std::ptr::null_mut() };

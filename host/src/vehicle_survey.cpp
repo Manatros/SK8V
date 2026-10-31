@@ -3,7 +3,10 @@
 #include "runtime_bridge.h"
 #include <windows.h>
 #include <cstdint>
+#include <algorithm>
+#include <cmath>
 #include <cstdio>
+#include <vector>
 
 namespace vehiclesurvey {
 namespace {
@@ -74,7 +77,26 @@ void Tick(RuntimeBridge& runtime, float radius, void (*log)(const char*)) {
         const int candidate = vehicles[pick - 1];
         vehicles[pick - 1] = 0;  // not again this call
         const std::uint32_t m = Call<std::uint32_t>(GET_ENTITY_MODEL, candidate);
-        if (runtime.VehicleNeedsShape(m)) v = candidate, model = m;
+        if (!runtime.VehicleNeedsShape(m)) continue;
+        // A model whose skeleton gives non-finite bone positions is broken
+        // (IVPack cars on 3889: NaN bumper_r); GTA crashed twice right after
+        // such a car was surveyed (2026-10-17 23:20, 23:36). Never probed.
+        static std::vector<std::uint32_t> s_broken;
+        if (std::find(s_broken.begin(), s_broken.end(), m) != s_broken.end()) continue;
+        const int bone = Call<int>(GET_ENTITY_BONE_INDEX_BY_NAME, candidate, "bumper_r");
+        if (bone >= 0) {
+            const Vector3 b = Call<Vector3>(GET_WORLD_POSITION_OF_ENTITY_BONE, candidate, bone);
+            if (!(std::isfinite(b.x) && std::isfinite(b.y) && std::isfinite(b.z))) {
+                s_broken.push_back(m);
+                if (log) {
+                    char line[160];
+                    std::snprintf(line, sizeof(line), "vehicle shape: model %08x not surveyed (non-finite bone positions: broken add-on model)", m);
+                    log(line);
+                }
+                continue;
+            }
+        }
+        v = candidate, model = m;
     }
     if (!v) return;
     {

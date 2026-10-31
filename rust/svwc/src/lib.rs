@@ -191,6 +191,22 @@ impl<R: Read + Seek> Cache<R> {
     }
 }
 
+/// Prints every triangle of the .svwc file in SVWC_DUMP (inspection aid:
+/// `SVWC_DUMP=<file> cargo test -p svwc dump_file -- --ignored --nocapture`).
+#[cfg(test)]
+mod dump {
+    #[test]
+    #[ignore = "inspection aid; needs SVWC_DUMP"]
+    fn dump_file() {
+        let Ok(path) = std::env::var("SVWC_DUMP") else { return };
+        let tris = super::Cache::open(std::path::Path::new(&path)).unwrap().read_all().unwrap();
+        for t in &tris {
+            println!("{} {:?}", t.material, t.v);
+        }
+        println!("{} triangles", tris.len());
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -254,6 +270,17 @@ mod tests {
         let mut cache = roundtrip(&[t], 64.0);
         assert_eq!(cache.query([-1.0, -1.0], 0.5).unwrap(), vec![t]);
         assert!(cache.query([32.0, 32.0], 0.5).unwrap().is_empty());
+    }
+
+    #[test]
+    fn dense_origin_tile_keeps_valid_world_geometry() {
+        let tris: Vec<_> = (0..50_001).map(|i| {
+            let mut t = tri(1.0, 1.0, 1.0, 3);
+            for p in &mut t.v { p[2] = i as f32 * 0.001; }
+            t
+        }).collect();
+        let mut cache = roundtrip(&tris, 64.0);
+        assert_eq!(cache.query([1.0, 1.0], 1.0).unwrap().len(), tris.len());
     }
 
     #[test]

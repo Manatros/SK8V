@@ -34,6 +34,12 @@ $toolsBin=Join-Path $PSScriptRoot 'bin'
 New-Item -ItemType Directory -Force $toolsBin | Out-Null
 Copy-Item -LiteralPath $decoder -Destination (Join-Path $toolsBin 'skate-xma.exe') -Force
 Copy-Item -LiteralPath $decoder -Destination (Join-Path $package 'skate-xma.exe') -Force
+foreach ($worldTool in 'skatev-world-cache.exe', 'visual-rails.exe') {
+    $worldExe = Join-Path $targetDir "$Profile/$worldTool"
+    if (-not (Test-Path -LiteralPath $worldExe)) { throw "Expected world tool missing: $worldTool" }
+    Copy-Item -LiteralPath $worldExe -Destination (Join-Path $toolsBin $worldTool) -Force
+    Copy-Item -LiteralPath $worldExe -Destination (Join-Path $package $worldTool) -Force
+}
 Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'prepare-skate-audio.py') -Destination $package -Force
 # Base default.xex decoder for tools/prepare-audio-tuning.py --xex.
 $xexArgs=@('build','--locked','--manifest-path',$Manifest,'-p','skatev-ped-export','--bin','xex_image')

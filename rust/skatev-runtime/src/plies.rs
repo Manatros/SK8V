@@ -245,6 +245,8 @@ pub fn abutting_caps_reusing(tris: &[[Vec3; 3]], kept: impl Fn(usize, f32) -> Op
 const SOLID_TRIS: usize = 64;
 /// Widest such solid (bounding box diagonal, metres).
 const SOLID_SPAN: f32 = 12.0;
+/// Context needed to preserve closed-solid ownership at a clipped patch edge.
+pub(crate) const SOLID_CONTEXT: f32 = SOLID_SPAN + 1.0;
 /// The part of a face a board can touch: within this of its top.
 const REACH: f32 = 0.3;
 /// Share of a face's samples that must lie inside the other solid.
@@ -353,7 +355,7 @@ pub fn buried_faces_reusing(tris: &[[Vec3; 3]], kept: impl Fn(usize, f32) -> Opt
     for (i, t) in tris.iter().enumerate() {
         let Some(&own) = solid_index.get(&solid_of[i]) else { continue };
         // Its own solid and those it may be buried in span SOLID_SPAN at most.
-        if let Some(was) = kept(i, SOLID_SPAN + 1.0) {
+        if let Some(was) = kept(i, SOLID_CONTEXT) {
             if was {
                 out.push(i);
             }
