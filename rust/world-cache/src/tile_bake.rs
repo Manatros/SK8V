@@ -456,6 +456,51 @@ fn is_world_bound(path: &Path) -> bool {
         && !name.starts_with("hi@")
 }
 
+/// How far under a visible rail line a baked prop bar's top goes (m) ...
+const BAR_UNDER_LINE: f32 = 0.02;
+/// ... for prop vertices within this distance aside of the line ...
+const BAR_REACH: f32 = 0.06;
+/// ... and from this far under to this far over the line's height (m).
+const BAR_BAND: (f32, f32) = (0.01, 0.03);
+
+/// A baked rail prop's square bar whose flat top is at the visible rail line
+/// kicked the board off the grind with its edges ("a small lip on both sides",
+/// 2026-10-31 marks 1031-2/3, La Mesa: bar top 24.010, line 24.011). Its top
+/// vertices (shared by the top and side faces, so the bar stays closed) go
+/// `BAR_UNDER_LINE` under the line, like track rails ride over GTA's rail
+/// boxes. Only prop triangles (`is_prop`) move; the line keeps its height.
+fn lower_prop_bars(tris: &mut [svwc::Tri], is_prop: &[bool], rails: &[Vec<Vec3>]) {
+    if rails.is_empty() { return; }
+    // The lowest target per distinct prop vertex position.
+    let mut target: std::collections::HashMap<[u32; 3], f32> = std::collections::HashMap::new();
+    for (t, _) in tris.iter().zip(is_prop).filter(|(_, p)| **p) {
+        for v in t.v {
+            let p = Vec3::from_array(v);
+            for r in rails {
+                for w in r.windows(2) {
+                    let (a, b) = (w[0], w[1]);
+                    let d = (b - a).truncate();
+                    let len2 = d.length_squared();
+                    let s = if len2 > 1e-12 { ((p - a).truncate().dot(d) / len2).clamp(0.0, 1.0) } else { 0.0 };
+                    let on = a + (b - a) * s;
+                    if on.truncate().distance(p.truncate()) > BAR_REACH { continue; }
+                    let dz = p.z - on.z;
+                    if dz < -BAR_BAND.0 || dz > BAR_BAND.1 { continue; }
+                    let z = on.z - BAR_UNDER_LINE;
+                    let e = target.entry(v.map(f32::to_bits)).or_insert(f32::MAX);
+                    *e = e.min(z);
+                }
+            }
+        }
+    }
+    if target.is_empty() { return; }
+    for (t, _) in tris.iter_mut().zip(is_prop).filter(|(_, p)| **p) {
+        for v in &mut t.v {
+            if let Some(&z) = target.get(&v.map(f32::to_bits)) { v[2] = z; }
+        }
+    }
+}
+
 /// A prop drawable with an embedded bound, inflated once per model and
 /// placed many times. Drawable bound: `gtaDrawable` +0xC8.
 struct PropModel { system: Vec<u8>, graphics: Vec<u8>, bound: u64 }
@@ -1216,6 +1261,14 @@ fn bake(
         let mut validation = Validation::default();
         let at = Vec3::new((c.0 as f32 + 0.5) * size, (c.1 as f32 + 0.5) * size, 0.);
         let mut data = spool.around(at, margin, size)?;
+        // Baked rail prop bars sit 2 cm under the visible rail line along
+        // them (design 2026-10-31-round-rail-collision): only prop faces move.
+        {
+            let all: Vec<[Vec3; 3]> = data.tris.iter().map(|t| t.v.map(Vec3::from_array)).collect();
+            let rails = SkateVRuntime::visrails::rails_in([at.x, at.y], size * 0.5 + margin, &all);
+            let is_prop: Vec<bool> = data.origins.iter().map(|&o| spool.names[o as usize].to_ascii_lowercase().ends_with(".ymap")).collect();
+            lower_prop_bars(&mut data.tris, &is_prop, &rails);
+        }
         // Face origins by vertex key, before the cleanup reorders and drops.
         let input_origin: std::collections::HashMap<u64, u32> = data.tris.iter().zip(&data.origins)
             .map(|(t, &o)| (svwc::surfaces::key(&t.v), o)).collect();
@@ -1852,6 +1905,39 @@ mod batch_tests {
         }
         println!("STORY_INPUTS selected_world={} raw_selected={} flat={} matching_bytes={matched} changed_bytes={changed} missing_from_flat={missing_flat} extra_flat={extra}", selected_names.len(), selected.len(), old.len());
     }
+    #[test]
+    fn a_prop_bar_under_a_visible_rail_drops_two_centimetres_and_stays_closed() {
+        // La Mesa: an 8 cm bar, top 24.01, under a visible line at 24.011;
+        // a post under it, and a non-prop face at the bar's top height.
+        let cuboid = |lo: [f32; 3], hi: [f32; 3]| -> Vec<svwc::Tri> {
+            let c = |i: u32| [if i & 1 == 0 { lo[0] } else { hi[0] }, if i & 2 == 0 { lo[1] } else { hi[1] }, if i & 4 == 0 { lo[2] } else { hi[2] }];
+            [[0, 2, 3, 1], [4, 5, 7, 6], [0, 1, 5, 4], [2, 6, 7, 3], [0, 4, 6, 2], [1, 3, 7, 5]].iter()
+                .flat_map(|q| [[c(q[0]), c(q[1]), c(q[2])], [c(q[0]), c(q[2]), c(q[3])]])
+                .map(|v| svwc::Tri { v, material: 1 }).collect()
+        };
+        let mut tris = cuboid([0.0, -0.04, 23.93], [3.0, 0.04, 24.01]);
+        let bar = tris.len();
+        tris.extend(cuboid([1.45, -0.03, 23.5], [1.55, 0.03, 23.93]));
+        let other = svwc::Tri { v: [[1.0, -0.02, 24.01], [1.2, -0.02, 24.01], [1.0, 0.02, 24.01]], material: 2 };
+        tris.push(other);
+        let mut is_prop = vec![true; tris.len()];
+        *is_prop.last_mut().unwrap() = false;
+        let line = vec![vec![Vec3::new(-0.05, 0.0, 24.011), Vec3::new(3.05, 0.0, 24.011)]];
+        lower_prop_bars(&mut tris, &is_prop, &line);
+        let tops: Vec<f32> = tris[..bar].iter().flat_map(|t| t.v).map(|v| v[2]).filter(|z| *z > 23.95).collect();
+        assert!(!tops.is_empty() && tops.iter().all(|z| (z - (24.011 - BAR_UNDER_LINE)).abs() < 1e-4), "{tops:?}");
+        // Closed: every bar vertex is either the bottom (23.93) or the new top.
+        assert!(tris[..bar].iter().flat_map(|t| t.v).all(|v| (v[2] - 23.93).abs() < 1e-4 || (v[2] - 23.991).abs() < 1e-4));
+        // The post (its top at the bar's bottom, 8 cm under the line) and the non-prop face stay.
+        assert!(tris[bar..tris.len() - 1].iter().flat_map(|t| t.v).all(|v| v[2] <= 23.93 + 1e-4));
+        assert_eq!(tris.last().unwrap().v, other.v);
+        // No line, or a line 10 cm higher: nothing moves.
+        let mut same = cuboid([0.0, -0.04, 23.93], [3.0, 0.04, 24.01]);
+        let flags = vec![true; same.len()];
+        lower_prop_bars(&mut same, &flags, &[vec![Vec3::new(0.0, 0.0, 24.11), Vec3::new(3.0, 0.0, 24.11)]]);
+        assert!(same.iter().flat_map(|t| t.v).all(|v| v[2] == 23.93 || v[2] == 24.01));
+    }
+
     #[test]
     fn authored_prop_bound_is_placed_and_clipped_like_map_collision() {
         // A drawable whose embedded bound (+0xC8) is one authored box of
