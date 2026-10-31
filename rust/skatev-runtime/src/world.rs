@@ -576,7 +576,7 @@ fn build_area_rules(center: Vec3, tris: impl Iterator<Item = ([[f32; 3]; 3], u32
     let visual = {
         let mut visual = visual;
         crate::rails::join_ends_within(&mut visual, crate::rails::BEND_GAP);
-        visual
+        onto_solid_tops(visual, &gta, &rail_grid)
     };
     if !visual.is_empty() {
         found = off_lines(found, &visual, VISUAL_SIDE, VISUAL_UP);
@@ -1648,6 +1648,42 @@ fn onto_tops_indexed(rails: Vec<Vec<Vec3>>, gta: &[[Vec3; 3]], grid: &crate::gri
     }).collect()
 }
 
+/// A visible rail lies on a solid top when a walkable surface is this close
+/// to the line's height (metres) ...
+const SOLID_TOP_BAND: f32 = 0.03;
+
+/// Visible-model rails ride `RAIL_CLEAR` over a solid top under them, as
+/// track lines do over GTA's rail boxes (design 2026-10-31-round-rail-
+/// collision). A baked rail prop's square bar has its top exactly at the
+/// visible line; its edges then kicked the board off the grind ("a small lip
+/// on both sides", 2026-10-31 marks 1031-2/3). Only walkable tops within
+/// `TOP_REACH` aside and `SOLID_TOP_BAND` of the line count; elsewhere the
+/// line keeps its height.
+fn onto_solid_tops(rails: Vec<Vec<Vec3>>, gta: &[[Vec3; 3]], grid: &crate::grid::XyGrid) -> Vec<Vec<Vec3>> {
+    let top_near = |p: Vec3, side: bevy_math::Vec2| -> Option<f32> {
+        (-6..=6).filter_map(|k| {
+            let q = p.truncate() + side * (k as f32 * TOP_REACH / 6.0);
+            grid.at(q.x, q.y).iter().filter_map(|&i| {
+                let t = gta[i as usize];
+                let n = (t[1] - t[0]).cross(t[2] - t[0]).normalize_or_zero();
+                if n.z < 0.7 { return None; }
+                let tri = svwc::Tri { v: t.map(|v| v.to_array()), material: 0 };
+                svwc::clean::floor_at(&tri, [q.x, q.y]).filter(|z| (z - p.z).abs() <= SOLID_TOP_BAND)
+            }).fold(None, |m: Option<f32>, z| Some(m.map_or(z, |m| m.max(z))))
+        }).fold(None, |m: Option<f32>, z| Some(m.map_or(z, |m| m.max(z))))
+    };
+    rails.into_iter().map(|r| {
+        let lift: Vec<f32> = (0..r.len()).map(|i| {
+            let (a, b) = (r[i.saturating_sub(1)], r[(i + 1).min(r.len() - 1)]);
+            let along = (b - a).truncate().normalize_or_zero();
+            let side = bevy_math::Vec2::new(-along.y, along.x);
+            top_near(r[i], side).map_or(0.0, |top| (top + RAIL_CLEAR - r[i].z).max(0.0))
+        }).collect();
+        let lift = even_lifts(&lift);
+        r.iter().zip(lift).map(|(p, l)| Vec3::new(p.x, p.y, p.z + l)).collect()
+    }).collect()
+}
+
 /// Most a point's lift onto a top may stand out from its neighbours'
 /// (metres).
 const LIFT_STEP: f32 = 0.05;
@@ -2465,6 +2501,28 @@ mod top_tests {
         let c = |i: u32| Vec3::new(if i & 1 == 0 { lo.x } else { hi.x }, if i & 2 == 0 { lo.y } else { hi.y }, if i & 4 == 0 { lo.z } else { hi.z }).to_array();
         [[0, 2, 3, 1], [4, 5, 7, 6], [0, 1, 5, 4], [2, 6, 7, 3], [0, 4, 6, 2], [1, 3, 7, 5]].iter()
             .flat_map(|q| [[c(q[0]), c(q[1]), c(q[2])], [c(q[0]), c(q[2]), c(q[3])]]).collect()
+    }
+
+    /// Design 2026-10-31-round-rail-collision: a visible rail exactly on a
+    /// baked rail prop's 8 cm bar (La Mesa, z 24.011 over a 24.01 top) rides
+    /// RAIL_CLEAR over it; lines with no top at their height keep theirs.
+    #[test]
+    fn a_visible_rail_rides_one_centimetre_over_the_bar_under_it() {
+        let bar: Vec<[Vec3; 3]> = cuboid(Vec3::new(0.0, -0.04, 23.93), Vec3::new(3.0, 0.04, 24.01)).into_iter()
+            .map(|t| t.map(Vec3::from_array)).collect();
+        let grid = crate::grid::XyGrid::triangles(1.0, &bar);
+        let line = |z: f32| vec![vec![Vec3::new(0.2, 0.0, z), Vec3::new(1.5, 0.0, z), Vec3::new(2.8, 0.0, z)]];
+        // On the top: lifted to top + RAIL_CLEAR along its whole length.
+        for p in &onto_solid_tops(line(24.011), &bar, &grid)[0] {
+            assert!((p.z - (24.01 + RAIL_CLEAR)).abs() < 1e-4, "{p}");
+        }
+        // 10 cm over the bar (a free rail above something): unchanged.
+        assert!(onto_solid_tops(line(24.11), &bar, &grid)[0].iter().all(|p| (p.z - 24.11).abs() < 1e-6));
+        // Already clear by more than RAIL_CLEAR: never pulled down.
+        assert!(onto_solid_tops(line(24.025), &bar, &grid)[0].iter().all(|p| (p.z - 24.025).abs() < 1e-6));
+        // Nothing under the line: unchanged.
+        let far = vec![vec![Vec3::new(10.0, 5.0, 24.0), Vec3::new(12.0, 5.0, 24.0)]];
+        assert!(onto_solid_tops(far.clone(), &bar, &grid)[0].iter().all(|p| (p.z - 24.0).abs() < 1e-6));
     }
 
     #[test]
