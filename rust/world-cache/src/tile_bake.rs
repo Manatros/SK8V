@@ -52,20 +52,6 @@ fn touches_live(t: &svwc::Tri, size: f32, cells: &BTreeSet<tiles::Cell>) -> bool
     })
 }
 
-/// Authored physical drawable bounds, already placed in GTA metres. Stateful
-/// geometry contributes only an active-cell footprint; it never enters the
-/// invariant spool. Clip by intersection, retaining crossing walls/floors.
-fn prop_collision(triangles: Vec<rage_formats::Triangle>, clip: (f32, f32, f32, f32)) -> Collision {
-    let tris: Vec<_> = triangles.into_iter().filter_map(|t| {
-        let v = t.vertices.map(|v| [v.x, v.y, v.z]);
-        if !v.iter().flatten().all(|x| x.is_finite()) { return None; }
-        let lo = v.map(Vec3::from_array).into_iter().reduce(Vec3::min).unwrap();
-        let hi = v.map(Vec3::from_array).into_iter().reduce(Vec3::max).unwrap();
-        (lo.x <= clip.2 && hi.x >= clip.0 && lo.y <= clip.3 && hi.y >= clip.1)
-            .then_some(svwc::Tri { v, material: t.material })
-    }).collect();
-    Collision { stairs: vec![false; tris.len()], tris, spare: Vec::new(), origins: Vec::new() }
-}
 
 /// A tile's origin name table (design 2026-10-26 6.2).
 #[derive(Default)]
@@ -470,12 +456,16 @@ fn is_world_bound(path: &Path) -> bool {
         && !name.starts_with("hi@")
 }
 
-/// Placed props (benches, bins, ramps) are not baked: they stay live in the
-/// host's dynamic world, exact template or box, as up to 2026-10-21. Baking
-/// them (275cff4, 10-22) doubled surfaces where map geometry already had them
-/// and, with the host then dropping static objects from the live world, left
-/// benches without any collision (Manatros 2026-10-24, baked and live alike).
-const BAKE_PROPS: bool = false;
+/// A prop drawable's embedded bound, placed and walked like a map bound (so
+/// its cylinders and capsules become tube rails). Drawable bound: `gtaDrawable` +0xC8.
+fn decode_drawable(bytes: &[u8], place: &Place, clip: bounds::Clip, out: &mut Collision) -> Result<(), String> {
+    let (system, graphics) = prepare_rsc7(bytes).map_err(|e| e.to_string())?;
+    let r = ResReader { system: &system, graphics: &graphics };
+    let head = r.resolve(SYSTEM_BASE, 0xD0).ok_or("invalid drawable header")?;
+    let bound = u64_le(head, 0xC8);
+    if bound == 0 { return Ok(()); }
+    walk(&r, bound, &mut Vec::new(), (0, 0), place, clip, out)
+}
 
 fn story_world_bounds(meta: &Path) -> Vec<PathBuf> {
     interiors::layered(&meta.join("base"), Some(&meta.join("layers")), "ybn", is_world_bound)
@@ -930,13 +920,14 @@ fn bake(
     // The legacy exporter already placed these bounds; the tiled path must
     // retain that source too. Do this after station support expansion so map
     // order cannot omit furniture near a newly selected station boundary.
+    // One owner per placement (design 2026-10-31-static-authored-prop-collision):
+    // only placements GTA keeps out of its object pool are baked; benches and
+    // other object-pool props stay live in the host (b4c201a), doors dynamic.
     let mut prop_library = props::Library::load(meta);
     prop_library.require_static_placements();
-    let mut prop_counts = crate::primitives::Counts::default();
-    let mut prop_placed = 0usize;
-    let mut prop_furniture = 0usize;
+    let mut prop_stats = props::Stats::default();
     let mut prop_triangles = 0usize;
-    let mut prop_dynamic_doors = 0usize;
+    let mut prop_models: std::collections::HashMap<PathBuf, Option<Vec<u8>>> = std::collections::HashMap::new();
     for p in interiors::layered(&meta.join("base"), Some(&meta.join("layers")), "ytyp", |_| true) {
         sources.insert(p.display().to_string(), hash(&vfs::read(&p)?));
     }
@@ -949,36 +940,33 @@ fn bake(
         let stateful = toggled.contains(&interiors::stem_hash(&p))
             || header.flags & rage_formats::YmapHeader::FLAG_SCRIPTED != 0;
         // Props of a state-dependent or scripted map file are left out of the
-        // bake. Marking their cells live (10-22) moved 140 cells, the whole
-        // Vespucci/Del Perro beach strip included, to raw live collision
-        // without the baked rules (Manatros' 10-24 test: "the problem parts
-        // still have the old problems"). Event props there have no skate
-        // collision until a proper per-prop live path exists.
-        if stateful || !BAKE_PROPS {
-            sources.insert(p.display().to_string(), hash(&bytes));
-            continue;
+        // bake (skip only). Marking their cells live (10-22) moved 140 cells,
+        // the whole Vespucci/Del Perro beach strip included, to raw live
+        // collision without the baked rules (Manatros' 10-24 test: "the problem
+        // parts still have the old problems").
+        sources.insert(p.display().to_string(), hash(&bytes));
+        if stateful { continue; }
+        let mut data = Collision::default();
+        for (model, at, reach) in prop_library.static_placements(&bytes, &p, &mut prop_stats) {
+            let [x, y] = [at.position.x, at.position.y];
+            if x + reach < clip.0 || x - reach > clip.2 || y + reach < clip.1 || y - reach > clip.3 { continue; }
+            let Some(model_bytes) = prop_models.entry(model.clone()).or_insert_with(|| vfs::read(&model).ok()) else { continue };
+            let [r, f, u] = at.axes.map(|v| [v.x, v.y, v.z]);
+            let place = Place { rows: [r, f, u, [x, y, at.position.z]], identity: false };
+            decode_drawable(model_bytes, &place, clip, &mut data).map_err(|e| format!("{}: {e}", model.display()))?;
         }
-        let mut triangles = Vec::new();
-        let mut stats = props::Stats::default();
-        prop_library.bake_ymap(&bytes, &p,
-            crate::primitives::Options { primitives: true, all_flags: false },
-            &mut prop_counts, &mut triangles, &mut stats, &mut BTreeSet::new());
-        prop_placed += stats.placed;
-        prop_furniture += stats.mlo_furniture;
-        prop_dynamic_doors += stats.dynamic_doors;
-        let mut data = prop_collision(triangles, if stateful { (-20000.,-20000.,20000.,20000.) } else { clip });
-        if stateful {
-            mark_live_cells(&data, size, &mut live_cells);
-        } else {
+        if !data.tris.is_empty() {
             prop_triangles += data.tris.len();
             spool.push(&mut data, &support, size, &format!("props:{}", p.display()))?;
         }
-        sources.insert(p.display().to_string(), hash(&bytes));
     }
-    for p in prop_library.used_model_paths() {
-        sources.insert(p.display().to_string(), hash(&vfs::read(p)?));
+    let mut used: Vec<_> = prop_models.iter().filter(|(_, b)| b.is_some()).map(|(p, _)| p.clone()).collect();
+    used.sort();
+    for p in used {
+        sources.insert(p.display().to_string(), hash(prop_models[&p].as_deref().unwrap()));
     }
-    eprintln!("Authored prop collision: {prop_placed} exterior + {prop_furniture} interior placements; {prop_triangles} invariant triangles; {prop_dynamic_doors} door leaves retained by dynamic collision");
+    eprintln!("Authored prop collision: {} exterior + {} interior static placements; {prop_triangles} invariant triangles; {} object-pool placements left live; {} door leaves retained by dynamic collision",
+        prop_stats.placed, prop_stats.mlo_furniture, prop_stats.live_owned, prop_stats.dynamic_doors);
     drop(prop_library);
     for p in vfs::files_under(meta, "ymf").unwrap_or_default() {
         sources.insert(p.display().to_string(), hash(&vfs::read(&p)?));
@@ -1467,7 +1455,8 @@ fn bake(
         start.elapsed().as_secs_f64()
     );
     let report = format!(
-        "{report}Authored drawable prop placements: {prop_placed} exterior + {prop_furniture} interior; invariant source triangles: {prop_triangles}; dynamic doors excluded: {prop_dynamic_doors}\nShared input loading and cleanup: {load_time:.3} s\nTile workers: {workers}\nPlaced metro/subway bounds: {}\n{}",
+        "{report}Authored drawable prop placements (static only): {} exterior + {} interior; invariant source triangles: {prop_triangles}; object-pool placements left live: {}; dynamic doors excluded: {}\nShared input loading and cleanup: {load_time:.3} s\nTile workers: {workers}\nPlaced metro/subway bounds: {}\n{}",
+        prop_stats.placed, prop_stats.mlo_furniture, prop_stats.live_owned, prop_stats.dynamic_doors,
         stations.len(),
         validation.report()
     );
@@ -1840,21 +1829,25 @@ mod batch_tests {
         println!("STORY_INPUTS selected_world={} raw_selected={} flat={} matching_bytes={matched} changed_bytes={changed} missing_from_flat={missing_flat} extra_flat={extra}", selected_names.len(), selected.len(), old.len());
     }
     #[test]
-    fn authored_prop_faces_keep_crossings_and_stateful_ownership() {
-        let make = |v: [[f32;3];3], material| rage_formats::Triangle {
-            vertices: v.map(|p| rage_formats::math::Vec3::new(p[0],p[1],p[2])), material };
-        let crossing = [[63.,1.,0.],[65.,1.,0.],[63.,2.,0.]];
-        let wall = [[64.,1.,0.],[64.,2.,0.],[64.,1.,2.]];
-        let data = prop_collision(vec![make(crossing,9),make(wall,11),
-            make([[100.,100.,0.],[101.,100.,0.],[100.,101.,0.]],5),
-            make([[f32::NAN,0.,0.],[1.,0.,0.],[0.,1.,0.]],5)],(62.,0.,64.,3.));
-        assert_eq!(data.tris.len(),2,"crossing or boundary faces remain; outside/nonfinite faces do not");
-        assert_eq!(data.stairs,[false,false],"no guessed stair conversion");
-        assert_eq!(data.tris.iter().map(|t|t.material).collect::<Vec<_>>(),[9,11]);
-        let mut live = BTreeSet::new();
-        mark_live_cells(&data,64.,&mut live);
-        assert_eq!(live,BTreeSet::from([(0,0),(1,0)]));
-        assert!(data.tris.iter().all(|t|touches_live(t,64.,&live)),"stateful prop footprints exclude their static faces");
+    fn authored_prop_bound_is_placed_and_clipped_like_map_collision() {
+        // A drawable whose embedded bound (+0xC8) is one authored box of
+        // half-size (1, 2, 3), placed at (64, 1, 0) across a tile boundary.
+        let mut b = vec![0u8; 0x800];
+        b[0xC8..0xD0].copy_from_slice(&(SYSTEM_BASE + 0x600).to_le_bytes());
+        b[0x610] = 3;
+        for (at, v) in [(0x620, [1f32, 2., 3.]), (0x630, [-1., -2., -3.])] {
+            for (i, f) in v.into_iter().enumerate() { b[at + i * 4..at + i * 4 + 4].copy_from_slice(&f.to_le_bytes()); }
+        }
+        let bytes = rage_formats::resource::build_rsc7(165, &b, &[]);
+        let place = Place { rows: [[1., 0., 0.], [0., 1., 0.], [0., 0., 1.], [64., 1., 0.]], identity: false };
+        let mut data = Collision::default();
+        decode_drawable(&bytes, &place, (62., 0., 64., 3.), &mut data).unwrap();
+        assert!(!data.tris.is_empty(), "faces crossing the clip remain");
+        assert_eq!(data.stairs.len(), data.tris.len());
+        assert!(data.tris.iter().all(|t| t.v.iter().all(|v| (62.9..=65.1).contains(&v[0]))), "placed at x 63..65");
+        let mut far = Collision::default();
+        decode_drawable(&bytes, &place, (200., 200., 264., 264.), &mut far).unwrap();
+        assert!(far.tris.is_empty(), "faces outside the clip are not emitted");
     }
     #[test]
     fn stateful_mask_covers_crossing_floors_and_vertical_walls() {

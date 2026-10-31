@@ -27,6 +27,8 @@ pub struct Stats {
     pub mlo_furniture: usize,
     pub without_bound: usize,
     pub dynamic_doors: usize,
+    /// Static-only placements left to the live path (object-pool archetypes).
+    pub live_owned: usize,
     pub instances: Vec<BakedInstance>,
     /// Owned model-space geometry keyed by GTA archetype/model identity.
     pub templates: BTreeMap<u32, Vec<Triangle>>,
@@ -152,6 +154,8 @@ pub struct Library {
     pub arch: HashMap<u32, Archetype>,
     pub mlos: HashMap<u32, (Vec<YmapEntity>, Vec<rage_formats::MloEntitySet>)>,
     door_archetypes: std::collections::HashSet<u32>,
+    /// Archetypes GTA streams into the object pool (flag bit 17): live-owned.
+    object_archetypes: std::collections::HashSet<u32>,
     mlo_doors: HashMap<u32, interiors::doors::Metadata>,
     pub models: BTreeMap<u32, PathBuf>,
     /// Model bounds decoded so far (None: the drawable has no bound).
@@ -166,6 +170,7 @@ impl Library {
         let mut arch: HashMap<u32, Archetype> = HashMap::new();
         let mut mlos: HashMap<u32, (Vec<YmapEntity>, Vec<rage_formats::MloEntitySet>)> = HashMap::new();
         let mut door_archetypes = std::collections::HashSet::new();
+        let mut object_archetypes = std::collections::HashSet::new();
         let mut mlo_doors = HashMap::new();
         for p in layered(&base, Some(&layers), "ytyp", |_| true) {
             let Ok(bytes) = crate::vfs::read(&p) else { continue };
@@ -174,6 +179,8 @@ impl Library {
             for a in y.archetypes {
                 if doors.archetypes.contains(&a.name_hash) { door_archetypes.insert(a.name_hash); }
                 else { door_archetypes.remove(&a.name_hash); }
+                if doors.object_archetypes.contains(&a.name_hash) { object_archetypes.insert(a.name_hash); }
+                else { object_archetypes.remove(&a.name_hash); }
                 arch.insert(a.name_hash, a);
             }
             for m in y.mlos {
@@ -183,12 +190,85 @@ impl Library {
         }
         let models: BTreeMap<u32, PathBuf> =
             layered(&base, Some(&layers), "ydr", |_| true).into_iter().map(|p| (stem_hash(&p), p)).collect();
-        Library { arch, mlos, door_archetypes, mlo_doors, models, bounds: HashMap::new(), static_only: false }
+        Library { arch, mlos, door_archetypes, object_archetypes, mlo_doors, models, bounds: HashMap::new(), static_only: false }
     }
 
-    /// The tiled world retains authored drawable bounds for all non-door
-    /// placements. Moving door leaves remain dynamic templates.
+    /// One owner per placement (design 2026-10-31-static-authored-prop-collision):
+    /// the tiled world bakes only placements the live path can never see.
+    /// Object-pool archetypes (flag bit 17, benches) stay live-owned, doors stay
+    /// dynamic templates, and of MLO furniture only the common entities are
+    /// baked: named entity sets can be toggled by scripts at any time.
     pub fn require_static_placements(&mut self) { self.static_only = true; }
+
+    /// Whether the static-only bake leaves this placement to the live path.
+    fn live_owned(&self, e: &YmapEntity) -> bool {
+        self.static_only && self.object_archetypes.contains(&e.archetype_hash)
+    }
+
+    /// The drawable a placement would bake (door and live-owned checks first).
+    fn drawable_for(&self, e: &YmapEntity, entity_door: bool, stats: &mut Stats) -> Option<(f32, PathBuf)> {
+        if entity_door || self.door_archetypes.contains(&e.archetype_hash) {
+            stats.dynamic_doors += 1;
+            return None;
+        }
+        if self.live_owned(e) {
+            stats.live_owned += 1;
+            return None;
+        }
+        let a = self.arch.get(&e.archetype_hash)?;
+        if a.asset_type != Archetype::ASSET_TYPE_DRAWABLE {
+            return None;
+        }
+        // Model-space reach of the archetype box (scaled), for clipping before decoding.
+        let reach = a.bb_min.length().max(a.bb_max.length()) * e.scale_xy.abs().max(e.scale_z.abs()).max(1.0);
+        Some((reach, self.models.get(&a.model_hash())?.clone()))
+    }
+
+    /// The MLO entities one placed interior contributes: its common entities,
+    /// plus its default-on sets unless only static placements are wanted.
+    fn mlo_children(&self, inst: &rage_formats::MloInstance) -> Option<Vec<YmapEntity>> {
+        let (children, sets) = self.mlos.get(&inst.entity.archetype_hash)?;
+        let mut all = children.clone();
+        if !self.static_only {
+            for set in sets {
+                if inst.default_entity_sets.contains(&set.name_hash) {
+                    all.extend(set.entities.iter().cloned());
+                }
+            }
+        }
+        Some(all)
+    }
+
+    /// The static drawable placements of one ymap, with their model files and
+    /// world transforms, for the tiled bake's own bound walker (which turns
+    /// cylinders and capsules into tube rails as it does for map collision).
+    pub fn static_placements(&self, bytes: &[u8], path: &Path, stats: &mut Stats) -> Vec<(PathBuf, BakedInstance, f32)> {
+        let mut out = Vec::new();
+        let Ok(entities) = parse_ymap_entities(bytes) else { return out };
+        let doors = interiors::doors::read(bytes).unwrap_or_else(|e| panic!("door metadata {}: {e}", path.display()));
+        for e in entities.iter().filter(|e| !e.is_mlo_instance) {
+            stats.entities += 1;
+            if let Some((reach, model)) = self.drawable_for(e, doors.entity_is_door(e), stats) {
+                stats.placed += 1;
+                out.push((model, BakedInstance::from_placement(e.archetype_hash, &|v| entity_world(e, v)), reach));
+            }
+        }
+        if let Ok(instances) = parse_ymap_mlo_instances(bytes) {
+            for inst in instances {
+                let Some(children) = self.mlo_children(&inst) else { continue };
+                let mlo_door = self.mlo_doors.get(&inst.entity.archetype_hash);
+                for c in &children {
+                    let door = mlo_door.is_some_and(|d| d.entity_is_door(c));
+                    if let Some((reach, model)) = self.drawable_for(c, door, stats) {
+                        stats.mlo_furniture += 1;
+                        let world = |v| interiors::place(&inst.entity, c.to_world(v), false);
+                        out.push((model, BakedInstance::from_placement(c.archetype_hash, &world), reach));
+                    }
+                }
+            }
+        }
+        out
+    }
 
     /// One placement's world-space collision, if it is a static drawable
     /// with a bound. Moving door leaves remain model templates; neither their
@@ -199,6 +279,10 @@ impl Library {
              baked: &mut BTreeSet<u32>) -> bool {
         if entity_door || self.door_archetypes.contains(&e.archetype_hash) {
             stats.dynamic_doors += 1;
+            return false;
+        }
+        if self.live_owned(e) {
+            stats.live_owned += 1;
             return false;
         }
         let Some(a) = self.arch.get(&e.archetype_hash) else { return false };
@@ -217,13 +301,6 @@ impl Library {
         true
     }
 
-    /// Sources whose embedded physical bounds have been consulted. Include
-    /// models without a bound too: adding a bound must invalidate an old bake.
-    pub fn used_model_paths(&self) -> Vec<&Path> {
-        let mut paths: Vec<_> = self.bounds.keys().filter_map(|h| self.models.get(h).map(PathBuf::as_path)).collect();
-        paths.sort();
-        paths
-    }
 
     /// Every static placement of one ymap: plain entities, then interior
     /// furniture (MLO-local entities, then the MLO placement).
@@ -239,14 +316,8 @@ impl Library {
         }
         if let Ok(instances) = parse_ymap_mlo_instances(bytes) {
             for inst in instances {
-                let Some((children, sets)) = self.mlos.get(&inst.entity.archetype_hash) else { continue };
+                let Some(all_children) = self.mlo_children(&inst) else { continue };
                 let mlo_door = self.mlo_doors.get(&inst.entity.archetype_hash).cloned();
-                let mut all_children = children.clone();
-                for set in sets {
-                    if inst.default_entity_sets.contains(&set.name_hash) {
-                        all_children.extend(set.entities.iter().cloned());
-                    }
-                }
                 for c in &all_children {
                     let world = |v| interiors::place(&inst.entity, c.to_world(v), false);
                     if self.place(c, mlo_door.as_ref().is_some_and(|d| d.entity_is_door(c)), &world, options, counts, out, stats, baked) {
@@ -552,9 +623,60 @@ mod tests {
             &mut output,&mut static_stats,&mut BTreeSet::new());
         assert_eq!(output.len(),12,"non-door neighbor is baked while door is excluded");
         assert_eq!(static_stats.instances[0].position.x,5.0);
-        assert_eq!(lib.used_model_paths(),vec![base.join("fixture_door.ydr").as_path()]);
         // Test-created directory only, under the process temp root.
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+    /// Design 2026-10-31: a static-only bake leaves object-pool archetypes
+    /// (flag bit 17, benches) to the live path and bakes static map pieces
+    /// (ramps, rails, metro fixtures); doors stay dynamic either way.
+    #[test]
+    fn static_placements_leave_object_pool_archetypes_live() {
+        use rage_formats::resource::build_rsc7;
+        let put32=|b:&mut [u8],o:usize,v:u32| b[o..o+4].copy_from_slice(&v.to_le_bytes());
+        let model=rage_joaat("fixture_door");
+        for (flags,live) in [(0x2000_0020u32,false),(0x2002_0000,true)] {
+            let dir=std::env::temp_dir().join(format!("skatev-static-fixture-{}-{flags:x}",std::process::id()));
+            let base=dir.join("base");std::fs::create_dir_all(&base).unwrap();
+            let mut ytyp=interiors::doors::tests::fixture();
+            put32(&mut ytyp,0x458,model);put32(&mut ytyp,0x46c,Archetype::ASSET_TYPE_DRAWABLE);put32(&mut ytyp,0x470,model);
+            ytyp[0x480]=0;put32(&mut ytyp,0x40c,flags);
+            std::fs::write(base.join("fixture.ytyp"),build_rsc7(2,&ytyp,&[])).unwrap();
+            std::fs::write(base.join("fixture_door.ydr"),build_rsc7(165,&fragment_fixture(),&[])).unwrap();
+            let mut ymap=interiors::doors::tests::fixture();
+            put32(&mut ymap,0x70,3_545_841_574);put32(&mut ymap,0x74,368);
+            put64_test(&mut ymap,0x160,2);ymap[0x168]=2;
+            put32(&mut ymap,0x84,16);put64_test(&mut ymap,0x180,3);put64_test(&mut ymap,0x188,(128<<12)|3);
+            put32(&mut ymap,0x208,model);put32(&mut ymap,0x288,model);
+            let mut lib=Library::load(&dir);
+            lib.require_static_placements();
+            let mut stats=Stats::default();
+            let placed=lib.static_placements(&build_rsc7(2,&ymap,&[]),&base.join("fixture.ymap"),&mut stats);
+            assert_eq!(stats.dynamic_doors,1,"the linked door stays dynamic first");
+            if live {
+                assert!(placed.is_empty());
+                assert_eq!(stats.live_owned,1,"bench-like archetype left to the live path");
+            } else {
+                assert_eq!(placed.len(),1,"static map piece is baked");
+                assert_eq!(placed[0].0,base.join("fixture_door.ydr"));
+                assert_eq!(placed[0].1.position.x,5.0);
+                assert_eq!(stats.live_owned,0);
+            }
+            std::fs::remove_dir_all(&dir).unwrap();
+        }
+    }
+    #[test]
+    fn static_only_bakes_mlo_common_entities_not_entity_sets() {
+        let e=|h:u32| YmapEntity{archetype_hash:h,flags:0,guid:0,position:Vec3::new(0.,0.,0.),rotation:[0.,0.,0.,1.],scale_xy:1.,scale_z:1.,parent_index:-1,lod_dist:0.,is_mlo_instance:false};
+        let set=rage_formats::MloEntitySet{name_hash:7,locations:vec![0],entities:vec![e(2)]};
+        let mut lib=Library{arch:HashMap::new(),mlos:HashMap::from([(9,(vec![e(1)],vec![set]))]),door_archetypes:Default::default(),
+            object_archetypes:Default::default(),mlo_doors:HashMap::new(),models:BTreeMap::new(),bounds:HashMap::new(),static_only:false};
+        let mut parent=e(9);parent.is_mlo_instance=true;
+        let inst=rage_formats::MloInstance{entity:parent,group_id:0,floor_id:0,default_entity_sets:vec![7],num_exit_portals:0};
+        assert_eq!(lib.mlo_children(&inst).unwrap().len(),2,"legacy path keeps default-on sets");
+        lib.require_static_placements();
+        let only=lib.mlo_children(&inst).unwrap();
+        assert_eq!(only.len(),1,"scripts can toggle sets: only the common entity is static");
+        assert_eq!(only[0].archetype_hash,1);
     }
     fn put64_test(b:&mut [u8],o:usize,v:u64) { b[o..o+8].copy_from_slice(&v.to_le_bytes()); }
     #[test]
