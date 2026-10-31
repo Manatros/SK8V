@@ -66,6 +66,66 @@ pub fn write(path: &Path, objects: &[Object]) -> io::Result<()> {
     write_policy(path)
 }
 
+fn record(o: &Object) -> Vec<u8> {
+    let mut body = Vec::new();
+    body.extend(o.id.to_le_bytes()); body.extend(o.model.to_le_bytes());
+    for z in o.z { body.extend(z.to_le_bytes()); }
+    body.extend((o.mesh.len() as u32).to_le_bytes());
+    for v in o.mesh.iter().flatten().flatten() { body.extend(v.to_le_bytes()); }
+    body.extend((o.footprint.len() as u32).to_le_bytes());
+    for v in o.footprint.iter().flatten().flatten() { body.extend(v.to_le_bytes()); }
+    body
+}
+
+/// Writes the same file as `write` without holding every object in memory
+/// (Story Mode: about 100,000 objects, 4 GB; the whole-map bake was stopped
+/// for low memory while the exporter held them, 2026-10-31). Records go to
+/// a spool file first; `finish` copies them into their cells.
+pub struct Writer { path: std::path::PathBuf, spool: std::path::PathBuf, file: io::BufWriter<std::fs::File>, at: u64, ids: BTreeSet<u32>, table: BTreeMap<(i32, i32), Vec<(u64, u64)>> }
+impl Writer {
+    pub fn new(path: &Path) -> io::Result<Writer> {
+        let spool = path.with_extension("visbars-spool");
+        Ok(Writer { path: path.to_owned(), file: io::BufWriter::new(std::fs::File::create(&spool)?), spool, at: 0, ids: BTreeSet::new(), table: BTreeMap::new() })
+    }
+    pub fn add(&mut self, o: &Object) -> io::Result<()> {
+        use std::io::Write;
+        if !valid(o) || !self.ids.insert(o.id) { return Err(invalid()); }
+        let r = record(o);
+        self.file.write_all(&r)?;
+        for c in cells(o.bounds(), CELL) { self.table.entry(c).or_default().push((self.at, r.len() as u64)); }
+        self.at += r.len() as u64;
+        Ok(())
+    }
+    pub fn len(&self) -> usize { self.ids.len() }
+    pub fn finish(self) -> io::Result<()> {
+        use std::io::{Read, Seek, SeekFrom, Write};
+        let Writer { path, spool, file, table, .. } = self;
+        drop(file.into_inner().map_err(|e| e.into_error())?);
+        let mut head = b"SVVB".to_vec();
+        head.extend(1u32.to_le_bytes()); head.extend(CELL.to_le_bytes()); head.extend((table.len() as u32).to_le_bytes());
+        let mut offset = 16 + table.len() as u64 * 20;
+        for ((x, y), recs) in &table {
+            head.extend(x.to_le_bytes()); head.extend(y.to_le_bytes()); head.extend((recs.len() as u32).to_le_bytes());
+            head.extend(offset.to_le_bytes());
+            offset += recs.iter().map(|r| r.1).sum::<u64>();
+        }
+        let mut out = io::BufWriter::new(std::fs::File::create(&path)?);
+        out.write_all(&head)?;
+        let mut src = std::fs::File::open(&spool)?;
+        let mut buf = Vec::new();
+        for recs in table.values() {
+            for &(at, len) in recs {
+                buf.resize(len as usize, 0);
+                src.seek(SeekFrom::Start(at))?; src.read_exact(&mut buf)?;
+                out.write_all(&buf)?;
+            }
+        }
+        out.flush()?; drop(out); drop(src);
+        std::fs::remove_file(&spool)?;
+        write_policy(&path)
+    }
+}
+
 // Use exactly the exporter Story/state receipt used by visible rails.
 pub fn write_policy(path: &Path) -> io::Result<()> { crate::visrails::write_policy(path) }
 pub fn verified_policy(path: &Path) -> bool { crate::visrails::verified_policy(path) }
@@ -519,6 +579,18 @@ mod tests {
         let mut bad = bytes; let offset = u64::from_le_bytes(bad[28..36].try_into().unwrap()) as usize;
         bad[offset+16..offset+20].copy_from_slice(&u32::MAX.to_le_bytes()); assert!(decode(&bad).is_err());
         std::fs::remove_file(&path).unwrap(); std::fs::remove_file(path.with_extension("visbars.policy")).unwrap();
+    }
+    #[test]
+    fn streamed_writer_matches_write() {
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../out/tests/visbars-stream");
+        std::fs::create_dir_all(&dir).unwrap();
+        let objects = [object(7,31.,33.,false), object(8,-5.,1.,true), object(9,60.,70.,false)];
+        let (a, b) = (dir.join("a.visbars"), dir.join("b.visbars"));
+        write(&a,&objects).unwrap();
+        let mut w = Writer::new(&b).unwrap(); for o in &objects { w.add(o).unwrap(); } w.finish().unwrap();
+        assert_eq!(std::fs::read(&a).unwrap(), std::fs::read(&b).unwrap());
+        assert!(verified_policy(&b)); assert!(!b.with_extension("visbars-spool").exists());
+        std::fs::remove_dir_all(&dir).unwrap();
     }
     #[test]
     fn live_mask_checks_whole_footprint_and_degenerate_projection() {

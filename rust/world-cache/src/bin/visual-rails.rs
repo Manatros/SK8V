@@ -323,7 +323,7 @@ fn export_bars(out: &Path, placed: &[(u32, Place)], archetypes: &HashMap<u32, Ar
         .filter(|n| !bar_shader(n)).map(rage_joaat).collect();
     // Cache only eligible High-LOD meshes, not entire drawables.
     let mut models: HashMap<u32, Option<(Vec<[V; 3]>, f32, usize)>> = HashMap::new();
-    let mut objects = Vec::new();
+    let mut objects = SkateVRuntime::visbars::Writer::new(out)?;
     let mut counts: BTreeMap<u32, (usize, usize)> = BTreeMap::new();
     for (hash, place) in placed {
         let Some(a) = archetypes.get(hash) else { continue };
@@ -361,11 +361,12 @@ fn export_bars(out: &Path, placed: &[(u32, Place)], archetypes: &HashMap<u32, Ar
         if !candidate(*height, scale_z, *count, (hi[0]-lo[0]).max(hi[1]-lo[1])) { continue; }
         let footprint = mesh.iter().map(|t| t.map(|p| [p[0],p[1]])).collect();
         let entry = counts.entry(a.model_hash()).or_default(); entry.0 += 1; entry.1 += mesh.len();
-        objects.push(Object { id: u32::try_from(objects.len())?, model: a.model_hash(), z: [lo[2]-0.15, hi[2]+0.15], mesh, footprint });
+        objects.add(&Object { id: u32::try_from(objects.len())?, model: a.model_hash(), z: [lo[2]-0.15, hi[2]+0.15], mesh, footprint })?;
     }
     for (model, (placements, triangles)) in counts { eprintln!("visbars model {model:08x}: {placements} candidates, {triangles} triangles"); }
-    SkateVRuntime::visbars::write(out, &objects)?;
-    eprintln!("wrote {} visible railing candidates to {}", objects.len(), out.display());
+    let n = objects.len();
+    objects.finish()?;
+    eprintln!("wrote {n} visible railing candidates to {}", out.display());
     Ok(())
 }
 
