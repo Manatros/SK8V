@@ -229,8 +229,10 @@ impl Library {
         if a.asset_type != Archetype::ASSET_TYPE_DRAWABLE {
             return None;
         }
-        // Model-space reach of the archetype box (scaled), for clipping before decoding.
-        let reach = a.bb_min.length().max(a.bb_max.length()) * e.scale_xy.abs().max(e.scale_z.abs()).max(1.0);
+        // Model-space reach of the archetype box: its farthest corner (scaled), for clipping before decoding.
+        let far = |l: f32, h: f32| l.abs().max(h.abs());
+        let corner = rage_formats::math::Vec3::new(far(a.bb_min.x, a.bb_max.x), far(a.bb_min.y, a.bb_max.y), far(a.bb_min.z, a.bb_max.z));
+        let reach = corner.length() * e.scale_xy.abs().max(e.scale_z.abs()).max(1.0);
         Some((reach, self.models.get(&a.model_hash())?.clone()))
     }
 

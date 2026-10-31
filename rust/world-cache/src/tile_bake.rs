@@ -456,15 +456,25 @@ fn is_world_bound(path: &Path) -> bool {
         && !name.starts_with("hi@")
 }
 
-/// A prop drawable's embedded bound, placed and walked like a map bound (so
-/// its cylinders and capsules become tube rails). Drawable bound: `gtaDrawable` +0xC8.
-fn decode_drawable(bytes: &[u8], place: &Place, clip: bounds::Clip, out: &mut Collision) -> Result<(), String> {
+/// A prop drawable with an embedded bound, inflated once per model and
+/// placed many times. Drawable bound: `gtaDrawable` +0xC8.
+struct PropModel { system: Vec<u8>, graphics: Vec<u8>, bound: u64 }
+
+/// `Ok(None)`: the drawable has no embedded bound (most map drawables).
+fn prop_model(bytes: &[u8]) -> Result<Option<PropModel>, String> {
     let (system, graphics) = prepare_rsc7(bytes).map_err(|e| e.to_string())?;
-    let r = ResReader { system: &system, graphics: &graphics };
-    let head = r.resolve(SYSTEM_BASE, 0xD0).ok_or("invalid drawable header")?;
-    let bound = u64_le(head, 0xC8);
-    if bound == 0 { return Ok(()); }
-    walk(&r, bound, &mut Vec::new(), (0, 0), place, clip, out)
+    let bound = {
+        let r = ResReader { system: &system, graphics: &graphics };
+        u64_le(r.resolve(SYSTEM_BASE, 0xD0).ok_or("invalid drawable header")?, 0xC8)
+    };
+    Ok((bound != 0).then_some(PropModel { system, graphics, bound }))
+}
+
+/// The bound placed and walked like a map bound (so its geometry capsules
+/// and cylinders become tube rails).
+fn decode_drawable(m: &PropModel, place: &Place, clip: bounds::Clip, out: &mut Collision) -> Result<(), String> {
+    let r = ResReader { system: &m.system, graphics: &m.graphics };
+    walk(&r, m.bound, &mut Vec::new(), (0, 0), place, clip, out)
 }
 
 fn story_world_bounds(meta: &Path) -> Vec<PathBuf> {
@@ -927,7 +937,8 @@ fn bake(
     prop_library.require_static_placements();
     let mut prop_stats = props::Stats::default();
     let mut prop_triangles = 0usize;
-    let mut prop_models: std::collections::HashMap<PathBuf, Option<Vec<u8>>> = std::collections::HashMap::new();
+    let mut prop_models: std::collections::HashMap<PathBuf, Option<PropModel>> = std::collections::HashMap::new();
+    let mut prop_failures: Vec<String> = Vec::new();
     for p in interiors::layered(&meta.join("base"), Some(&meta.join("layers")), "ytyp", |_| true) {
         sources.insert(p.display().to_string(), hash(&vfs::read(&p)?));
     }
@@ -950,23 +961,30 @@ fn bake(
         for (model, at, reach) in prop_library.static_placements(&bytes, &p, &mut prop_stats) {
             let [x, y] = [at.position.x, at.position.y];
             if x + reach < clip.0 || x - reach > clip.2 || y + reach < clip.1 || y - reach > clip.3 { continue; }
-            let Some(model_bytes) = prop_models.entry(model.clone()).or_insert_with(|| vfs::read(&model).ok()) else { continue };
+            let loaded = prop_models.entry(model.clone()).or_insert_with(|| {
+                let bytes = vfs::read(&model).ok()?;
+                sources.insert(model.display().to_string(), hash(&bytes));
+                prop_model(&bytes).unwrap_or_else(|e| { prop_failures.push(format!("{}: {e}", model.display())); None })
+            });
+            let Some(loaded) = loaded else { continue };
             let [r, f, u] = at.axes.map(|v| [v.x, v.y, v.z]);
             let place = Place { rows: [r, f, u, [x, y, at.position.z]], identity: false };
-            decode_drawable(model_bytes, &place, clip, &mut data).map_err(|e| format!("{}: {e}", model.display()))?;
+            // An unreadable bound is skipped and reported, never fatal (the old drawable_bound returned None).
+            if let Err(e) = decode_drawable(loaded, &place, clip, &mut data) {
+                prop_failures.push(format!("{}: {e}", model.display()));
+            }
         }
-        if !data.tris.is_empty() {
+        if !data.tris.is_empty() || !data.spare.is_empty() {
             prop_triangles += data.tris.len();
             spool.push(&mut data, &support, size, &format!("props:{}", p.display()))?;
         }
     }
-    let mut used: Vec<_> = prop_models.iter().filter(|(_, b)| b.is_some()).map(|(p, _)| p.clone()).collect();
-    used.sort();
-    for p in used {
-        sources.insert(p.display().to_string(), hash(prop_models[&p].as_deref().unwrap()));
-    }
-    eprintln!("Authored prop collision: {} exterior + {} interior static placements; {prop_triangles} invariant triangles; {} object-pool placements left live; {} with embedded collision disabled; {} door leaves retained by dynamic collision",
-        prop_stats.placed, prop_stats.mlo_furniture, prop_stats.live_owned, prop_stats.no_collision, prop_stats.dynamic_doors);
+    drop(prop_models);
+    prop_failures.sort();
+    prop_failures.dedup();
+    for f in prop_failures.iter().take(10) { eprintln!("prop bound skipped: {f}"); }
+    eprintln!("Authored prop collision: {} exterior + {} interior static placements; {prop_triangles} invariant triangles; {} object-pool placements left live; {} with embedded collision disabled; {} door leaves retained by dynamic collision; {} unreadable prop bounds skipped",
+        prop_stats.placed, prop_stats.mlo_furniture, prop_stats.live_owned, prop_stats.no_collision, prop_stats.dynamic_doors, prop_failures.len());
     drop(prop_library);
     for p in vfs::files_under(meta, "ymf").unwrap_or_default() {
         sources.insert(p.display().to_string(), hash(&vfs::read(&p)?));
@@ -1839,14 +1857,19 @@ mod batch_tests {
             for (i, f) in v.into_iter().enumerate() { b[at + i * 4..at + i * 4 + 4].copy_from_slice(&f.to_le_bytes()); }
         }
         let bytes = rage_formats::resource::build_rsc7(165, &b, &[]);
+        let model = prop_model(&bytes).unwrap().expect("embedded bound found");
+        let mut bare = b.clone();
+        bare[0xC8..0xD0].fill(0);
+        assert!(prop_model(&rage_formats::resource::build_rsc7(165, &bare, &[])).unwrap().is_none(), "no bound: nothing kept");
+        assert!(prop_model(b"not a resource").is_err(), "unreadable: reported, the bake skips it");
         let place = Place { rows: [[1., 0., 0.], [0., 1., 0.], [0., 0., 1.], [64., 1., 0.]], identity: false };
         let mut data = Collision::default();
-        decode_drawable(&bytes, &place, (62., 0., 64., 3.), &mut data).unwrap();
+        decode_drawable(&model, &place, (62., 0., 64., 3.), &mut data).unwrap();
         assert!(!data.tris.is_empty(), "faces crossing the clip remain");
         assert_eq!(data.stairs.len(), data.tris.len());
         assert!(data.tris.iter().all(|t| t.v.iter().all(|v| (62.9..=65.1).contains(&v[0]))), "placed at x 63..65");
         let mut far = Collision::default();
-        decode_drawable(&bytes, &place, (200., 200., 264., 264.), &mut far).unwrap();
+        decode_drawable(&model, &place, (200., 200., 264., 264.), &mut far).unwrap();
         assert!(far.tris.is_empty(), "faces outside the clip are not emitted");
     }
     #[test]

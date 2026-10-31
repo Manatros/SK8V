@@ -615,7 +615,9 @@ fn cut<'a>(t: &[[f32; 3]; 3], cover: impl Iterator<Item = &'a Used>) -> Vec<[[f3
     let ew = n.cross(eu);
     let to2 = |p: Vec3| Vec2::new((p - a).dot(eu), (p - a).dot(ew));
     let to3 = |q: Vec2| a + eu * q.x + ew * q.y;
-    let mut pieces: Vec<Vec<Vec2>> = vec![vec![to2(a), to2(b), to2(c)]];
+    let corners = [to2(a), to2(b), to2(c)];
+    let face_area = polygon_area(&corners);
+    let mut pieces: Vec<Vec<Vec2>> = vec![corners.to_vec()];
     let mut was_cut = false;
     for u in cover {
         let (v, limit) = (&u.v, u.limit);
@@ -668,10 +670,13 @@ fn cut<'a>(t: &[[f32; 3]; 3], cover: impl Iterator<Item = &'a Used>) -> Vec<[[f3
         // Cut remnants (design 2026-10-31 remnant cleanup): clipping leaves
         // near-duplicate and collinear corners whose fan made 100-300 tiny
         // triangles per railing mark (M23-M26) and the bowl connector (M21/22);
-        // the same surface with clean corners. A remnant narrower than
-        // REMNANT_WIDTH is a strip along the visible edge, not a surface.
-        let poly = if was_cut { simplify(&poly) } else { poly };
-        if poly.len() < 3 || (was_cut && convex_width(&poly) < REMNANT_WIDTH) { continue; }
+        // the same surface with clean corners (GTA's own corners always stay).
+        // A remnant narrower than REMNANT_WIDTH that is only a small part of
+        // its face is a strip along the visible edge, not a surface; a long
+        // thin face the visible mesh barely touched keeps its remnant.
+        let poly = if was_cut { simplify(&poly, &corners) } else { poly };
+        if poly.len() < 3 { continue; }
+        if was_cut && convex_width(&poly) < REMNANT_WIDTH && polygon_area(&poly) <= REMNANT_SHARE * face_area { continue; }
         for k in 1..poly.len() - 1 {
             let tri = [to3(poly[0]), to3(poly[k]), to3(poly[k + 1])];
             let area = (tri[1] - tri[0]).cross(tri[2] - tri[0]).length() / 2.0;
@@ -688,17 +693,21 @@ fn cut<'a>(t: &[[f32; 3]; 3], cover: impl Iterator<Item = &'a Used>) -> Vec<[[f3
 /// Narrowest cut remnant kept (m): a strip below this beside the visible
 /// surface is a gap no wheel can catch, not a surface to ride.
 const REMNANT_WIDTH: f32 = 0.02;
+/// ... and that is at most this share of its original face's area.
+const REMNANT_SHARE: f32 = 0.25;
 /// Corners closer than this to a neighbour or to the line through their
 /// neighbours carry no shape (m).
 const CORNER: f32 = 0.001;
 
-/// A convex remnant without near-duplicate or collinear corners.
-fn simplify(poly: &[Vec2]) -> Vec<Vec2> {
+/// A convex remnant without near-duplicate or collinear cut corners; the
+/// face's own corners are kept exactly (its neighbours share them).
+fn simplify(poly: &[Vec2], keep: &[Vec2]) -> Vec<Vec2> {
     let mut p = poly.to_vec();
     loop {
         let n = p.len();
         if n < 3 { return p; }
         let drop = (0..n).find(|&k| {
+            if keep.iter().any(|q| q.distance(p[k]) < 1e-6) { return false; }
             let (a, b, c) = (p[(k + n - 1) % n], p[k], p[(k + 1) % n]);
             let ac = c - a;
             a.distance(b) < CORNER || ac.length() < CORNER || ((b - a).perp_dot(ac) / ac.length()).abs() < CORNER
@@ -1225,9 +1234,21 @@ mod tests {
     }
 
     #[test]
+    fn a_long_thin_face_the_visible_mesh_barely_touches_keeps_its_remnant() {
+        // A 3 m x 1.5 cm lip top; a visible face covers only its first 10 cm.
+        let lip = [[0., 0., 0.], [3., 0., 0.], [3., 0.015, 0.]];
+        let cover = Used { v: [[-0.5, -0.5, 0.01], [0.1, -0.5, 0.01], [0.1, 0.5, 0.01]], partner: 0, limit: MATCH };
+        let kept: f32 = cut(&lip, [&cover].into_iter()).iter().map(area).sum();
+        let whole = area(&lip);
+        assert!(kept > 0.9 * whole, "remnant {kept} of {whole} must stay");
+    }
+
+    #[test]
     fn remnant_corners_lose_duplicates_and_collinear_points_only() {
         let sq = [Vec2::new(0., 0.), Vec2::new(0.5, 0.0002), Vec2::new(1., 0.), Vec2::new(1., 1.), Vec2::new(1.0002, 1.), Vec2::new(0., 1.)];
-        let s = simplify(&sq);
+        let s = simplify(&sq, &[]);
+        let kept = simplify(&sq, &[Vec2::new(0.5, 0.0002)]);
+        assert!(kept.contains(&Vec2::new(0.5, 0.0002)), "an original GTA corner is never moved: {kept:?}");
         assert_eq!(s.len(), 4, "{s:?}");
         assert!((polygon_area(&s) - 1.0).abs() < 1e-3);
         assert!((convex_width(&s) - 1.0).abs() < 1e-3);

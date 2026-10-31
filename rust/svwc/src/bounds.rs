@@ -80,6 +80,13 @@ pub struct Place {
 }
 
 impl Place {
+    /// Mean axis length: how a placed prop's scale widens its tubes (1 for map bounds).
+    pub fn scale(&self) -> f32 {
+        if self.identity { return 1.0; }
+        let len = |v: V3| (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt();
+        (len(self.rows[0]) + len(self.rows[1]) + len(self.rows[2])) / 3.0
+    }
+
     pub fn apply(&self, p: V3) -> V3 {
         if self.identity {
             return p;
@@ -283,7 +290,7 @@ pub fn geometry_marked(
         let ok = match kind {
             1 => local(u16_at(rec, 2)).map(|c| shapes::sphere(c, f32_at(rec, 4), &mut scratch)),
             2 => local(u16_at(rec, 2)).zip(local(u16_at(rec, 8))).map(|(a, b)| {
-                tube(place.apply(a), place.apply(b), f32_at(rec, 4));
+                tube(place.apply(a), place.apply(b), f32_at(rec, 4) * place.scale());
                 shapes::capsule(a, b, f32_at(rec, 4), &mut scratch)
             }),
             3 => match [4, 6, 8, 10].map(|o| local(u16_at(rec, o))) {
@@ -294,7 +301,7 @@ pub fn geometry_marked(
                 _ => None,
             },
             4 => local(u16_at(rec, 2)).zip(local(u16_at(rec, 8))).map(|(a, b)| {
-                tube(place.apply(a), place.apply(b), f32_at(rec, 4));
+                tube(place.apply(a), place.apply(b), f32_at(rec, 4) * place.scale());
                 shapes::cylinder(a, b, f32_at(rec, 4), &mut scratch)
             }),
             _ => None,
