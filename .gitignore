@@ -49,3 +49,9 @@ Thumbs.db
 
 # Python bytecode
 __pycache__/
+
+# Host test build outputs (host/tests/build-host-task.bat)
+host/tests/*.exe
+host/tests/*.obj
+host/tests/*.log
+host/tests/*.rsp

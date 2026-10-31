@@ -111,6 +111,14 @@ int wmain(int argc, wchar_t** argv) {
         assert(dev->items[4 + i].help.find("best:") != std::string::npos);
     }
     assert(dev->items[4 + std::size(kWorldSwitches)].label == "Reset all settings to GTAxSkate defaults");
+    // Test marks (design 2026-10-31-mark-travel): own section under World collision.
+    const size_t marksAt = 5 + std::size(kWorldSwitches);
+    assert(dev->items[marksAt].kind == menu::Kind::Heading && dev->items[marksAt].label == "Test marks");
+    const char* markRows[] = {"Mark", "Go to this mark", "Mark fixed", "Show fixed marks", "Delete this mark"};
+    for (unsigned i = 0; i < std::size(markRows); ++i) {
+        assert(dev->items[marksAt + 1 + i].label == markRows[i]);
+        assert(dev->items[marksAt + 1 + i].key.empty());  // never saved to the INI or a preset
+    }
     unsigned nearbyRows = 0;
     for (const auto& page : pages) for (const auto& item : page.items)
         if (item.key == "DynamicWorld") { ++nearbyRows; assert(page.title == "World"); }

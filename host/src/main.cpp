@@ -35,6 +35,7 @@
 #include "records_ui.h"
 #include "lifecycle.h"
 #include "thread_census.h"
+#include "marks.h"
 #include "menu.h"
 #include "vehicle_survey.h"
 #include "ps_pad.h"
@@ -3679,6 +3680,53 @@ void NormalizeTestWorldConfig(Config& c, bool enabled) {
 }
 std::string WorldLabel() { return "World collision: " + WorldState(g_config); }
 
+// Test marks: travel to the spots Manatros reported and set them fixed
+// (design 2026-10-31-mark-travel). GTAxSkate\marks.tsv is read lazily and
+// again only when its time stamp changed; never on every menu draw.
+namespace markui {
+marks::File g_file;
+int g_sel = -1;
+bool g_showFixed = false, g_loaded = false;
+FILETIME g_stamp{};
+std::wstring Path() { return g_gameDir + L"GTAxSkate\\marks.tsv"; }
+FILETIME Stamp() {
+    WIN32_FILE_ATTRIBUTE_DATA d{};
+    return GetFileAttributesExW(Path().c_str(), GetFileExInfoStandard, &d) ? d.ftLastWriteTime : FILETIME{};
+}
+void Refresh() {
+    const FILETIME t = Stamp();
+    if (g_loaded && CompareFileTime(&t, &g_stamp) == 0) return;
+    g_file = marks::Load(Path());
+    g_stamp = t, g_loaded = true;
+    if (g_sel >= static_cast<int>(g_file.marks.size())) g_sel = -1;
+    if (g_sel < 0) g_sel = marks::Step(g_file, -1, +1, g_showFixed);
+}
+const marks::Mark* Selected() {
+    return g_sel >= 0 && g_sel < static_cast<int>(g_file.marks.size()) ? &g_file.marks[g_sel] : nullptr;
+}
+bool Store(Session& s) {
+    if (marks::Save(Path(), g_file)) { g_stamp = Stamp(); return true; }
+    Notify(s, "Marks: could not write GTAxSkate\\marks.tsv (folder missing or not writable)", 6000);
+    return false;
+}
+std::string Label() {
+    if (!g_loaded) Refresh();
+    const marks::Mark* m = Selected();
+    if (!m) return g_file.marks.empty() ? "Marks: none (Mark this spot adds one)" : "Marks: all fixed (Show fixed marks)";
+    return "Mark: " + m->id + (m->fixed ? " [fixed] " : " [open] ") + m->note;
+}
+// Next free MMDD-n for today, so two sessions on one day never reuse an id.
+std::string NextSessionId() {
+    SYSTEMTIME t{};
+    GetLocalTime(&t);
+    const std::string prefix = marks::SessionId(t.wMonth, t.wDay, 0).substr(0, 5);
+    int n = 0;
+    for (const auto& m : g_file.marks)
+        if (m.id.rfind(prefix, 0) == 0) n = std::max(n, std::atoi(m.id.c_str() + prefix.size()));
+    return marks::SessionId(t.wMonth, t.wDay, n + 1);
+}
+}  // namespace markui
+
 // Inside a preset or reset (many keys at once) the warning waits until the
 // end (peer review 2026-10-26: it fired once per key, half-applied).
 static int g_bulkSettings = 0;
@@ -3981,8 +4029,67 @@ std::vector<menu::Page> MenuPages(Session& s) {
             if (const HMODULE m = GetModuleHandleW(L"SkateVRuntime.dll"))
                 if (const auto describe = reinterpret_cast<Describe>(GetProcAddress(m, "sv_describe_spot")))
                     if (describe({p.x, p.y, p.z}, 1.5f)) message += " (details in SkateVRuntime.log)";
+            // Also a travel mark (GTAxSkate\marks.tsv), selected at once.
+            markui::Refresh();
+            const std::string id = markui::NextSessionId();
+            marks::Append(markui::g_file, {id, p.x, p.y, p.z, heading, false, ""});
+            if (markui::Store(s)) markui::g_sel = static_cast<int>(markui::g_file.marks.size()) - 1, message += "; saved as mark " + id;
             Notify(s, message, 6000);
         }),
+        // Browse with Left/Right: an empty-key Number whose value is always 0,
+        // so each step arrives as -1/+1 and nothing is saved to the INI.
+        [] {
+            auto item = Number("Mark", "", 0.0f, -1.0f, 1.0f, 1.0f, [](float) { return std::string("<  >"); }, [](const std::string& v) {
+                markui::Refresh();
+                markui::g_sel = marks::Step(markui::g_file, markui::g_sel, v == "-1" ? -1 : +1, markui::g_showFixed);
+            });
+            item.current = [] { return std::string("0"); };
+            item.labelText = markui::Label;
+            item.help = "Left/Right: previous/next test mark (GTAxSkate\\marks.tsv; import a review with scripts\\marks-import.py).";
+            return item;
+        }(),
+        [&s] {
+            auto item = Action("Go to this mark", [&s] {
+                markui::Refresh();
+                const marks::Mark* m = markui::Selected();
+                if (!m) { Notify(s, "Marks: no mark selected"); return; }
+                const Ped ped = Call<Ped>(gta::PLAYER_PED_ID);
+                Call<void>(gta::REQUEST_COLLISION_AT_COORD, m->x, m->y, m->z);
+                // In a vehicle the vehicle goes; on foot or skating the ped (Skate follows a teleport).
+                const Entity who = Call<BOOL>(gta::IS_PED_IN_ANY_VEHICLE, ped, 0)
+                    ? static_cast<Entity>(Call<Vehicle>(gta::GET_VEHICLE_PED_IS_IN, ped, 0)) : static_cast<Entity>(ped);
+                Call<void>(gta::SET_ENTITY_COORDS_NO_OFFSET, who, m->x, m->y, m->z + 0.5f, 0, 0, 0);
+                Call<void>(gta::SET_ENTITY_HEADING, who, m->heading);
+                Notify(s, "At mark " + m->id + (m->note.empty() ? "" : ": " + m->note), 6000);
+            });
+            item.labelText = [] { const marks::Mark* m = markui::Selected(); return m ? "Go to this mark (" + m->id + ")" : std::string("Go to this mark"); };
+            return item;
+        }(),
+        [&s] {
+            auto item = Flag("Mark fixed", "", false, [&s](const std::string& v) {
+                markui::Refresh();
+                if (!markui::Selected()) return;
+                marks::SetFixed(markui::g_file, markui::g_sel, v == "1");
+                markui::Store(s);
+            });
+            item.current = [] { const marks::Mark* m = markui::Selected(); return std::string(m && m->fixed ? "1" : "0"); };
+            item.help = "On when this spot works now; fixed marks are skipped unless Show fixed marks is on.";
+            return item;
+        }(),
+        [] {
+            auto item = Flag("Show fixed marks", "", false, [](const std::string& v) { markui::g_showFixed = v == "1"; });
+            item.current = [] { return std::string(markui::g_showFixed ? "1" : "0"); };
+            return item;
+        }(),
+        Helped(Action("Delete this mark", [&s] {
+                   markui::Refresh();
+                   if (!markui::Selected()) return;
+                   const std::string id = markui::Selected()->id;
+                   marks::Remove(markui::g_file, markui::g_sel);
+                   if (markui::Store(s)) Notify(s, "Deleted mark " + id);
+                   markui::g_sel = marks::Step(markui::g_file, markui::g_sel - 1, +1, markui::g_showFixed);
+               }),
+               "Removes the selected mark from GTAxSkate\\marks.tsv (closes the menu)."),
         Helped(Flag("Stairs as steps", "DetailedStairs", D.detailedStairs, Bound("DetailedStairs", [&s] { WorldChanged(s, "DetailedStairs"); })),
                "Stairs collide as steps (best: on). Off: SK8V's smooth ramps."),
         Helped(Flag("Grind every stair step", "StepRails", D.stepRails, Bound("StepRails", [&s] { WorldChanged(s, "StepRails"); })),
@@ -4085,7 +4192,7 @@ std::vector<menu::Page> MenuPages(Session& s) {
             // settings are best"); the technical ones only with DevOptions.
             if (std::any_of(std::begin(kWorldSwitches), std::end(kWorldSwitches),
                             [&k](const WorldSwitch& w) { return k == w.key; })) return "World";
-            if (k.empty()) for (const char* label : {"World collision:", "Compare: plain GTA", "Mark this spot", "Reset all settings"})
+            if (k.empty()) for (const char* label : {"World collision:", "Compare: plain GTA", "Mark", "Go to this mark", "Show fixed marks", "Delete this mark", "Reset all settings"})
                 if (item.label.rfind(label, 0) == 0) return "World";
             if (any({"GpsWhileSkating", "SkateSpots"})) return "World";
             if (k == "DevOptions") return "Advanced";
@@ -4225,6 +4332,7 @@ std::vector<menu::Page> MenuPages(Session& s) {
                  {"Hall of Meat", {"HallOfMeat", "Show records"}}}},
         {"World", {{"World collision", {"World collision:", "Compare: plain GTA", "Mark this spot", "DetailedStairs", "StepRails", "TrackRails", "ObjectRails",
                                         "TubeRails", "VisualRails", "RailTops", "CurbBevels", "HighResParks", "UnflaggedStairs", "DynamicWorld", "Reset all settings"}},
+                   {"Test marks", {"Mark", "Go to this mark", "Show fixed marks", "Delete this mark"}},
                    {"What the board hits", {"VehiclePush", "ObjectPush", "VehicleDamage", "BoardScratches"}},
                    {"People", {"PedsSurvive", "PedLaunch", "PedBumpImpulse", "Injuries"}},
                    {"On foot", {"GtaDelegation", "SwimDepth", "BoardAim", "Stamina"}},
