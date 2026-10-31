@@ -3696,9 +3696,13 @@ FILETIME Stamp() {
 void Refresh() {
     const FILETIME t = Stamp();
     if (g_loaded && CompareFileTime(&t, &g_stamp) == 0) return;
+    // Keep the selection by id: the file may have been re-imported meanwhile.
+    const std::string selected = g_sel >= 0 && g_sel < static_cast<int>(g_file.marks.size()) ? g_file.marks[g_sel].id : "";
     g_file = marks::Load(Path());
     g_stamp = t, g_loaded = true;
-    if (g_sel >= static_cast<int>(g_file.marks.size())) g_sel = -1;
+    g_sel = -1;
+    for (size_t i = 0; i < g_file.marks.size(); ++i)
+        if (!selected.empty() && g_file.marks[i].id == selected && (g_showFixed || !g_file.marks[i].fixed)) g_sel = static_cast<int>(i);
     if (g_sel < 0) g_sel = marks::Step(g_file, -1, +1, g_showFixed);
 }
 const marks::Mark* Selected() {
@@ -3706,7 +3710,8 @@ const marks::Mark* Selected() {
 }
 bool Store(Session& s) {
     if (marks::Save(Path(), g_file)) { g_stamp = Stamp(); return true; }
-    Notify(s, "Marks: could not write GTAxSkate\\marks.tsv (folder missing or not writable)", 6000);
+    Notify(s, "Marks: could not write GTAxSkate\\marks.tsv (folder missing or not writable); change not kept", 6000);
+    g_loaded = false;  // the next Refresh shows the file as it is, not the unsaved change
     return false;
 }
 std::string Label() {
@@ -4039,7 +4044,7 @@ std::vector<menu::Page> MenuPages(Session& s) {
         // Browse with Left/Right: an empty-key Number whose value is always 0,
         // so each step arrives as -1/+1 and nothing is saved to the INI.
         [] {
-            auto item = Number("Mark", "", 0.0f, -1.0f, 1.0f, 1.0f, [](float) { return std::string("<  >"); }, [](const std::string& v) {
+            auto item = Number("Mark", "", 0.0f, -1.0f, 1.0f, 1.0f, [](float) { return std::string(); }, [](const std::string& v) {
                 markui::Refresh();
                 markui::g_sel = marks::Step(markui::g_file, markui::g_sel, v == "-1" ? -1 : +1, markui::g_showFixed);
             });
@@ -4054,6 +4059,10 @@ std::vector<menu::Page> MenuPages(Session& s) {
                 const marks::Mark* m = markui::Selected();
                 if (!m) { Notify(s, "Marks: no mark selected"); return; }
                 const Ped ped = Call<Ped>(gta::PLAYER_PED_ID);
+                // Skate follows only moves over 5 m; a closer mark is already in view.
+                const Vector3 at = Call<Vector3>(gta::GET_ENTITY_COORDS, ped, 1);
+                const float dx = at.x - m->x, dy = at.y - m->y, dz = at.z - m->z;
+                if (dx * dx + dy * dy + dz * dz < 25.0f) { Notify(s, "Already at mark " + m->id); return; }
                 Call<void>(gta::REQUEST_COLLISION_AT_COORD, m->x, m->y, m->z);
                 // In a vehicle the vehicle goes; on foot or skating the ped (Skate follows a teleport).
                 const Entity who = Call<BOOL>(gta::IS_PED_IN_ANY_VEHICLE, ped, 0)

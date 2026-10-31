@@ -128,14 +128,17 @@ File Load(const std::wstring& path) {
 
 bool Save(const std::wstring& path, const File& file) {
     const std::wstring tmp = path + L".tmp";
+    bool written = false;
     {
         std::ofstream out(tmp, std::ios::binary | std::ios::trunc);
         if (!out) return false;
         const std::string text = Format(file);
         out.write(text.data(), static_cast<std::streamsize>(text.size()));
-        if (!out.flush()) return false;
+        written = static_cast<bool>(out.flush());
     }
-    return MoveFileExW(tmp.c_str(), path.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH) != 0;
+    if (written && MoveFileExW(tmp.c_str(), path.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) return true;
+    DeleteFileW(tmp.c_str());  // never leave a half-written temporary file behind
+    return false;
 }
 
 }  // namespace marks
