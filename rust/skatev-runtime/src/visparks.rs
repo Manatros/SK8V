@@ -616,6 +616,7 @@ fn cut<'a>(t: &[[f32; 3]; 3], cover: impl Iterator<Item = &'a Used>) -> Vec<[[f3
     let to2 = |p: Vec3| Vec2::new((p - a).dot(eu), (p - a).dot(ew));
     let to3 = |q: Vec2| a + eu * q.x + ew * q.y;
     let mut pieces: Vec<Vec<Vec2>> = vec![vec![to2(a), to2(b), to2(c)]];
+    let mut was_cut = false;
     for u in cover {
         let (v, limit) = (&u.v, u.limit);
         let nv = normal(v);
@@ -649,6 +650,7 @@ fn cut<'a>(t: &[[f32; 3]; 3], cover: impl Iterator<Item = &'a Used>) -> Vec<[[f3
                 if probe.len() < 3 { break; }
             }
             if probe.len() < 3 || polygon_area(&probe) < 1e-8 { next.push(poly); continue; }
+            was_cut = true;
             let mut rest = poly;
             for (k, &(m, p, c)) in planes.iter().enumerate() {
                 let inside = |q: Vec2| if k < 3 { m.dot(q - p) } else { c + m.dot(q) };
@@ -663,6 +665,13 @@ fn cut<'a>(t: &[[f32; 3]; 3], cover: impl Iterator<Item = &'a Used>) -> Vec<[[f3
     }
     let mut out = Vec::new();
     for poly in pieces {
+        // Cut remnants (design 2026-10-31 remnant cleanup): clipping leaves
+        // near-duplicate and collinear corners whose fan made 100-300 tiny
+        // triangles per railing mark (M23-M26) and the bowl connector (M21/22);
+        // the same surface with clean corners. A remnant narrower than
+        // REMNANT_WIDTH is a strip along the visible edge, not a surface.
+        let poly = if was_cut { simplify(&poly) } else { poly };
+        if poly.len() < 3 || (was_cut && convex_width(&poly) < REMNANT_WIDTH) { continue; }
         for k in 1..poly.len() - 1 {
             let tri = [to3(poly[0]), to3(poly[k]), to3(poly[k + 1])];
             let area = (tri[1] - tri[0]).cross(tri[2] - tri[0]).length() / 2.0;
@@ -674,6 +683,38 @@ fn cut<'a>(t: &[[f32; 3]; 3], cover: impl Iterator<Item = &'a Used>) -> Vec<[[f3
     // An uncut triangle comes back exactly as it was.
     if out.len() == 1 && pieces_equal(&out[0], t) { return vec![*t]; }
     out
+}
+
+/// Narrowest cut remnant kept (m): a strip below this beside the visible
+/// surface is a gap no wheel can catch, not a surface to ride.
+const REMNANT_WIDTH: f32 = 0.02;
+/// Corners closer than this to a neighbour or to the line through their
+/// neighbours carry no shape (m).
+const CORNER: f32 = 0.001;
+
+/// A convex remnant without near-duplicate or collinear corners.
+fn simplify(poly: &[Vec2]) -> Vec<Vec2> {
+    let mut p = poly.to_vec();
+    loop {
+        let n = p.len();
+        if n < 3 { return p; }
+        let drop = (0..n).find(|&k| {
+            let (a, b, c) = (p[(k + n - 1) % n], p[k], p[(k + 1) % n]);
+            let ac = c - a;
+            a.distance(b) < CORNER || ac.length() < CORNER || ((b - a).perp_dot(ac) / ac.length()).abs() < CORNER
+        });
+        match drop { Some(k) => { p.remove(k); } None => return p }
+    }
+}
+
+/// Width of a convex polygon: the smallest of its edge-to-farthest-corner distances.
+fn convex_width(poly: &[Vec2]) -> f32 {
+    let n = poly.len();
+    (0..n).map(|k| {
+        let (a, e) = (poly[k], poly[(k + 1) % n] - poly[k]);
+        let len = e.length().max(1e-12);
+        poly.iter().map(|&q| (e.perp_dot(q - a) / len).abs()).fold(0.0, f32::max)
+    }).fold(f32::INFINITY, f32::min)
 }
 
 fn pieces_equal(a: &[[f32; 3]; 3], b: &[[f32; 3]; 3]) -> bool {
@@ -1161,6 +1202,36 @@ mod tests {
             if (p[0] - (x0 + 2.)).abs() < 1e-3 { assert!(p[2].abs() < 1e-3, "{p:?}"); }
         }
         assert_eq!(layered(&gta, &out.added, &out.cut), 0);
+    }
+
+    /// Design 2026-10-31 remnant cleanup: a strip narrower than REMNANT_WIDTH
+    /// beside the visible surface goes; a real remnant stays whole.
+    #[test]
+    fn a_sliver_beside_the_visible_edge_goes_and_a_real_remnant_stays() {
+        let (x0, y0) = (-1360.0, -1400.0);
+        for (covered, strip_kept) in [(1.99f32, false), (1.70, true)] {
+            let mut gta: Vec<Tri> = square(x0, x0 + 2., y0, y0 + 2., 0.).into_iter().map(|v| Tri { v, material: 3 }).collect();
+            let visible = square(x0, x0 + covered, y0, y0 + 2., 0.05);
+            let out = run(&mut gta, &[], &visible);
+            let pieces: Vec<&Tri> = out.added.iter().zip(&out.cut).filter(|(_, c)| **c).map(|(t, _)| t).collect();
+            let piece_area: f32 = pieces.iter().map(|t| area(&t.v)).sum();
+            if strip_kept {
+                assert!((piece_area - 0.6).abs() < 0.02, "30 cm remnant stays: {piece_area}");
+                assert!(pieces.len() <= 4, "clean corners, not a fan of slivers: {}", pieces.len());
+            } else {
+                assert!(pieces.is_empty(), "1 cm strip is not a surface: {piece_area}");
+            }
+        }
+    }
+
+    #[test]
+    fn remnant_corners_lose_duplicates_and_collinear_points_only() {
+        let sq = [Vec2::new(0., 0.), Vec2::new(0.5, 0.0002), Vec2::new(1., 0.), Vec2::new(1., 1.), Vec2::new(1.0002, 1.), Vec2::new(0., 1.)];
+        let s = simplify(&sq);
+        assert_eq!(s.len(), 4, "{s:?}");
+        assert!((polygon_area(&s) - 1.0).abs() < 1e-3);
+        assert!((convex_width(&s) - 1.0).abs() < 1e-3);
+        assert!((convex_width(&[Vec2::ZERO, Vec2::new(3., 0.), Vec2::new(3., 0.01), Vec2::new(0., 0.01)]) - 0.01).abs() < 1e-5);
     }
 
     #[test]
