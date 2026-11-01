@@ -257,16 +257,24 @@ pub fn load(path: &Path) -> Result<usize, String> {
     f.as_ref().map(|f| f.table.len()).ok_or_else(|| format!("visible railings disabled: unverified or malformed SVVB file {}", path.display()))
 }
 
-fn read_cells(f: &Lazy, wanted: impl Iterator<Item = (i32, i32)>) -> io::Result<Vec<Object>> {
+/// Objects of the wanted cells that pass `keep`, checked as each cell is
+/// read: a downtown bake area holds thousands of candidates (GBs), of which
+/// only the railings are kept (third whole-map bake stopped for low memory,
+/// 2026-11-01).
+fn read_cells(f: &Lazy, wanted: impl Iterator<Item = (i32, i32)>, keep: impl Fn(&Object) -> bool) -> io::Result<Vec<Object>> {
     use std::io::{Read, Seek, SeekFrom};
     let mut file = std::fs::File::open(&f.path)?;
     let mut out: BTreeMap<u32, Object> = BTreeMap::new();
+    let mut seen: BTreeSet<u32> = BTreeSet::new();
+    let mut bytes = Vec::new();
     for c in wanted {
         let Some(&(count, off, len)) = f.table.get(&c) else { continue };
-        let mut bytes = vec![0; usize::try_from(len).map_err(|_| invalid())?];
+        bytes.resize(usize::try_from(len).map_err(|_| invalid())?, 0);
         file.seek(SeekFrom::Start(off))?;
         file.read_exact(&mut bytes)?;
-        for o in cell_objects(&bytes, c, count)? { out.entry(o.id).or_insert(o); }
+        for o in cell_objects(&bytes, c, count)? {
+            if seen.insert(o.id) && keep(&o) { out.insert(o.id, o); }
+        }
     }
     Ok(out.into_values().collect())
 }
@@ -308,8 +316,10 @@ pub fn replace(tris: &mut Vec<Tri>, keep: &std::collections::HashSet<u64>) -> Re
             [b[0].min(p[0] - 40.), b[1].max(p[0] + 40.), b[2].min(p[1] - 40.), b[3].max(p[1] + 40.)]);
     if !b[0].is_finite() { return Replacement::default(); }
     // A malformed cell found mid-bake is fatal: the receipt said the file was whole.
-    let all = read_cells(f, cells(b, CELL)).expect("visible railings: unreadable SVVB cell");
-    let objects: Vec<_> = all.iter().filter(|o| !cells(o.bounds(), *size).any(|c| live.contains(&c))).collect();
+    let railing = Near::new(0.15, tris.iter().filter(|t| RAILING_MATERIALS.contains(&t.material)).map(|t| &t.v));
+    let all = read_cells(f, cells(b, CELL), |o| !cells(o.bounds(), *size).any(|c| live.contains(&c)) && eligible(o, &railing))
+        .expect("visible railings: unreadable SVVB cell");
+    let objects: Vec<_> = all.iter().collect();
     replace_with(tris, &objects, keep)
 }
 
@@ -354,24 +364,27 @@ fn side_vote(component: &[usize], tris: &[Tri], objects: &[&Object], b: [f32; 6]
     if count == 0 { 0. } else { close as f32 / count as f32 }
 }
 
-/// Triangles bucketed by 0.5 m cells of their box widened by `reach`, for
-/// "is this point within `reach` of one of them".
-struct Near { reach: f32, cells: HashMap<[i32; 3], Vec<[Vec3; 3]>> }
+/// Triangles bucketed by 2 m cells of their box widened by `reach` (cells
+/// hold indices), for "is this point within `reach` of one of them". The
+/// first version copied triangles into 0.5 m cells: 7.6 GB for one downtown
+/// bake area full of grilles and fences (old bakes peaked at 2 GB).
+struct Near { reach: f32, tris: Vec<[Vec3; 3]>, cells: HashMap<[i32; 3], Vec<u32>> }
+const NEAR_CELL: f32 = 2.0;
 impl Near {
     fn new<'a>(reach: f32, tris: impl Iterator<Item = &'a [[f32; 3]; 3]>) -> Near {
-        let mut cells: HashMap<[i32; 3], Vec<[Vec3; 3]>> = HashMap::new();
-        for t in tris {
-            let v = t.map(Vec3::from_array);
+        let tris: Vec<[Vec3; 3]> = tris.map(|t| t.map(Vec3::from_array)).collect();
+        let mut cells: HashMap<[i32; 3], Vec<u32>> = HashMap::new();
+        for (n, v) in tris.iter().enumerate() {
             let lo = v[0].min(v[1]).min(v[2]) - Vec3::splat(reach); let hi = v[0].max(v[1]).max(v[2]) + Vec3::splat(reach);
-            let (a, b) = ((lo / 0.5).floor().as_ivec3(), (hi / 0.5).floor().as_ivec3());
-            if (b - a).max_element() > 400 { continue; }
-            for x in a.x..=b.x { for y in a.y..=b.y { for z in a.z..=b.z { cells.entry([x, y, z]).or_default().push(v); } } }
+            let (a, b) = ((lo / NEAR_CELL).floor().as_ivec3(), (hi / NEAR_CELL).floor().as_ivec3());
+            if (b - a).max_element() > 200 { continue; }
+            for x in a.x..=b.x { for y in a.y..=b.y { for z in a.z..=b.z { cells.entry([x, y, z]).or_default().push(n as u32); } } }
         }
-        Near { reach, cells }
+        Near { reach, tris, cells }
     }
     fn contains(&self, p: Vec3) -> bool {
-        let k = (p / 0.5).floor().as_ivec3();
-        self.cells.get(&[k.x, k.y, k.z]).is_some_and(|l| l.iter().any(|t| distance(p, t) <= self.reach * self.reach + 1e-8))
+        let k = (p / NEAR_CELL).floor().as_ivec3();
+        self.cells.get(&[k.x, k.y, k.z]).is_some_and(|l| l.iter().any(|&n| distance(p, &self.tris[n as usize]) <= self.reach * self.reach + 1e-8))
     }
 }
 
