@@ -740,6 +740,11 @@ using SvShopRestPoseFn = std::uint32_t(__cdecl*)(void*, const float* at, SvBoard
 // A line the host casts for the store's show: writes where it hits, returns 1 (else 0).
 // sv_shop_ride(rt, state, speed, dt): a frame of skating for the board's wear; 1 when a part wore through.
 using SvShopRideFn = std::uint32_t(__cdecl*)(void*, const char* state, float speed, float dt);
+// sv_shop_secrets(rt, count): the secret decks/griptapes collectibles unlock (kept list or `count` chosen now);
+// returns how many are still locked. sv_shop_unlock_next(rt, buf, cap): unlocks the next, writes "key\ttitle";
+// returns the bytes it needs, 0 when none is left (design 2026-11-01-collectibles).
+using SvShopSecretsFn = std::uint32_t(__cdecl*)(void*, std::uint32_t count);
+using SvShopUnlockNextFn = std::uint32_t(__cdecl*)(void*, char* buf, std::uint32_t cap);
 using SvProbeFn = std::uint32_t(__cdecl*)(void* ctx, const float* from, const float* to, float* hit);
 // sv_shop_display(rt, tier, interior[3], eye[3], clerk[6] or null, day, probe, ctx, out[max*16], max,
 // models, cap): the boards on show (entity matrices, comma lists of models a line each); returns how many.

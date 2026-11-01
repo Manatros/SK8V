@@ -32,6 +32,13 @@ void Riding(const char* state, float speed);
 bool CrewBoard(unsigned slot, const SvBoardPose& pose);
 void ClearCrewBoard(unsigned slot);
 
+// Collectibles (design 2026-11-01-collectibles): the secret decks and
+// griptapes `count` part collectibles unlock (right after Start), the next
+// unlock ("key\ttitle", empty when none is left), and cash for the player.
+int SetSecrets(int count);  // still locked; -1 without the shop
+std::string UnlockNext();
+void Pay(int dollars);
+
 // The store's menu is open (other menus and Skate's input stay out).
 bool IsOpen();
 // The Vespucci board shop works (board shop on, runtime with sv_shop_open_at).

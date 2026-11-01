@@ -1,0 +1,98 @@
+# GTAxSkate collectibles, scripts/collectibles/place.py seed 20261101
+id	kind	x	y	z	place
+C01	part	-1396.43	-1391.09	4.54	Vespucci Beach Skatepark
+C02	part	298.92	-211.31	62.48	Hawick Skate Spot
+C03	song	-956.96	-768.85	17.50	Little Seoul Skate Spot
+C04	part	-243.10	-1577.79	34.58	Strawberry Halfpipe
+C05	part	721.88	-1252.50	33.04	La Mesa Rails
+C06	song	197.32	-913.37	31.09	Legion Square
+C07	part	-103.70	-621.05	37.38	Pillbox Hill plaza
+C08	song	479.40	-1025.06	35.63	Mission Row
+C09	part	332.63	-642.60	35.21	Pillbox Medical
+C10	song	-1672.80	-1020.55	10.82	Del Perro Pier
+C11	part	-1211.36	-1627.57	8.06	Vespucci Boardwalk
+C12	song	-1085.72	-1051.18	3.35	Vespucci Canals
+C13	part	-1379.39	-588.57	36.47	Del Perro Plaza
+C14	song	-1485.10	-299.26	53.68	Morningwood
+C15	song	-172.62	-148.44	44.67	Rockford Plaza
+C16	song	-1071.29	-472.81	37.58	Richards Majestic
+C17	part	-1637.88	192.29	61.74	ULSA campus
+C18	part	-2308.77	275.18	170.29	Kortz Center
+C19	part	333.39	182.23	107.17	Vinewood Boulevard
+C20	part	666.66	576.86	130.51	Vinewood Bowl
+C21	song	-412.98	1104.97	325.75	Galileo Observatory
+C22	part	1106.89	-642.35	56.71	Mirror Park
+C23	part	1166.49	-1345.74	40.67	Murrieta Heights
+C24	song	-226.07	-1976.94	29.43	Maze Bank Arena
+C25	part	94.30	-1706.93	34.00	Davis
+C26	song	159.00	-2011.33	19.18	Grove Street
+C27	song	614.85	-1602.45	26.57	Los Santos River
+C28	part	904.50	-2204.99	31.52	Cypress Flats
+C29	part	1363.70	-1906.91	55.63	El Burro Heights
+C30	part	-2.63	-2682.33	5.90	Elysian Island
+C31	part	1052.60	-3016.31	8.77	Port of Los Santos
+C32	song	-2036.85	-441.35	12.09	Pacific Bluffs
+C33	part	-3133.25	1098.41	21.42	Chumash
+C34	song	559.73	2714.86	42.06	Harmony
+C35	part	1850.33	3698.16	35.15	Sandy Shores
+C36	song	1696.08	4788.92	48.31	Grapeseed
+C37	part	-117.52	6329.76	35.41	Paleto Bay
+C38	song	1655.52	4.06	169.88	Land Act Dam
+C39	part	2711.90	1516.19	29.40	Palmer-Taylor Power Station
+C40	song	1700.14	1313.22	86.23	Scattered (Grand Senora Desert)
+C41	song	3079.15	3936.66	75.82	Scattered (Sandy Shores)
+C42	part	127.87	1147.82	232.26	Scattered (Vinewood Hills)
+C43	song	1545.33	-1018.35	58.99	Scattered (East Los Santos)
+C44	part	104.25	6611.68	32.79	Scattered (Paleto Bay)
+C45	part	-1383.65	5113.56	61.08	Scattered (Raton Canyon)
+C46	part	-2872.11	83.15	15.27	Scattered (Banham Canyon)
+C47	part	1079.55	2148.58	54.66	Scattered (Grand Senora Desert)
+C48	part	1080.97	3133.83	41.25	Scattered (Harmony)
+C49	part	61.35	2787.48	58.65	Scattered (Harmony)
+C50	part	702.21	-619.40	20.73	Scattered (East Los Santos)
+C51	part	2344.22	3120.97	53.35	Scattered (Sandy Shores)
+C52	song	2416.45	1244.80	57.11	Scattered (Tataviam Mountains)
+C53	song	1065.24	303.10	88.94	Scattered (Vinewood)
+C54	part	2790.69	4417.95	49.27	Scattered (Mount Gordo)
+C55	song	1556.17	3810.30	33.61	Scattered (Sandy Shores)
+C56	song	2292.05	5191.84	60.30	Scattered (Mount Gordo)
+C57	song	2695.65	2883.00	43.96	Scattered (Grand Senora Desert)
+C58	part	633.58	3508.32	34.68	Scattered (Harmony)
+C59	part	2670.63	3919.74	43.44	Scattered (Sandy Shores)
+C60	song	-900.08	-2493.55	18.92	Scattered (Airport)
+C61	part	2068.85	1446.67	76.45	Scattered (Grand Senora Desert)
+C62	part	-1962.56	534.92	110.44	Scattered (Pacific Bluffs)
+C63	part	1244.13	-329.67	69.96	Scattered (East Los Santos)
+C64	song	2691.07	3201.81	54.04	Scattered (Sandy Shores)
+C65	part	-1947.28	2297.60	57.10	Scattered (Tongva Hills)
+C66	song	617.29	2286.89	58.10	Scattered (Harmony)
+C67	song	458.56	-3121.50	6.17	Scattered (Port)
+C68	part	-1503.57	1530.63	115.82	Scattered (Tongva Hills)
+C69	song	496.28	3062.03	41.10	Scattered (Harmony)
+C70	part	-673.47	-1168.29	11.19	Scattered (Vespucci)
+C71	part	-816.98	-270.39	37.65	Scattered (Rockford Hills)
+C72	song	1606.16	2231.88	81.51	Scattered (Grand Senora Desert)
+C73	part	-390.94	2852.04	43.64	Scattered (Great Chaparral)
+C74	song	-2318.43	4089.16	34.90	Scattered (Raton Canyon)
+C75	part	1341.12	4226.05	30.60	Scattered (Grapeseed)
+C76	song	1530.62	846.39	78.13	Scattered (Tataviam Mountains)
+C77	song	2063.67	1944.50	87.09	Scattered (Grand Senora Desert)
+C78	song	769.02	-2505.60	21.12	Scattered (Port)
+C79	part	2574.90	2597.09	36.06	Scattered (Grand Senora Desert)
+C80	part	3839.52	3636.16	6.56	Scattered (Sandy Shores)
+C81	song	-448.43	4105.63	85.45	Scattered (Raton Canyon)
+C82	part	1412.79	1184.70	115.37	Scattered (Grand Senora Desert)
+C83	song	1024.33	-1788.05	36.27	Scattered (East Los Santos)
+C84	song	2045.61	3206.27	46.77	Scattered (Sandy Shores)
+C85	part	1673.85	-1670.26	112.54	Scattered (Palomino Highlands)
+C86	part	-472.37	5307.90	86.70	Scattered (Mount Chiliad)
+C87	song	1628.35	-2525.48	72.99	Scattered (Port)
+C88	part	2449.14	5672.66	45.69	Scattered (Mount Gordo)
+C89	song	-1236.07	666.07	143.18	Scattered (Rockford Hills)
+C90	song	2343.97	-317.90	87.13	Scattered (Tataviam Mountains)
+C91	part	-651.91	-1648.05	11.37	Scattered (Vespucci)
+C92	part	2402.41	4656.89	37.25	Scattered (Grapeseed)
+C93	part	1369.12	1848.01	100.19	Scattered (Grand Senora Desert)
+C94	part	609.99	6505.74	30.50	Scattered (Paleto Bay)
+C95	song	-1963.67	-147.24	32.95	Scattered (Pacific Bluffs)
+C96	part	-550.31	-784.50	30.64	Scattered (Rockford Hills)

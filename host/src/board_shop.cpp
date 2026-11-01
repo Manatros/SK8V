@@ -587,6 +587,26 @@ bool IsOpen() {
     return g_open;
 }
 
+int SetSecrets(int count) {
+    if (!g_ready || !g_rt) return -1;
+    const int locked = g_rt->ShopSecrets(count);
+    if (locked < 0) Log("board shop: the runtime has no secret items (collectibles unlock nothing there)");
+    else Log("board shop: " + std::to_string(locked) + " secret item(s) still to find");
+    return locked;
+}
+
+std::string UnlockNext() {
+    return g_ready && g_rt ? g_rt->ShopUnlockNext() : std::string();
+}
+
+void Pay(int dollars) {
+    const std::uint32_t stat = CashStat(Call<std::uint32_t>(GET_ENTITY_MODEL, Call<int>(PLAYER_PED_ID)));
+    if (!stat) return;
+    int cash = 0;
+    Call<BOOL>(STAT_GET_INT, stat, &cash, -1);
+    Call<BOOL>(STAT_SET_INT, stat, cash + dollars, true);
+}
+
 bool BeachShopAvailable() {
     return g_ready && g_rt && g_rt->HasShopOpenAt();
 }
