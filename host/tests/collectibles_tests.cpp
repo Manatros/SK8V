@@ -48,12 +48,12 @@ int main() {
     assert(NextSong(none, tracks) == 6);
     assert(NextSong(none, {1, 2, 3}) == 0);
 
-    const std::vector<std::string> names = {
-        "Skate 3 Track 01.mp3",          // starter: stays
-        "Skate 3 Track 06.mp3.locked",   // earned: back on the radio
-        "Skate 3 Track 07.mp3",          // not earned: locked
-        "Skate 3 Track 08.mp3", "Skate 3 Track 08.mp3.locked",  // a tool rerun: stale copy goes, fresh one locked
-        "skate-music-files.txt"};
+    const std::vector<SongFile> names = {
+        {"Skate 3 Track 01.mp3", 9},          // starter: stays
+        {"Skate 3 Track 06.mp3.locked", 9},   // earned: back on the radio
+        {"Skate 3 Track 07.mp3", 9},          // not earned: locked
+        {"Skate 3 Track 08.mp3", 9}, {"Skate 3 Track 08.mp3.locked", 9},  // a tool rerun: stale copy goes, fresh one locked
+        {"skate-music-files.txt", 1}};
     const auto ops = SongPlan(names, p, true);
     assert(Has(ops, FileOp::Rename, "Skate 3 Track 06.mp3.locked", "Skate 3 Track 06.mp3"));
     assert(Has(ops, FileOp::Rename, "Skate 3 Track 07.mp3", "Skate 3 Track 07.mp3.locked"));
@@ -70,7 +70,15 @@ int main() {
     assert(!Has(off, FileOp::Rename, "Skate 3 Track 07.mp3", "Skate 3 Track 07.mp3.locked"));
     assert(Has(off, FileOp::Delete, "Skate 3 Track 08.mp3.locked"));
     // A matched folder needs nothing.
-    assert(SongPlan({"Skate 3 Track 01.mp3", "Skate 3 Track 09.mp3.locked"}, none, true).empty());
+    assert(SongPlan({{"Skate 3 Track 01.mp3", 9}, {"Skate 3 Track 09.mp3.locked", 9}}, none, true).empty());
+    // A playable copy cut short (0 bytes) goes; the good locked one stays locked.
+    const auto cut = SongPlan({{"Skate 3 Track 10.mp3", 0}, {"Skate 3 Track 10.mp3.locked", 9}}, none, true);
+    assert(cut.size() == 1 && Has(cut, FileOp::Delete, "Skate 3 Track 10.mp3"));
+    // ... and comes back when earned.
+    Progress ten = ParseProgress("collected C05 song:10\n");
+    const auto back10 = SongPlan({{"Skate 3 Track 10.mp3", 0}, {"Skate 3 Track 10.mp3.locked", 9}}, ten, true);
+    assert(Has(back10, FileOp::Delete, "Skate 3 Track 10.mp3"));
+    assert(Has(back10, FileOp::Rename, "Skate 3 Track 10.mp3.locked", "Skate 3 Track 10.mp3"));
 
     std::cout << "collectibles tests passed\n";
     return 0;

@@ -232,6 +232,8 @@ impl BoardShop {
         let path = self.garages.join(crate::secrets::FILE);
         self.secrets = match std::fs::read_to_string(&path) {
             Ok(text) => crate::secrets::Secrets::from_text(&text),
+            // Unreadable (locked, damaged): lock nothing and never write over it.
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => Default::default(),
             Err(_) if count == 0 => Default::default(),
             Err(_) => {
                 let keys: Vec<String> = crate::shop::stock(&self.library, Tier::Skate)
@@ -260,9 +262,11 @@ impl BoardShop {
         Some((key, title))
     }
 
-    /// Goods a collectible has not unlocked yet, unless this character owns them.
+    /// Goods a collectible has not unlocked yet. The same for every
+    /// character and for menus and walls alike; owned ones still show in
+    /// "Yours".
     fn hidden(&self, goods: &Goods) -> bool {
-        self.secrets.locked(goods) && !self.garage.owns(goods)
+        self.secrets.locked(goods)
     }
 
     fn garage_path(&self) -> PathBuf {
@@ -469,7 +473,7 @@ impl BoardShop {
             })
             .collect();
         let order = crate::shop::show_picks(&completes, (slot as i32 * 7919, 4049), 0, completes.len());
-        let Some(board) = crate::secrets::substitute(&order, 1, |b| self.secrets.board_locked(b)).into_iter().next() else {
+        let Some(board) = crate::secrets::substitute(&order, 1, |b| self.secrets.board_secret(b), |b| self.secrets.board_locked(b)).into_iter().next() else {
             return Vec::new();
         };
         models_of(&board, None, None, None).into_iter().filter(|m| self.available.contains(m)).collect()
@@ -516,16 +520,17 @@ impl BoardShop {
             // unlock changes no other slot (A18).
             let all = section.offers.len();
             let hidden = |offer: &crate::shop::Offer| self.hidden(&offer.goods);
+            let secret = |offer: &crate::shop::Offer| self.secrets.secret(&offer.goods);
             let offers = if section.title == "Complete boards" {
                 // The first picks are the boards on show (one daily order):
                 // Suburban sells those and a few more (Manatros 2026-10-26).
                 let extra = if tier == Tier::Mid { crate::shop::MID_EXTRA } else { 0 };
                 let order = crate::shop::picks_distinct(&section.offers, store, day, 0, all);
-                crate::secrets::substitute(&order, crate::shop::on_show(tier) + extra, hidden)
+                crate::secrets::substitute(&order, crate::shop::on_show(tier) + extra, secret, hidden)
             } else {
                 let salt = section.title.bytes().fold(0u32, |h, b| h.wrapping_mul(31).wrapping_add(u32::from(b)));
                 let order = crate::shop::picks_distinct(&section.offers, store, day, salt, all);
-                crate::secrets::substitute(&order, crate::shop::section_count(tier, &section.title), hidden)
+                crate::secrets::substitute(&order, crate::shop::section_count(tier, &section.title), secret, hidden)
             };
             if !offers.is_empty() {
                 out.push(crate::shop::Section { title: section.title, offers });
@@ -708,7 +713,7 @@ impl BoardShop {
             })
             .collect();
         let order = crate::shop::picks_distinct(&completes, store, day, 0, completes.len());
-        let boards = crate::secrets::substitute(&order, crate::shop::on_show(tier), |b| self.secrets.board_locked(b));
+        let boards = crate::secrets::substitute(&order, crate::shop::on_show(tier), |b| self.secrets.board_secret(b), |b| self.secrets.board_locked(b));
         let to_board = self.frame.inverse();
         show.places(boards.len())
             .into_iter()

@@ -43,21 +43,27 @@ float g_prev[3] = {};
 DWORD g_nextSight = 0;
 int g_sel = -1;
 bool g_songFailLogged = false;
+bool g_faulty = false;  // collectibles.txt exists but could not be read: change nothing
 
 void Log(const std::string& text) {
     if (g_log) g_log(("collectibles: " + text).c_str());
 }
 
-std::string Read(const std::wstring& path) {
+// The file's text; false when it exists but cannot be read.
+bool Read(const std::wstring& path, std::string& text) {
+    text.clear();
+    if (GetFileAttributesW(path.c_str()) == INVALID_FILE_ATTRIBUTES && GetLastError() == ERROR_FILE_NOT_FOUND) return true;
     std::ifstream in(path, std::ios::binary);
-    if (!in) return {};
-    std::ostringstream text;
-    text << in.rdbuf();
-    return text.str();
+    if (!in) return false;
+    std::ostringstream out;
+    out << in.rdbuf();
+    text = out.str();
+    return !in.bad();
 }
 
 // Through a temporary file that replaces the original (never half a file).
 bool Save() {
+    if (g_faulty) return false;
     const std::wstring tmp = g_progressPath + L".tmp";
     bool written = false;
     {
@@ -79,17 +85,19 @@ std::wstring SongsDir() {
     return std::wstring(docs) + L"\\Rockstar Games\\GTA V\\User Music\\Skate 3";
 }
 
-std::vector<std::string> SongFiles() {
-    std::vector<std::string> names;
+std::vector<SongFile> SongFiles() {
+    std::vector<SongFile> files;
     std::error_code ec;
-    if (g_songsDir.empty() || !std::filesystem::is_directory(g_songsDir, ec)) return names;
+    if (g_songsDir.empty() || !std::filesystem::is_directory(g_songsDir, ec)) return files;
     for (const auto& e : std::filesystem::directory_iterator(g_songsDir, ec))
-        if (e.is_regular_file(ec)) names.push_back(reinterpret_cast<const char*>(e.path().filename().u8string().c_str()));
-    return names;
+        if (e.is_regular_file(ec))
+            files.push_back({reinterpret_cast<const char*>(e.path().filename().u8string().c_str()), e.file_size(ec)});
+    return files;
 }
 
 // Starters and earned songs playable, the others locked (all playable when off).
 void Reconcile(bool enabled) {
+    if (g_faulty) return;
     const auto ops = SongPlan(SongFiles(), g_progress, enabled);
     int done = 0, failed = 0;
     for (const FileOp& op : ops) {
@@ -172,8 +180,8 @@ void Earn(const Item& it) {
         }
     } else {
         std::vector<int> tracks;
-        for (const auto& n : SongFiles())
-            if (const int t = TrackOf(n)) tracks.push_back(t);
+        for (const auto& f : SongFiles())
+            if (const int t = TrackOf(f.name)) tracks.push_back(t);
         if (const int t = NextSong(g_progress, tracks)) {
             reward = "song:" + std::to_string(t);
             text = "New song on Self Radio: " + Track(t) + ". Settings > Audio > Perform Quick Scan to hear it.";
@@ -209,22 +217,31 @@ void Start(const std::wstring& gameDir, bool enabled, util::LogFn log) {
     g_placesPath = gameDir + L"GTAxSkate\\collectibles.tsv";
     g_progressPath = gameDir + L"GTAxSkate\\collectibles.txt";
     g_songsDir = SongsDir();
-    g_items = ParsePlaces(Read(g_placesPath));
-    g_progress = ParseProgress(Read(g_progressPath));
+    std::string text;
+    g_items = Read(g_placesPath, text) ? ParsePlaces(text) : std::vector<Item>{};
+    g_faulty = !Read(g_progressPath, text);
+    g_progress = ParseProgress(text);
+    if (g_faulty) Log("GTAxSkate\\collectibles.txt exists but cannot be read: progress, songs and the shop stay as they are this session");
     g_wasEnabled = enabled;
     Log(std::to_string(g_items.size()) + " places, " + Summary());
     if (g_items.empty()) return;  // no places file: songs stay as they are
     Reconcile(enabled);
 }
 
-int PartCount() {
-    int n = 0;
-    for (const Item& it : g_items) n += it.kind == Kind::Part;
-    return n;
+void SyncShop() {
+    // No places file: nothing to earn, so nothing is locked either.
+    if (g_faulty || g_items.empty()) return;
+    int parts = 0, earned = 0;
+    for (const Item& it : g_items) parts += it.kind == Kind::Part;
+    for (const auto& [id, r] : g_progress.reward) earned += r.rfind("part:", 0) == 0;
+    int locked = boardshop::SetSecrets(parts);
+    // A new secrets file (deleted, or a new install) after earlier finds:
+    // unlock as many as were earned, in the same order as before.
+    while (locked > parts - earned && !boardshop::UnlockNext().empty()) --locked;
 }
 
 void Tick(bool enabled, bool skating, const float (&skater)[3], int ped) {
-    if (g_items.empty()) return;
+    if (g_items.empty() || g_faulty) return;
     if (enabled != g_wasEnabled) {
         g_wasEnabled = enabled;
         if (!enabled) Clear();

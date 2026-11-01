@@ -99,6 +99,18 @@ impl Secrets {
         deck_key(board).is_some_and(|k| self.key_locked(&k))
     }
 
+    /// Goods that are secret at all (locked or unlocked); a complete board by its deck.
+    pub fn secret(&self, goods: &Goods) -> bool {
+        match goods {
+            Goods::Complete(board) => self.board_secret(board),
+            other => key(other).is_some_and(|k| self.secret.contains(&k)),
+        }
+    }
+
+    pub fn board_secret(&self, board: &BoardChoice) -> bool {
+        deck_key(board).is_some_and(|k| self.secret.contains(&k))
+    }
+
     pub fn remaining(&self) -> usize {
         self.order.iter().filter(|k| !self.unlocked.contains(*k)).count()
     }
@@ -111,20 +123,24 @@ impl Secrets {
     }
 }
 
-/// The first `count` of `order` with every locked one replaced by the next
-/// unlocked one after them (not shown yet), so an unlock changes only the
-/// slot that held the locked item.
-pub fn substitute<T: Clone + PartialEq>(order: &[T], count: usize, locked: impl Fn(&T) -> bool) -> Vec<T> {
+/// The first `count` of `order`, each secret slot standing in for its item
+/// while that is locked: the j-th secret slot always gets the j-th spare (a
+/// later item that is no secret at all), so the stand-ins never depend on
+/// what else is unlocked and an unlock changes only its own slot (A18).
+pub fn substitute<T: Clone + PartialEq>(order: &[T], count: usize, secret: impl Fn(&T) -> bool, locked: impl Fn(&T) -> bool) -> Vec<T> {
     let count = count.min(order.len());
-    let mut used: Vec<&T> = order[..count].iter().collect();
-    let mut spare = order[count..].iter();
+    let mut spares = order[count..].iter().filter(|s| !secret(s) && !order[..count].contains(s));
     let mut out = Vec::new();
     for t in &order[..count] {
-        if !locked(t) {
+        if !secret(t) {
             out.push(t.clone());
-        } else if let Some(s) = spare.by_ref().find(|s| !locked(s) && !used.contains(s)) {
-            used.push(s);
-            out.push(s.clone());
+        } else {
+            let stand_in = spares.next();
+            if !locked(t) {
+                out.push(t.clone());
+            } else if let Some(s) = stand_in {
+                out.push(s.clone());
+            }
         }
     }
     out
@@ -187,12 +203,18 @@ mod tests {
     }
 
     #[test]
-    fn substitution_changes_only_the_locked_slot() {
+    fn substitution_changes_only_the_slot_that_unlocks() {
         let order = [1, 2, 3, 4, 5, 6];
-        assert_eq!(substitute(&order, 3, |_| false), vec![1, 2, 3]);
-        assert_eq!(substitute(&order, 3, |&t| t == 2), vec![1, 4, 3]);
-        assert_eq!(substitute(&order, 3, |&t| t == 2 || t == 4), vec![1, 5, 3]);
-        assert_eq!(substitute(&order, 3, |&t| t > 1), vec![1]);
-        assert_eq!(substitute(&order, 9, |_| false).len(), 6);
+        let secret = |t: &i32| [2, 3, 4].contains(t);
+        let wall = |locked: &[i32]| substitute(&order, 3, secret, |t| locked.contains(t));
+        assert_eq!(substitute(&order, 3, |_| false, |_| false), vec![1, 2, 3]);
+        // Secrets 2 and 3 on the wall stand in by 5 and 6 (4 is a secret, never a spare).
+        assert_eq!(wall(&[2, 3, 4]), vec![1, 5, 6]);
+        // Unlocking 4 (not on the wall) changes nothing; unlocking 2 only its slot.
+        assert_eq!(wall(&[2, 3]), vec![1, 5, 6]);
+        assert_eq!(wall(&[3]), vec![1, 2, 6]);
+        assert_eq!(wall(&[]), vec![1, 2, 3]);
+        // Too few spares: a locked slot without one stays empty.
+        assert_eq!(substitute(&order, 6, |_| true, |&t| t > 1), vec![1]);
     }
 }

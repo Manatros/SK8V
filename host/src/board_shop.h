@@ -35,7 +35,7 @@ void ClearCrewBoard(unsigned slot);
 // Collectibles (design 2026-11-01-collectibles): the secret decks and
 // griptapes `count` part collectibles unlock (right after Start), the next
 // unlock ("key\ttitle", empty when none is left), and cash for the player.
-void SetSecrets(int count);
+int SetSecrets(int count);  // still locked; -1 without the shop
 std::string UnlockNext();
 void Pay(int dollars);
 

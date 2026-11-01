@@ -12,8 +12,9 @@ namespace collectibles {
 // After the game folder is known: reads GTAxSkate\collectibles.tsv and
 // collectibles.txt, and matches the songs folder (`enabled`: INI Collectibles).
 void Start(const std::wstring& gameDir, bool enabled, util::LogFn log);
-// Part collectibles in the file (the shop's secret count).
-int PartCount();
+// After the board shop started: its secret items, as many as there are
+// part collectibles, with those already earned unlocked.
+void SyncShop();
 
 // Once per script frame. `skating`: Skate rides (not walking, not bailed);
 // `skater`: the skater's root; `ped`: the player ped (ignored by the sight line).

@@ -48,13 +48,19 @@ std::vector<int> EarnedSongs(const Progress& p);
 // earned yet, among `tracks` (those on disk); 0 when none is left.
 int NextSong(const Progress& p, const std::vector<int>& tracks);
 
+struct SongFile {
+    std::string name;
+    unsigned long long size = 0;
+};
+
 struct FileOp {
     enum Type { Rename, Delete } type = Rename;
     std::string from, to;  // names within the songs folder
 };
-// What makes `names` (the folder's file names) match: starters and earned
-// songs playable, the others locked; everything playable when `enabled` is
-// false. A stale ".locked" next to its playable copy is deleted first.
-std::vector<FileOp> SongPlan(const std::vector<std::string>& names, const Progress& p, bool enabled);
+// What makes `files` (the songs folder) match: starters and earned songs
+// playable, the others locked; everything playable when `enabled` is false.
+// A song in both forms (a tool rerun, or one cut short) keeps the larger
+// copy: the other is deleted first.
+std::vector<FileOp> SongPlan(const std::vector<SongFile>& files, const Progress& p, bool enabled);
 
 }  // namespace collectibles

@@ -157,22 +157,33 @@ int NextSong(const Progress& p, const std::vector<int>& tracks) {
     return 0;
 }
 
-std::vector<FileOp> SongPlan(const std::vector<std::string>& names, const Progress& p, bool enabled) {
+std::vector<FileOp> SongPlan(const std::vector<SongFile>& files, const Progress& p, bool enabled) {
     const auto earned = EarnedSongs(p);
     std::set<int> playable, locked;
-    for (const auto& n : names) {
+    std::map<int, unsigned long long> playableSize, lockedSize;
+    for (const auto& f : files) {
+        const std::string& n = f.name;
         const int t = TrackOf(n);
         if (!t) continue;
         const bool isLocked = n.size() > 7 && n.compare(n.size() - 7, 7, kLocked) == 0;
         (isLocked ? locked : playable).insert(t);
+        (isLocked ? lockedSize : playableSize)[t] = f.size;
     }
     std::vector<FileOp> ops;
     std::set<int> all = playable;
     all.insert(locked.begin(), locked.end());
     for (const int t : all) {
         const std::string mp3 = SongName(t), dead = mp3 + kLocked;
-        const bool both = playable.count(t) && locked.count(t);
-        if (both) ops.push_back({FileOp::Delete, dead, {}});
+        if (playable.count(t) && locked.count(t)) {
+            // The larger copy stays (a song cut short is never the one kept).
+            if (playableSize[t] >= lockedSize[t]) {
+                ops.push_back({FileOp::Delete, dead, {}});
+                locked.erase(t);
+            } else {
+                ops.push_back({FileOp::Delete, mp3, {}});
+                playable.erase(t);
+            }
+        }
         const bool play = !enabled || t <= kStarterSongs || std::find(earned.begin(), earned.end(), t) != earned.end();
         if (play && !playable.count(t)) ops.push_back({FileOp::Rename, dead, mp3});
         if (!play && playable.count(t)) ops.push_back({FileOp::Rename, mp3, dead});

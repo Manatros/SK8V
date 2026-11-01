@@ -4632,7 +4632,7 @@ void ScriptMain() {
                     Logf("board shop: painted wheels ride at hardness %.2f", wheels);
                 ApplyWheelGlow(g_config);
             });
-        boardshop::SetSecrets(collectibles::PartCount());
+        collectibles::SyncShop();
     }
 
     // Skate audio inside GTA's audio engine (P0-3b); runtime may be absent.
