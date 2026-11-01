@@ -36,6 +36,7 @@
 #include "lifecycle.h"
 #include "thread_census.h"
 #include "marks.h"
+#include "collectibles.h"
 #include "menu.h"
 #include "vehicle_survey.h"
 #include "ps_pad.h"
@@ -85,6 +86,7 @@ struct Config {
     bool keyboardHints = true; // KeyboardHints: the keys down the left side while skating on the keyboard
     bool gpsWhileSkating = true; // GpsWhileSkating: GTA's route to the waypoint stays on in Skate mode
     bool skateSpots = true;      // SkateSpots: GTA's skate parks as blips on the map
+    bool collectibles = true;    // Collectibles: hidden question marks that unlock shop parts and songs
     bool boardShop = true;    // BoardShop: Skate 3's boards and parts for sale in street clothing stores (G)
     bool wheelsFromPaint = true; // WheelsFromPaint: painted wheels set the wheel hardness (matte soft .. metallic hard)
     bool vehicleShapes = true; // VehicleShapes: survey vehicles without an extracted bound (a roof to ride, a gap to hippie jump)
@@ -305,6 +307,7 @@ const Key kKeys[] = {
     {"KeyboardHints", Store<&Config::keyboardHints>},
     {"GpsWhileSkating", Store<&Config::gpsWhileSkating>},
     {"SkateSpots", Store<&Config::skateSpots>},
+    {"Collectibles", Store<&Config::collectibles>},
     {"BoardShop", Store<&Config::boardShop>},
     {"WheelsFromPaint", Store<&Config::wheelsFromPaint>},
     {"VehicleShapes", Store<&Config::vehicleShapes>},
@@ -3613,7 +3616,7 @@ const std::vector<std::pair<std::string, std::string>>& GtaxSkatePreset() {
         {"VehiclePush", "1"}, {"ObjectPush", "0.25"}, {"DevOptions", "0"},
         {"SkateRadio", ""}, {"RadioControls", "1"}, {"AudioGtaGainDb", "1.4"}, {"BoardActionInMissions", "0"},
         {"BoardTracks", "1"}, {"Snow", "0"}, {"WheelGlow", "0"}, {"BoardMaterial", "Off"}, {"CarryBoard", "0"},
-        {"GpsWhileSkating", "1"}, {"SkateSpots", "1"}, {"WheelsFromPaint", "1"}, {"BailPain", "13"},
+        {"GpsWhileSkating", "1"}, {"SkateSpots", "1"}, {"Collectibles", "1"}, {"WheelsFromPaint", "1"}, {"BailPain", "13"},
         // On screen: GTA's HUD only, no Skate 3 arcade overlays.
         {"SkateHud", "1"}, {"Hud", "0"}, {"TrickAnalyzer", "0"}, {"KeyboardHints", "0"},
         {"HallOfMeat", "0"}, {"HallOfMeatMetrics", "0"}, {"HallOfMeatXray", "0"},
@@ -4153,6 +4156,35 @@ std::vector<menu::Page> MenuPages(Session& s) {
         Flag("Stall sampler", "StallSampler", D.stallSampler, {}, true),
         Flag("GPS route while skating", "GpsWhileSkating", D.gpsWhileSkating, Bound("GpsWhileSkating")),
         Flag("Skate spot map blips", "SkateSpots", D.skateSpots, Bound("SkateSpots")),
+        Helped(Flag("Collectibles", "Collectibles", D.collectibles, Bound("Collectibles")),
+               "Question marks hidden on rails all over the map: skate through one to unlock a deck or griptape in the skate shop "
+               "(yellow) or a Skate 3 song on Self Radio (purple). Off hides them and puts every song back on the radio."),
+        [] {
+            auto item = Action("Collectibles:", [] { g_routeNotice = collectibles::RouteToNearestFound(); });
+            item.labelText = [] { return collectibles::Summary(); };
+            item.help = "Sets the GPS to the nearest collectible you found but did not reach yet.";
+            return item;
+        }(),
+        // Developer: travel to each collectible to check its place.
+        [] {
+            auto item = Number("Collectible", "", 0.0f, -1.0f, 1.0f, 1.0f, [](float) { return std::string(); },
+                               [](const std::string& v) { collectibles::Step(v == "-1" ? -1 : +1); });
+            item.current = [] { return std::string("0"); };
+            item.labelText = collectibles::SelectedLabel;
+            item.help = "Left/Right: previous/next collectible (GTAxSkate\\collectibles.tsv).";
+            return item;
+        }(),
+        Action("Go to this collectible", [&s] {
+            float p[3];
+            if (!collectibles::SelectedPlace(p)) { Notify(s, "Collectibles: none selected"); return; }
+            const Ped ped = Call<Ped>(gta::PLAYER_PED_ID);
+            Call<void>(gta::REQUEST_COLLISION_AT_COORD, p[0], p[1], p[2]);
+            const Entity who = Call<BOOL>(gta::IS_PED_IN_ANY_VEHICLE, ped, 0)
+                ? static_cast<Entity>(Call<Vehicle>(gta::GET_VEHICLE_PED_IS_IN, ped, 0)) : static_cast<Entity>(ped);
+            // 4 m beside it, on the rail's level, so arriving does not collect it.
+            Call<void>(gta::SET_ENTITY_COORDS_NO_OFFSET, who, p[0] + 4.0f, p[1], p[2] + 0.5f, 0, 0, 0);
+            Notify(s, collectibles::SelectedLabel(), 6000);
+        }),
         Flag("Board shop", "BoardShop", D.boardShop, {}, true),
         Flag("Wheel paint determines hardness", "WheelsFromPaint", D.wheelsFromPaint, Bound("WheelsFromPaint")),
         Flag("Survey vehicle shapes", "VehicleShapes", D.vehicleShapes, Bound("VehicleShapes")),
@@ -4208,7 +4240,7 @@ std::vector<menu::Page> MenuPages(Session& s) {
                             [&k](const WorldSwitch& w) { return k == w.key; })) return "World";
             if (k.empty()) for (const char* label : {"World collision:", "Compare: plain GTA", "Mark", "Go to this mark", "Show fixed marks", "Delete this mark", "Reset all settings"})
                 if (item.label.rfind(label, 0) == 0) return "World";
-            if (any({"GpsWhileSkating", "SkateSpots"})) return "World";
+            if (any({"GpsWhileSkating", "SkateSpots", "Collectibles"}) || item.label.rfind("Collectibles:", 0) == 0) return "World";
             if (k == "DevOptions") return "Advanced";
             if (any({"BoardShop", "WheelsFromPaint"})) return "Board";
             return "Developer";
@@ -4351,7 +4383,8 @@ std::vector<menu::Page> MenuPages(Session& s) {
                    {"People", {"PedsSurvive", "PedLaunch", "PedBumpImpulse", "Injuries"}},
                    {"On foot", {"GtaDelegation", "SwimDepth", "BoardAim", "Stamina"}},
                    {"Build a park", {"Object dropper"}},
-                   {"GPS", {"GPS", "GpsWhileSkating", "SkateSpots"}}}},
+                   {"GPS", {"GPS", "GpsWhileSkating", "SkateSpots"}},
+                   {"Collectibles", {"Collectibles", "Collectibles:"}}}},
         {"Audio and radio", {{"Radio", {"SkateRadio", "RadioControls"}},
                              {"Skate sound", {"AudioGtaGainDb", "AudioMasterGain", "AudioOutput"}}}},
     };
@@ -4588,6 +4621,8 @@ void ScriptMain() {
         Logf("SkateV Legacy: hippie jump x%.2f (%s)", cfg.hippieJump,
              g_runtime.SetHippieJump(cfg.hippieJump) ? "runtime option present" : "runtime option absent");
         g_runtime.SetVerboseLog(cfg.verboseLog);
+        // Collectibles first: the shop keeps as many secret items as there are part collectibles.
+        collectibles::Start(g_gameDir, cfg.collectibles, Log);
         // The board shop's part models and the shop itself (garages in the game folder).
         if (cfg.drawBoard && boardparts::Start(std::filesystem::u8path(cfg.dataRoot).wstring(), Log) && cfg.boardShop)
             boardshop::Start(g_runtime, cfg.dataRoot, util::Narrow(g_gameDir), Log, [](float hardness) {
@@ -4597,6 +4632,7 @@ void ScriptMain() {
                     Logf("board shop: painted wheels ride at hardness %.2f", wheels);
                 ApplyWheelGlow(g_config);
             });
+        boardshop::SetSecrets(collectibles::PartCount());
     }
 
     // Skate audio inside GTA's audio engine (P0-3b); runtime may be absent.
@@ -4744,6 +4780,14 @@ void ScriptMain() {
             !objectdropper::IsOpen())
             DrawKeyboardHints(std::string_view(s.last.state_utf8).rfind("Biped", 0) == 0);
         skatemap::Tick(SkateOwnsPlayer(s), g_config.gpsWhileSkating, g_config.skateSpots, boardshop::BeachShopAvailable());
+        {
+            // Collectibles: earned only riding (not walking or bailed in Skate).
+            const std::string_view st(s.last.state_utf8);
+            const bool riding = s.state == LifeState::Skating && st.rfind("Biped", 0) != 0 && st.rfind("Wipeout", 0) != 0;
+            const float root[3] = {s.last.skater_position.x, s.last.skater_position.y, s.last.skater_position.z};
+            collectibles::Tick(g_config.collectibles, riding, root, Call<int>(gta::PLAYER_PED_ID));
+            if (const char* notice = collectibles::TakeNotice()) Notify(s, notice, 6000);
+        }
         // M while skating: GTA's own interaction menu. It did not open because
         // Skate holds the player frozen (IS_ENTITY_STATIC; control, on foot,
         // in air all as on foot): while M is down and briefly after, the

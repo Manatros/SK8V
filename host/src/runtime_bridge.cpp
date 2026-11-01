@@ -72,6 +72,8 @@ bool RuntimeBridge::Load(const wchar_t* dllPath, const std::string& dataRoot, co
     };
     optional(shopStart_, "sv_shop_start");
     optional(shopCharacter_, "sv_shop_character");
+    optional(shopSecrets_, "sv_shop_secrets");
+    optional(shopUnlockNext_, "sv_shop_unlock_next");
     optional(shopOpen_, "sv_shop_open");
     optional(shopOpenAt_, "sv_shop_open_at");
     optional(shopClose_, "sv_shop_close");
@@ -324,6 +326,20 @@ bool RuntimeBridge::ShopStart(const std::string& assets, const std::string& gara
 
 bool RuntimeBridge::ShopCharacter(const std::string& who) {
     return runtime_ && shopCharacter_ && shopCharacter_(runtime_, who.c_str()) != 0;
+}
+
+int RuntimeBridge::ShopSecrets(int count) {
+    if (!runtime_ || !shopSecrets_) return -1;
+    return static_cast<int>(shopSecrets_(runtime_, static_cast<std::uint32_t>(count < 0 ? 0 : count)));
+}
+
+std::string RuntimeBridge::ShopUnlockNext() {
+    if (!runtime_ || !shopUnlockNext_) return {};
+    std::string text(512, '\0');
+    std::uint32_t need = shopUnlockNext_(runtime_, text.data(), static_cast<std::uint32_t>(text.size()));
+    if (need > text.size()) return {};  // unlocked, but the title did not fit: never happens at 512
+    text.resize(need ? need - 1 : 0);
+    return text;
 }
 
 bool RuntimeBridge::ShopOpen(int tier) {

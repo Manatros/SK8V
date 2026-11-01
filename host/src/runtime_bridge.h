@@ -71,6 +71,9 @@ public:
     bool HasShop() const { return shopStart_ && shopText_; }
     bool ShopStart(const std::string& assets, const std::string& garages);
     bool ShopCharacter(const std::string& who);
+    // Collectibles' secret shop items: still locked (-1 without the export), and the next unlock ("key\ttitle", empty: none).
+    int ShopSecrets(int count);
+    std::string ShopUnlockNext();
     bool ShopOpen(int tier);
     // Today's stock of the store at x, y (its display's boards); an older
     // runtime without it opens the whole catalog (tiers 0 and 1 only).
@@ -145,6 +148,8 @@ private:
     SvSetHippieJumpFn setHippieJump_ = nullptr;
     SvShopStartFn shopStart_ = nullptr;
     SvShopCharacterFn shopCharacter_ = nullptr;
+    SvShopSecretsFn shopSecrets_ = nullptr;
+    SvShopUnlockNextFn shopUnlockNext_ = nullptr;
     SvShopOpenFn shopOpen_ = nullptr;
     SvShopOpenAtFn shopOpenAt_ = nullptr;
     SvShopCloseFn shopClose_ = nullptr;
