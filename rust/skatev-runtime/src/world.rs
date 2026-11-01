@@ -526,6 +526,7 @@ fn build_area_rules(center: Vec3, tris: impl Iterator<Item = ([[f32; 3]; 3], u32
         let p = t.map(Vec3::from_array);
         p.iter().all(|v| v.is_finite()) && (p[1] - p[0]).cross(p[2] - p[0]).length_squared() > 1e-10
     }).collect();
+    let bar_tris: Vec<[Vec3; 3]> = bars.iter().map(|(t, _)| t.map(Vec3::from_array)).collect();
     let (gta, surfaces): (Vec<[Vec3; 3]>, Vec<u32>) = tris.into_iter()
         .map(|(t, tag)| (t.map(Vec3::from_array), tag))
         .filter(|(p, _)| p.iter().all(|v| v.is_finite())
@@ -574,7 +575,7 @@ fn build_area_rules(center: Vec3, tris: impl Iterator<Item = ([[f32; 3]; 3], u32
     // lines along them (stair edges, walls beside them) go, and each gets a
     // thin collision box for board contact.
     let visual = if static_rails {
-        crate::visrails::rails_in_reusing([center.x, center.y], RADIUS + 3.0, &gta, &rail_grid, &dirty, &mut cache.visual)
+        crate::visrails::rails_in_reusing([center.x, center.y], RADIUS + 3.0, &gta, &rail_grid, &bar_tris, &dirty, &mut cache.visual)
     } else {
         Vec::new()
     };
@@ -1181,6 +1182,83 @@ pub fn park_edge_lines(area: &mut Area, gta_rails: &[Vec<[f32; 3]>]) -> usize {
         area.rails = gta.into_iter().map(|r| r.into_iter().map(|p| coords::to_skate(p).to_array()).collect()).collect();
     }
     added
+}
+
+/// Visible railings (design 2026-10-25-visible-bar-collision, revision 8.3):
+/// GTA's railing box carried the finder's line on its top; with the box
+/// replaced by the visible bars, that line comes back on the bar's top
+/// wherever the area has no line yet (the visible-rail export misses the
+/// top bar at bends and posts). `slab_rails`: the lines of the same area
+/// built with the replaced boxes back (Skate space); `slabs`: those boxes
+/// (GTA space). Every 10 cm of such a line that lies on a box's top face,
+/// has no area line within 15 cm and a bar within 20 cm aside moves onto the
+/// highest bar point there; runs of 0.5 m or more are added. Then lower
+/// bars under the new lines go (only a railing's top bar is grindable).
+/// Returns how many lines were added.
+pub fn bar_top_lines(area: &mut Area, slab_rails: &[Vec<[f32; 3]>], slabs: &[[[f32; 3]; 3]]) -> usize {
+    let g = |p: [f32; 3]| coords::from_skate(Vec3::from_array(p));
+    let bars: Vec<[Vec3; 3]> = area.triangles.iter().zip(&area.tags)
+        .filter(|(_, tag)| *tag & crate::live::VISBAR_TAG != 0).map(|(t, _)| t.map(g)).collect();
+    let tops: Vec<[Vec3; 3]> = slabs.iter().map(|t| t.map(Vec3::from_array)).filter(|t| {
+        let n = (t[1] - t[0]).cross(t[2] - t[0]);
+        n.z >= 0.5 * n.length().max(1e-9)
+    }).collect();
+    if bars.is_empty() || tops.is_empty() { return 0; }
+    let (bar_grid, top_grid) = (crate::grid::XyGrid::triangles(1.0, &bars), crate::grid::XyGrid::triangles(1.0, &tops));
+    let near = |grid: &crate::grid::XyGrid, p: Vec3, r: f32| -> Vec<u32> {
+        let mut v = Vec::new();
+        for x in grid.cell_of(p.x - r)..=grid.cell_of(p.x + r) {
+            for y in grid.cell_of(p.y - r)..=grid.cell_of(p.y + r) { v.extend_from_slice(grid.cell(x, y)); }
+        }
+        v.sort_unstable(); v.dedup(); v
+    };
+    let on_box_top = |p: Vec3| top_grid.at(p.x, p.y).iter()
+        .any(|&i| crate::grid::height(&tops[i as usize], p.x, p.y).is_some_and(|z| (z - p.z).abs() <= 0.05));
+    let bar_top = |p: Vec3| near(&bar_grid, p, 0.20).into_iter().map(|i| closest_on_triangle(p, &bars[i as usize]))
+        .filter(|q| (*q - p).truncate().length() <= 0.20 && q.z >= p.z - 0.20 && q.z <= p.z + 0.05)
+        .max_by(|a, b| a.z.total_cmp(&b.z));
+    let mut have: Vec<(Vec3, Vec3)> = area.rails.iter().flat_map(|r| r.windows(2).map(|w| (g(w[0]), g(w[1])))).collect();
+    let covered = |have: &[(Vec3, Vec3)], p: Vec3| have.iter().any(|&(a, b)| {
+        let ab = b - a;
+        let q = a + ab * ((p - a).dot(ab) / ab.length_squared().max(1e-12)).clamp(0.0, 1.0);
+        q.distance(p) <= 0.15
+    });
+    let mut added: Vec<Vec<Vec3>> = Vec::new();
+    for r in slab_rails {
+        let r: Vec<Vec3> = r.iter().map(|&p| g(p)).collect();
+        let mut run: Vec<Vec3> = Vec::new();
+        let mut flush = |run: &mut Vec<Vec3>, have: &mut Vec<(Vec3, Vec3)>| {
+            if run.windows(2).map(|w| w[0].distance(w[1])).sum::<f32>() >= 0.5 {
+                have.extend(run.windows(2).map(|w| (w[0], w[1])));
+                added.push(std::mem::take(run));
+            }
+            run.clear();
+        };
+        for w in r.windows(2) {
+            let n = ((w[0].distance(w[1]) / 0.1).ceil() as usize).max(1);
+            for k in 0..=n {
+                let p = w[0].lerp(w[1], k as f32 / n as f32);
+                // Both long edges of a box top land on the same bar: the second is covered there.
+                let q = if on_box_top(p) && !covered(&have, p) { bar_top(p).filter(|&q| !covered(&have, q)) } else { None };
+                match q {
+                    Some(q) if !run.last().is_some_and(|l: &Vec3| l.distance(q) < 0.01) => run.push(q),
+                    Some(_) => {}
+                    None => flush(&mut run, &mut have),
+                }
+            }
+        }
+        flush(&mut run, &mut have);
+    }
+    let count = added.len();
+    if count > 0 {
+        let mut gta: Vec<Vec<Vec3>> = area.rails.iter().map(|r| r.iter().map(|&p| g(p)).collect()).collect();
+        gta.extend(added);
+        crate::rails::join_ends(&mut gta);
+        let mut gta = off_stacked(gta);
+        crate::rails::straighten(&mut gta, STRAIGHT);
+        area.rails = gta.into_iter().map(|r| r.into_iter().map(|p| coords::to_skate(p).to_array()).collect()).collect();
+    }
+    count
 }
 
 /// Gap a grind line may be bridged across when the collision has an edge
@@ -2024,6 +2102,38 @@ mod tests {
         let mut area = Area { triangles: hump.clone(), tags: vec![0; hump.len()], rails: Vec::new(), ..area };
         let crease = vec![vec![coords::to_skate(v(0.2, 0., 0.5)).to_array(), coords::to_skate(v(3.8, 0., 0.5)).to_array()]];
         assert_eq!(park_edge_lines(&mut area, &crease), 0);
+    }
+
+    #[test]
+    fn a_replaced_box_top_line_comes_back_on_the_bar_and_the_middle_bar_goes() {
+        let v = Vec3::new;
+        let s = |t: [Vec3; 3]| t.map(|p| coords::to_skate(p).to_array());
+        let k = |p: Vec3| coords::to_skate(p).to_array();
+        // A visible railing 4 m long: top bar 2 cm wide at z 1.0 (y 0), and
+        // GTA's replaced box 30 cm wide with its top at 1.06.
+        let bar = vec![s([v(0., -0.01, 1.0), v(4., -0.01, 1.0), v(4., 0.01, 1.0)]), s([v(0., -0.01, 1.0), v(4., 0.01, 1.0), v(0., 0.01, 1.0)])];
+        let slabs = vec![[[0., -0.15, 1.06], [4., -0.15, 1.06], [4., 0.15, 1.06]], [[0., -0.15, 1.06], [4., 0.15, 1.06], [0., 0.15, 1.06]]];
+        let area = |rails: Vec<Vec<[f32; 3]>>, bars: bool| Area { noses: Vec::new(), center: Vec3::ZERO, triangles: bar.clone(),
+            tags: vec![if bars { crate::live::VISBAR_TAG } else { 0 }; bar.len()], rails,
+            census: Default::default(), bevels: Default::default(), note: String::new(), bounds: Vec::new(), live_required: false,
+            changed: None, fixed: 0, options: 0, origins: Default::default() };
+        // The finder's two long edges of the box top, and a middle bar line at 0.6.
+        let box_lines = vec![vec![k(v(0., -0.15, 1.06)), k(v(4., -0.15, 1.06))], vec![k(v(0., 0.15, 1.06)), k(v(4., 0.15, 1.06))]];
+        let middle = vec![vec![k(v(0., 0., 0.6)), k(v(4., 0., 0.6))]];
+        let mut a = area(middle.clone(), true);
+        assert_eq!(bar_top_lines(&mut a, &box_lines, &slabs), 1, "one line for both edges");
+        let g: Vec<Vec<Vec3>> = a.rails.iter().map(|r| r.iter().map(|&p| coords::from_skate(Vec3::from_array(p))).collect()).collect();
+        assert_eq!(g.len(), 1, "the middle bar under it goes: {g:?}");
+        assert!(g[0].iter().all(|p| (p.z - 1.0).abs() < 1e-3 && p.y.abs() <= 0.011), "on the bar's top: {g:?}");
+        // A visible rail already on the bar: nothing added.
+        let mut a = area(vec![vec![k(v(0., 0., 1.0)), k(v(4., 0., 1.0))]], true);
+        assert_eq!(bar_top_lines(&mut a, &box_lines, &slabs), 0);
+        // No visible railing (the triangles are not bars): nothing added.
+        let mut a = area(Vec::new(), false);
+        assert_eq!(bar_top_lines(&mut a, &box_lines, &slabs), 0);
+        // A deck edge at the railing's foot (no box top under it): nothing added.
+        let mut a = area(Vec::new(), true);
+        assert_eq!(bar_top_lines(&mut a, &vec![vec![k(v(0., 0.2, 0.0)), k(v(4., 0.2, 0.0))]], &slabs), 0);
     }
 
     #[test]

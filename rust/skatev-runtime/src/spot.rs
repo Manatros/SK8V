@@ -55,7 +55,7 @@ static STATUS: Mutex<String> = Mutex::new(String::new());
 
 /// Tag bits and their names (`live.rs`, `skate_host::bridge::NO_GRIND_TAG`).
 fn tag_names(tag: u32) -> String {
-    let bits: [(u32, &str); 11] = [
+    let bits: [(u32, &str); 13] = [
         (crate::live::PARKMESH_TAG, "park-visible"),
         (crate::live::PARKCUT_TAG, "park-cut"),
         (crate::live::PARKGTA_TAG, "park-gta"),
@@ -66,6 +66,8 @@ fn tag_names(tag: u32) -> String {
         (crate::live::RAMP_TAG, "ramp"),
         (crate::live::LIVE_TAG, "live"),
         (crate::live::RAILBOX_TAG, "railbox"),
+        (crate::live::VISBAR_TAG, "visbar"),
+        (crate::live::SLAB_TAG, "slab"),
         (skate_host::bridge::NO_GRIND_TAG, "no-grind"),
     ];
     let names: Vec<&str> = bits.iter().filter(|(b, _)| tag & b != 0).map(|(_, n)| *n).collect();

@@ -218,24 +218,30 @@ pub fn rails_in(centre: [f32; 2], half: f32, tris: &[[Vec3; 3]]) -> Vec<Vec<Vec3
     if !ENABLED.load(std::sync::atomic::Ordering::Relaxed) { return Vec::new(); }
     let Some(Some(file)) = FILE.get() else { return Vec::new() };
     let grid = crate::grid::XyGrid::triangles(1.0, tris);
-    in_cells_reusing(file.cell, |c| file.cell_rails(c), centre, half, tris, &grid, &crate::reuse::Dirty::everything(), &mut crate::reuse::LineCache::default())
+    in_cells_reusing(file.cell, |c| file.cell_rails(c), centre, half, tris, &grid, &[], &crate::reuse::Dirty::everything(), &mut crate::reuse::LineCache::default())
 }
 
 /// Test source supplying cells directly.
 #[cfg(test)]
-fn in_cells(size: f32, cell: impl Fn(Cell) -> Rails, centre: [f32; 2], half: f32, tris: &[[Vec3; 3]]) -> Vec<Vec<Vec3>> {
+fn in_cells(size: f32, cell: impl Fn(Cell) -> Rails, centre: [f32; 2], half: f32, tris: &[[Vec3; 3]], bars: &[[Vec3; 3]]) -> Vec<Vec<Vec3>> {
     let grid = crate::grid::XyGrid::triangles(1.0, tris);
-    in_cells_reusing(size, cell, centre, half, tris, &grid, &crate::reuse::Dirty::everything(), &mut crate::reuse::LineCache::default())
+    in_cells_reusing(size, cell, centre, half, tris, &grid, bars, &crate::reuse::Dirty::everything(), &mut crate::reuse::LineCache::default())
 }
 
 /// Rails with support checks reused where nearby geometry is unchanged.
-pub fn rails_in_reusing(centre: [f32; 2], half: f32, tris: &[[Vec3; 3]], grid: &crate::grid::XyGrid, dirty: &crate::reuse::Dirty, cache: &mut crate::reuse::LineCache) -> Vec<Vec<Vec3>> {
+/// `bars`: visible railing collision (visbars), which carries its own top
+/// bar; the bake keeps it fixed per area, so reuse needs no key for it.
+pub fn rails_in_reusing(centre: [f32; 2], half: f32, tris: &[[Vec3; 3]], grid: &crate::grid::XyGrid, bars: &[[Vec3; 3]], dirty: &crate::reuse::Dirty, cache: &mut crate::reuse::LineCache) -> Vec<Vec<Vec3>> {
     if !ENABLED.load(std::sync::atomic::Ordering::Relaxed) { return Vec::new(); }
     let Some(Some(file)) = FILE.get() else { return Vec::new() };
-    in_cells_reusing(file.cell, |c| file.cell_rails(c), centre, half, tris, grid, dirty, cache)
+    in_cells_reusing(file.cell, |c| file.cell_rails(c), centre, half, tris, grid, bars, dirty, cache)
 }
 
-fn in_cells_reusing(size: f32, cell: impl Fn(Cell) -> Rails, centre: [f32; 2], half: f32, tris: &[[Vec3; 3]], grid: &crate::grid::XyGrid, dirty: &crate::reuse::Dirty, cache: &mut crate::reuse::LineCache) -> Vec<Vec<Vec3>> {
+/// How close (metres) a visible rail must run to a visible railing's
+/// collision to stand on it.
+const ON_BAR: f32 = 0.10;
+
+fn in_cells_reusing(size: f32, cell: impl Fn(Cell) -> Rails, centre: [f32; 2], half: f32, tris: &[[Vec3; 3]], grid: &crate::grid::XyGrid, bars: &[[Vec3; 3]], dirty: &crate::reuse::Dirty, cache: &mut crate::reuse::LineCache) -> Vec<Vec<Vec3>> {
     // A rail is filed under its middle point's cell: one cell more round.
     let span = |v: f32| ((v - half) / size).floor() as i32 - 1..=((v + half) / size).floor() as i32 + 1;
     let mut found: Vec<Rails> = Vec::new();
@@ -259,6 +265,21 @@ fn in_cells_reusing(size: f32, cell: impl Fn(Cell) -> Rails, centre: [f32; 2], h
                 .is_some_and(|z| FLOOR_BELOW.contains(&(p.z - z)))
         })
     };
+    // A railing's top bar over a bowl has no floor in reach below its bends
+    // (Vespucci 2026-11-01: 2.8 m down); GTA's box under it used to carry a
+    // line there. Its own visible collision now does.
+    let bar_grid = (!bars.is_empty()).then(|| crate::grid::XyGrid::triangles(1.0, bars));
+    let on_bar = |p: Vec3| bar_grid.as_ref().is_some_and(|g| g.at(p.x, p.y).iter()
+        .any(|&i| crate::world::closest_on_triangle(p, &bars[i as usize]).distance_squared(p) <= ON_BAR * ON_BAR));
+    // Only where no floor is in reach at all: a foot bar over its deck stays
+    // out (goldfish 2026-11-01: it lies on its own bar mesh too).
+    let floor_near = |p: Vec3| grid.at(p.x, p.y).iter().any(|&i| {
+        let t = tris[i as usize];
+        let n = (t[1] - t[0]).cross(t[2] - t[0]);
+        n.z >= 0.5 * n.length().max(1e-9) && svwc::clean::floor_at(&svwc::Tri { v: t.map(|v| v.to_array()), material: 0 }, [p.x, p.y])
+            .is_some_and(|z| (0.0..*FLOOR_BELOW.start()).contains(&(p.z - z)))
+    });
+    let stands = |p: Vec3| stands(p) || (!floor_near(p) && on_bar(p));
     let raw: Vec<_> = found.iter().flat_map(|r| r.iter())
         .filter(|r| r.iter().any(|p| (p.x - centre[0]).abs() <= half && (p.y - centre[1]).abs() <= half))
         .cloned().collect();
@@ -405,10 +426,20 @@ mod tests {
         let rails: Rails = std::sync::Arc::new(rails_at(&body, 2).unwrap());
         let v = Vec3::new;
         let floor = vec![[v(-10., -10., 0.), v(10., -10., 0.), v(10., 10., 0.)], [v(-10., -10., 0.), v(10., 10., 0.), v(-10., 10., 0.)]];
-        let kept = in_cells(size, |c| if c == (0, 0) { rails.clone() } else { Default::default() }, [0.0, 0.0], 20.0, &floor);
+        let kept = in_cells(size, |c| if c == (0, 0) { rails.clone() } else { Default::default() }, [0.0, 0.0], 20.0, &floor, &[]);
         assert_eq!(kept.len(), 1, "the 1 m handrail stays, the 9 m high bar goes");
         let b = boxes(&kept);
         assert_eq!(b.len(), 12);
         assert!(b.iter().all(|t| t.iter().all(|p| p.z <= 1.0 + 1e-6 && p.z >= 1.0 - BOX_DEPTH - 1e-6)));
+        // The high bar on a visible railing's collision (its top 5 cm under
+        // the line) stands on it; 30 cm under, it does not.
+        let bar = |z: f32| vec![[v(0., 2.95, z), v(5., 2.95, z), v(5., 3.05, z)]];
+        let rail = |c: Cell| if c == (0, 0) { rails.clone() } else { Default::default() };
+        assert_eq!(in_cells(size, rail, [0.0, 0.0], 20.0, &floor, &bar(8.95)).len(), 2);
+        assert_eq!(in_cells(size, rail, [0.0, 0.0], 20.0, &floor, &bar(8.7)).len(), 1);
+        // A foot bar 10 cm over the floor, on its own bar mesh: still no rail.
+        let foot = vec![[v(0., 2.95, 8.95), v(5., 2.95, 8.95), v(5., 3.05, 8.95)]];
+        let deck = vec![[v(-10., 2., 8.9), v(10., 2., 8.9), v(10., 4., 8.9)], [v(-10., 2., 8.9), v(10., 4., 8.9), v(-10., 4., 8.9)]];
+        assert!(in_cells(size, rail, [0.0, 0.0], 20.0, &deck, &foot).iter().all(|r| r[0].z < 5.));
     }
 }

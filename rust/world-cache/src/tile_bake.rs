@@ -1355,11 +1355,25 @@ fn bake(
                     .map(|(t, x)| (t.v, SkateVRuntime::surfaces::tag(t.material, surface_tags.get(&svwc::surfaces::key(&t.v))) | (x & !SkateVRuntime::live::PARKGTA_TAG))))
                 .collect()
         } else { Vec::new() };
+        // Visible railings: the replaced boxes' top lines, found on the same
+        // input with the boxes back (visbars design revision 8.3).
+        let slabs: Vec<[[f32; 3]; 3]> = cleaned.alternatives.iter()
+            .filter(|(_, x)| x & SkateVRuntime::live::SLAB_TAG != 0).map(|(t, _)| t.v).collect();
+        let with_boxes: Vec<([[f32; 3]; 3], u32)> = if slabs.is_empty() { Vec::new() } else {
+            input.iter().filter(|(_, tag)| tag & SkateVRuntime::live::VISBAR_TAG == 0).cloned()
+                .chain(cleaned.alternatives.iter().filter(|(_, x)| x & SkateVRuntime::live::SLAB_TAG != 0)
+                    .map(|(t, _)| (t.v, SkateVRuntime::surfaces::tag(t.material, surface_tags.get(&svwc::surfaces::key(&t.v))))))
+                .collect()
+        };
         let mut area = world::build_area_tagged(at, input.into_iter());
         if !gta_park.is_empty() {
             let gta_area = world::build_area_tagged(at, gta_park.into_iter());
             let added = world::park_edge_lines(&mut area, &gta_area.rails);
             validation.park_edge_lines += added;
+        }
+        if !with_boxes.is_empty() {
+            let boxed_area = world::build_area_tagged(at, with_boxes.into_iter());
+            validation.bar_top_lines += world::bar_top_lines(&mut area, &boxed_area.rails, &slabs);
         }
         let mut tile = Tile {
             cell: c,
@@ -1677,6 +1691,8 @@ struct Validation {
     step_examples: Vec<Vec3>,
     /// Park edge lines taken from GTA's own park collision (world::park_edge_lines).
     park_edge_lines: usize,
+    /// Replaced railing boxes' top lines put on the visible bars (world::bar_top_lines).
+    bar_top_lines: usize,
 }
 fn segments(lines: &[Vec<Vec3>]) -> (Vec<(Vec3, Vec3)>, SkateVRuntime::grid::XyGrid) {
     let edges: Vec<_> = lines
@@ -1721,6 +1737,7 @@ impl Validation {
         self.treads += other.treads;
         self.risers += other.risers;
         self.park_edge_lines += other.park_edge_lines;
+        self.bar_top_lines += other.bar_top_lines;
         for p in other.track_examples {
             example(&mut self.track_examples, p);
         }
@@ -1830,7 +1847,8 @@ impl Validation {
             self.handrail_examples,
             self.step_examples
         ) + &format!("Park edge lines from GTA's own park collision (visible folds of 30 deg or more): {}
-", self.park_edge_lines)
+Railing top lines from replaced boxes, on the visible bars: {}
+", self.park_edge_lines, self.bar_top_lines)
     }
 }
 

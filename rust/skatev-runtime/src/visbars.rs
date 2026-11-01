@@ -5,6 +5,14 @@ use svwc::Tri;
 
 pub const RAILING_MATERIALS: &[u8] = &[64];
 pub const CELL: f32 = 32.0;
+/// Containment widens the footprint by this much (XY) and the z range by
+/// `Z_MARGIN`: GTA's straight boxes along a curved railing reach up to 17 cm
+/// past the bars, a stair handrail box 1 cm below (Vespucci 1101 marks;
+/// 10 cm left 10 of its 16 boxes as old slabs).
+pub const MARGIN: f32 = 0.20;
+pub const Z_MARGIN: f32 = 0.05;
+/// Railing-material components lower than this (m) are never replaced.
+pub const FLAT: f32 = 0.10;
 pub static VISIBLE_RAILINGS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
 
 #[derive(Clone, Debug, PartialEq)]
@@ -20,16 +28,16 @@ impl Object {
     pub fn bounds(&self) -> [f32; 4] {
         let mut b = [f32::INFINITY, f32::NEG_INFINITY, f32::INFINITY, f32::NEG_INFINITY];
         for p in self.footprint.iter().flatten() {
-            b[0] = b[0].min(p[0] - 0.10); b[1] = b[1].max(p[0] + 0.10);
-            b[2] = b[2].min(p[1] - 0.10); b[3] = b[3].max(p[1] + 0.10);
+            b[0] = b[0].min(p[0] - MARGIN); b[1] = b[1].max(p[0] + MARGIN);
+            b[2] = b[2].min(p[1] - MARGIN); b[3] = b[3].max(p[1] + MARGIN);
         }
         b
     }
 
     fn contains(&self, p: Vec3) -> bool {
-        p.z >= self.z[0] && p.z <= self.z[1] && self.footprint.iter().any(|t| {
+        p.z >= self.z[0] - Z_MARGIN && p.z <= self.z[1] + Z_MARGIN && self.footprint.iter().any(|t| {
             let t = t.map(|p| Vec3::new(p[0], p[1], 0.));
-            distance(p.with_z(0.), &t) <= 0.10 * 0.10 + 1e-8
+            distance(p.with_z(0.), &t) <= MARGIN * MARGIN + 1e-8
         })
     }
 }
@@ -39,7 +47,7 @@ fn cells(b: [f32; 4], size: f32) -> impl Iterator<Item = (i32, i32)> {
         ((b[2] / size).floor() as i32..=(b[3] / size).floor() as i32).map(move |y| (x, y)))
 }
 
-/// The stored footprint is the XY triangles; containment widens their union by 10 cm.
+/// The stored footprint is the XY triangles; containment widens their union by `MARGIN`.
 pub fn write(path: &Path, objects: &[Object]) -> io::Result<()> {
     let mut table: BTreeMap<_, Vec<&Object>> = BTreeMap::new();
     let mut ids = BTreeSet::new();
@@ -454,7 +462,10 @@ fn replace_with(tris: &mut Vec<Tri>, objects: &[&Object], keep: &std::collection
     for (component, s) in components.values().zip(&seen) {
         let free: Vec<usize> = s.covering.iter().copied().filter(|n| !blocked.contains(n)).collect();
         let covering: Vec<&Object> = free.iter().map(|&n| objects[n]).collect();
-        let covered = s.corners.iter().filter(|&&p| covering.iter().any(|o| o.contains(p))).count() as f32 / s.corners.len() as f32 >= 0.9;
+        // A flat box (a floor grate at a railing's foot) is no railing box
+        // (goldfish 2026-11-01: the wider margin would cover it and leave a hole).
+        let flat = s.b[5] - s.b[4] < FLAT;
+        let covered = !flat && s.corners.iter().filter(|&&p| covering.iter().any(|o| o.contains(p))).count() as f32 / s.corners.len() as f32 >= 0.9;
         let matched = if covered && !s.authored { side_vote(component, tris, &covering, s.b) } else { 0. };
         let reason = if s.authored { "authored" }
             else if !covered && s.covering.len() > free.len() { "authored-neighbour" }
@@ -521,6 +532,21 @@ mod tests {
             assert_eq!(crate::live::shown_with_railings(crate::live::SLAB_TAG, visible), !visible);
             assert_eq!(crate::live::shown_with_railings(crate::live::VISBAR_TAG, visible), visible);
         }
+    }
+    #[test]
+    fn a_box_reaching_17_cm_past_the_bars_is_replaced_30_cm_stays() {
+        // Vespucci 1101: GTA's straight boxes along a curved railing stick out
+        // up to 17 cm, a stair box 1 cm below the bars' z range.
+        let o = object(1,0.,2.,false);
+        let wide = |w: f32, z0: f32| -> Vec<Tri> { box_mesh(0.,2.,z0,1.).into_iter()
+            .map(|v| Tri {v: v.map(|p| [p[0], p[1] * (0.04 + w) / 0.04, p[2]]), material:64}).collect() };
+        let mut tris = wide(0.17, -0.19); let r = replace_with(&mut tris,&[&o],&Default::default());
+        assert!(tris.is_empty()); assert_eq!(r.reports[0].reason,"replaced");
+        let mut tris = wide(0.30, 0.); let r = replace_with(&mut tris,&[&o],&Default::default());
+        assert_eq!(tris.len(),12); assert_eq!(r.reports[0].reason,"uncovered");
+        // A 5 cm high grate under the bars' footprint stays.
+        let mut tris: Vec<Tri> = box_mesh(0.,2.,0.,0.05).into_iter().map(|v| Tri {v,material:64}).collect();
+        let r = replace_with(&mut tris,&[&o],&Default::default()); assert_eq!(tris.len(),12); assert_eq!(r.reports[0].reason,"uncovered");
     }
     #[test]
     fn a_large_model_over_a_railing_box_is_not_a_railing() {
