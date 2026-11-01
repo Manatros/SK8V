@@ -269,8 +269,18 @@ fn in_cells_reusing(size: f32, cell: impl Fn(Cell) -> Rails, centre: [f32; 2], h
     // (Vespucci 2026-11-01: 2.8 m down); GTA's box under it used to carry a
     // line there. Its own visible collision now does.
     let bar_grid = (!bars.is_empty()).then(|| crate::grid::XyGrid::triangles(1.0, bars));
-    let on_bar = |p: Vec3| bar_grid.as_ref().is_some_and(|g| g.at(p.x, p.y).iter()
-        .any(|&i| crate::world::closest_on_triangle(p, &bars[i as usize]).distance_squared(p) <= ON_BAR * ON_BAR));
+    // ... and only at the top of the railing's mesh: no bar more than 10 cm
+    // over it within 20 cm aside (peer review 2026-11-01: a bottom rail
+    // overhanging a drop lies on its own mesh too).
+    let on_bar = |p: Vec3| bar_grid.as_ref().is_some_and(|g| {
+        let list = g.at(p.x, p.y);
+        let on = list.iter().any(|&i| crate::world::closest_on_triangle(p, &bars[i as usize]).distance_squared(p) <= ON_BAR * ON_BAR);
+        let up = p + Vec3::Z * 0.3;
+        on && !list.iter().any(|&i| {
+            let q = crate::world::closest_on_triangle(up, &bars[i as usize]);
+            q.z > p.z + 0.10 && (q - p).truncate().length() <= 0.20
+        })
+    });
     // Only where no floor is in reach at all: a foot bar over its deck stays
     // out (goldfish 2026-11-01: it lies on its own bar mesh too).
     let floor_near = |p: Vec3| grid.at(p.x, p.y).iter().any(|&i| {
@@ -441,5 +451,8 @@ mod tests {
         let foot = vec![[v(0., 2.95, 8.95), v(5., 2.95, 8.95), v(5., 3.05, 8.95)]];
         let deck = vec![[v(-10., 2., 8.9), v(10., 2., 8.9), v(10., 4., 8.9)], [v(-10., 2., 8.9), v(10., 4., 8.9), v(-10., 4., 8.9)]];
         assert!(in_cells(size, rail, [0.0, 0.0], 20.0, &deck, &foot).iter().all(|r| r[0].z < 5.));
+        // A bottom bar over a drop with its top bar 0.9 m above: no rail; the top bar is one.
+        let two = vec![[v(0., 2.95, 8.95), v(5., 2.95, 8.95), v(5., 3.05, 8.95)], [v(0., 2.95, 9.85), v(5., 2.95, 9.85), v(5., 3.05, 9.85)]];
+        assert_eq!(in_cells(size, rail, [0.0, 0.0], 20.0, &floor, &two).len(), 1, "only the 1 m handrail on the floor");
     }
 }

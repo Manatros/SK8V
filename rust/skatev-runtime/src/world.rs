@@ -1214,7 +1214,16 @@ pub fn bar_top_lines(area: &mut Area, slab_rails: &[Vec<[f32; 3]>], slabs: &[[[f
     };
     let on_box_top = |p: Vec3| top_grid.at(p.x, p.y).iter()
         .any(|&i| crate::grid::height(&tops[i as usize], p.x, p.y).is_some_and(|z| (z - p.z).abs() <= 0.05));
-    let bar_top = |p: Vec3| near(&bar_grid, p, 0.20).into_iter().map(|i| closest_on_triangle(p, &bars[i as usize]))
+    // The bar's crown: its long upward faces (peer review 2026-11-01: the
+    // nearest point of any face sat beside the crown, and post caps made the
+    // line jog). The highest such point near the sample.
+    let crown: Vec<bool> = bars.iter().map(|t| {
+        let n = (t[1] - t[0]).cross(t[2] - t[0]);
+        let long = (0..3).map(|k| (t[k] - t[(k + 1) % 3]).truncate().length()).fold(0.0f32, f32::max) >= 0.15;
+        long && n.z >= 0.5 * n.length().max(1e-9)
+    }).collect();
+    let bar_top = |p: Vec3| near(&bar_grid, p, 0.20).into_iter().filter(|&i| crown[i as usize])
+        .map(|i| closest_on_triangle(p, &bars[i as usize]))
         .filter(|q| (*q - p).truncate().length() <= 0.20 && q.z >= p.z - 0.20 && q.z <= p.z + 0.05)
         .max_by(|a, b| a.z.total_cmp(&b.z));
     let mut have: Vec<(Vec3, Vec3)> = area.rails.iter().flat_map(|r| r.windows(2).map(|w| (g(w[0]), g(w[1])))).collect();
@@ -1251,11 +1260,14 @@ pub fn bar_top_lines(area: &mut Area, slab_rails: &[Vec<[f32; 3]>], slabs: &[[[f
     }
     let count = added.len();
     if count > 0 {
-        let mut gta: Vec<Vec<Vec3>> = area.rails.iter().map(|r| r.iter().map(|&p| g(p)).collect()).collect();
+        // Only the new lines are joined and straightened, and only lines
+        // under them are cut (peer review 2026-11-01: tracks and park edges
+        // already carry their own processing).
+        crate::rails::join_ends(&mut added);
+        crate::rails::straighten(&mut added, STRAIGHT);
+        let old: Vec<Vec<Vec3>> = area.rails.iter().map(|r| r.iter().map(|&p| g(p)).collect()).collect();
+        let mut gta = off_stacked_under(old, &added);
         gta.extend(added);
-        crate::rails::join_ends(&mut gta);
-        let mut gta = off_stacked(gta);
-        crate::rails::straighten(&mut gta, STRAIGHT);
         area.rails = gta.into_iter().map(|r| r.into_iter().map(|p| coords::to_skate(p).to_array()).collect()).collect();
     }
     count
@@ -1303,9 +1315,20 @@ const STACK_TURN: f32 = 20.0 * std::f32::consts::PI / 180.0;
 /// metro handrail's lower bar made a second line 40 cm under the top one):
 /// stretches with another rail right above them go.
 fn off_stacked(rails: Vec<Vec<Vec3>>) -> Vec<Vec<Vec3>> {
+    let upper = rails.clone();
+    stacked_under(rails, &upper, true)
+}
+
+/// `off_stacked` for `rails` under the separate set `upper` only.
+fn off_stacked_under(rails: Vec<Vec<Vec3>>, upper: &[Vec<Vec3>]) -> Vec<Vec<Vec3>> {
+    stacked_under(rails, upper, false)
+}
+
+/// `same`: `upper` is `rails` itself (a rail never stacks under itself).
+fn stacked_under(rails: Vec<Vec<Vec3>>, upper: &[Vec<Vec3>], same: bool) -> Vec<Vec<Vec3>> {
     // Every segment by 1 m cell, with its rail.
     let mut cells: rustc_hash::FxHashMap<(i32, i32), Vec<(usize, Vec3, Vec3)>> = Default::default();
-    for (k, r) in rails.iter().enumerate() {
+    for (k, r) in upper.iter().enumerate() {
         for w in r.windows(2) {
             let (lo, hi) = (w[0].min(w[1]), w[0].max(w[1]));
             for x in (lo.x - STACK_SIDE).floor() as i32..=(hi.x + STACK_SIDE).floor() as i32 {
@@ -1318,7 +1341,7 @@ fn off_stacked(rails: Vec<Vec<Vec3>>) -> Vec<Vec<Vec3>> {
     let mut out = Vec::new();
     for (k, rail) in rails.into_iter().enumerate() {
         let under = |p: Vec3, along: Vec3| cells.get(&(p.x.floor() as i32, p.y.floor() as i32)).is_some_and(|list| list.iter().any(|&(j, a, b)| {
-            if j == k { return false; }
+            if same && j == k { return false; }
             let ab = (b - a).truncate();
             // Only a bar running the same way (Codex peer review: a crossing
             // handrail cut the ledge line under it).
