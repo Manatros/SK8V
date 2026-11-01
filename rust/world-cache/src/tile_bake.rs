@@ -1509,6 +1509,7 @@ fn bake(
 
     if !tasks.is_empty() {
         let task_idx = std::sync::atomic::AtomicUsize::new(0);
+        let busy = std::sync::atomic::AtomicUsize::new(0);
         let (tx, rx) = std::sync::mpsc::channel();
         let build_ref = &build;
         let tasks_ref = &tasks;
@@ -1517,15 +1518,21 @@ fn bake(
             for _ in 0..num_workers {
                 let tx = tx.clone();
                 let task_idx = &task_idx;
+                let busy = &busy;
                 s.spawn(move || {
                     let mut lookups = open_lookups();
                     loop {
+                        // Memory gate: a worker waits before its next tile while
+                        // free RAM is under the floor; one always keeps going.
+                        memory_gate(busy);
                         let idx = task_idx.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                         if idx >= tasks_ref.len() {
+                            busy.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
                             break;
                         }
                         let c = tasks_ref[idx];
                         let res = lookups.as_mut().map_err(|e| e.to_string().into()).and_then(|l| build_ref(c, l));
+                        busy.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
                         if tx.send((c, res)).is_err() {
                             break;
                         }
@@ -2239,6 +2246,52 @@ fn peak_memory() -> usize {
     }
     c.peak
 }
+/// Free RAM floor for starting another tile (GB, SKATEV_BAKE_FREE_GB,
+/// default 2.5). Whole-map bakes were stopped twice for low system memory
+/// on a 16 GB PC with 12 workers (2026-10-31/11-01, Manatros: "scale workers
+/// with free space and pause workers that take too much").
+fn memory_floor() -> u64 {
+    let gb: f64 = std::env::var("SKATEV_BAKE_FREE_GB").ok().and_then(|v| v.parse().ok()).unwrap_or(2.5);
+    (gb.max(0.) * 1024. * 1024. * 1024.) as u64
+}
+
+/// Waits until free RAM is over the floor or no other worker is busy, then
+/// counts this worker as busy (the caller releases it after its tile).
+fn memory_gate(busy: &std::sync::atomic::AtomicUsize) {
+    use std::sync::atomic::Ordering::SeqCst;
+    static LAST_NOTE: std::sync::Mutex<Option<std::time::Instant>> = std::sync::Mutex::new(None);
+    let floor = memory_floor();
+    loop {
+        let free = free_memory();
+        // Reserve the slot first so two workers cannot both pass as "the only one".
+        let others = busy.fetch_add(1, SeqCst);
+        if others == 0 || free.is_none_or(|f| f >= floor) { return; }
+        busy.fetch_sub(1, SeqCst);
+        if let Ok(mut last) = LAST_NOTE.lock() {
+            if last.is_none_or(|t| t.elapsed().as_secs() >= 60) {
+                eprintln!("memory: {:.1} GB free (floor {:.1} GB), {others} tiles in progress; a worker waits",
+                    free.unwrap_or(0) as f64 / 1073741824., floor as f64 / 1073741824.);
+                *last = Some(std::time::Instant::now());
+            }
+        }
+        std::thread::sleep(std::time::Duration::from_millis(1500));
+    }
+}
+
+#[cfg(windows)]
+fn free_memory() -> Option<u64> {
+    #[repr(C)]
+    struct Status { length: u32, load: u32, total: u64, avail: u64, rest: [u64; 5] }
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn GlobalMemoryStatusEx(s: *mut Status) -> i32;
+    }
+    let mut s = Status { length: std::mem::size_of::<Status>() as u32, load: 0, total: 0, avail: 0, rest: [0; 5] };
+    (unsafe { GlobalMemoryStatusEx(&mut s) } != 0).then_some(s.avail)
+}
+#[cfg(not(windows))]
+fn free_memory() -> Option<u64> { None }
+
 #[cfg(not(windows))]
 fn peak_memory() -> usize {
     0
