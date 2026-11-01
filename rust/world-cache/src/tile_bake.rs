@@ -2273,6 +2273,22 @@ fn memory_floor() -> u64 {
     (gb.max(0.) * 1024. * 1024. * 1024.) as u64
 }
 
+/// Live cap on busy workers: the first number in the file named by
+/// SKATEV_BAKE_WORKERS_FILE, read at most every 5 s (Manatros 2026-11-01:
+/// "some stuff gets done while I play and when I stop playing more workers
+/// get enabled again"; `scripts/bake-while-playing.ps1` writes it). No file
+/// or no number: no cap. At least one worker always runs.
+fn worker_cap() -> usize {
+    static CAP: std::sync::Mutex<Option<(std::time::Instant, usize)>> = std::sync::Mutex::new(None);
+    let Ok(path) = std::env::var("SKATEV_BAKE_WORKERS_FILE") else { return usize::MAX };
+    let mut cap = CAP.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some((at, n)) = *cap { if at.elapsed().as_secs() < 5 { return n; } }
+    let n = fs::read_to_string(&path).ok().and_then(|t| t.split_whitespace().next().and_then(|v| v.parse::<usize>().ok()))
+        .map_or(usize::MAX, |n| n.max(1));
+    *cap = Some((std::time::Instant::now(), n));
+    n
+}
+
 /// Waits until free RAM is over the floor or no other worker is busy, then
 /// counts this worker as busy (the caller releases it after its tile).
 fn memory_gate(busy: &std::sync::atomic::AtomicUsize) {
@@ -2283,12 +2299,12 @@ fn memory_gate(busy: &std::sync::atomic::AtomicUsize) {
         let free = free_memory();
         // Reserve the slot first so two workers cannot both pass as "the only one".
         let others = busy.fetch_add(1, SeqCst);
-        if others == 0 || free.is_none_or(|f| f >= floor) { return; }
+        if others == 0 || (free.is_none_or(|f| f >= floor) && others < worker_cap()) { return; }
         busy.fetch_sub(1, SeqCst);
         if let Ok(mut last) = LAST_NOTE.lock() {
             if last.is_none_or(|t| t.elapsed().as_secs() >= 60) {
-                eprintln!("memory: {:.1} GB free (floor {:.1} GB), {others} tiles in progress; a worker waits",
-                    free.unwrap_or(0) as f64 / 1073741824., floor as f64 / 1073741824.);
+                eprintln!("memory: {:.1} GB free (floor {:.1} GB), {others} tiles in progress (cap {}); a worker waits",
+                    free.unwrap_or(0) as f64 / 1073741824., floor as f64 / 1073741824., worker_cap());
                 *last = Some(std::time::Instant::now());
             }
         }
