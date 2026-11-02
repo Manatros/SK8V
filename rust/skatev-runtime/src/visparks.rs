@@ -29,6 +29,14 @@ const SUPPORT_WIDTH: f32 = 0.30;
 const CURVE_FACING: f32 = 0.766;
 /// A visible triangle covers a GTA triangle only when their normals agree this much.
 const FACING: f32 = 0.5;
+/// A chord sharing a corner with a curve chord (same facing) is part of that
+/// curve when its visible faces leave it by this much (m; design
+/// 2026-11-02-bowl-wall-owner: at 1102-6 a chord deviating 2.97 cm beside an
+/// 8.8 cm one kept the upper half of the wall as GTA's).
+const CURVE_NEIGHBOUR: f32 = 0.015;
+/// ... unless it is a floor or deck (normal z at least this, 14 deg): those
+/// stay GTA's (decision 2026-10-26: flat decks stay GTA's).
+const CURVE_NEIGHBOUR_MAX_Z: f32 = 0.97;
 
 /// The parks' visible meshes, world space, by park id.
 static FILE: OnceLock<Option<Vec<(String, Vec<[[f32; 3]; 3]>)>>> = OnceLock::new();
@@ -497,21 +505,42 @@ fn replace_park(tris: &mut Vec<Tri>, stairs: &[Tri], visible: &[[[f32; 3]; 3]], 
         let e = deviates.entry(chord).or_insert(0.0);
         *e = e.max(u.limit - PARTNER_SLACK);
     }
-    let used: Vec<Used> = candidates.into_iter().filter_map(|(u, chord)| {
-        let d = deviates[&chord].max(deviates.get(&u.partner).copied().unwrap_or(0.0));
-        if d < CURVE { return None; }
-        // Rescue upward bowl facets only. Admitting small sidewall details
-        // exposes old cut/snap remnants as sloping phantom surfaces (native
-        // witnesses in the design); their boundary ownership needs its own fix.
-        if u.partner == chord {
-            let gta = tris[u.partner].v.map(v3);
-            let area = (gta[1] - gta[0]).cross(gta[2] - gta[0]).length() / 2.0;
-            if area < SURFACE && !(normal(&tris[u.partner].v).z > 0.5 && normal(&u.v).z > 0.5
-                && support.get_or_insert_with(|| SurfaceSupport::new(tris, &park))
-                    .qualifies(u.partner, centroid(&u.v))) {
-                return None;
-            }
+    // Rescue upward bowl facets only. Admitting small sidewall details
+    // exposes old cut/snap remnants as sloping phantom surfaces (native
+    // witnesses in the design); their boundary ownership needs its own fix.
+    let small_ok = |u: &Used, chord: usize, support: &mut Option<SurfaceSupport>| {
+        if u.partner != chord { return true; }
+        let gta = tris[u.partner].v.map(v3);
+        let area = (gta[1] - gta[0]).cross(gta[2] - gta[0]).length() / 2.0;
+        area >= SURFACE || (normal(&tris[u.partner].v).z > 0.5 && normal(&u.v).z > 0.5
+            && support.get_or_insert_with(|| SurfaceSupport::new(tris, &park)).qualifies(u.partner, centroid(&u.v)))
+    };
+    let deviation = |u: &Used, chord: usize| deviates[&chord].max(deviates.get(&u.partner).copied().unwrap_or(0.0));
+    // A chord just under CURVE beside a replaced curve chord facing the same
+    // way is part of that curve (design 2026-11-02-bowl-wall-owner): one hop
+    // from the chords at CURVE or more that keep a visible face, never
+    // further; floors and decks (CURVE_NEIGHBOUR_MAX_Z) never.
+    let quant = |p: [f32; 3]| p.map(|c| (c * 1e4).round() as i32);
+    let mut seeds: Vec<usize> = Vec::new();
+    for (u, chord) in &candidates {
+        if deviation(u, *chord) >= CURVE && small_ok(u, *chord, &mut support) {
+            seeds.extend([*chord, u.partner].into_iter().filter(|k| deviates.get(k).is_some_and(|&d| d >= CURVE)));
         }
+    }
+    seeds.sort_unstable();
+    seeds.dedup();
+    let mut curve_corners: HashMap<[i32; 3], Vec<usize>> = HashMap::default();
+    for &k in &seeds {
+        for p in tris[k].v { curve_corners.entry(quant(p)).or_default().push(k); }
+    }
+    let beside_curve = |k: usize| deviates.get(&k).is_some_and(|d| (CURVE_NEIGHBOUR..CURVE).contains(d))
+        && normal(&tris[k].v).z < CURVE_NEIGHBOUR_MAX_Z
+        && tris[k].v.iter().any(|&p| curve_corners.get(&quant(p))
+            .is_some_and(|ks| ks.iter().any(|&j| normal(&tris[j].v).dot(normal(&tris[k].v)) >= CURVE_FACING)));
+    let used: Vec<Used> = candidates.into_iter().filter_map(|(u, chord)| {
+        let d = deviation(&u, chord);
+        let curve = d >= CURVE || (d >= CURVE_NEIGHBOUR && (beside_curve(chord) || beside_curve(u.partner)));
+        if !curve || !small_ok(&u, chord, &mut support) { return None; }
         // The whole face's deviation is the limit: the parts of the chord
         // close to the curve go with it.
         Some(Used { limit: (d + PARTNER_SLACK).min(MATCH), ..u })
@@ -525,7 +554,6 @@ fn replace_park(tris: &mut Vec<Tri>, stairs: &[Tri], visible: &[[[f32; 3]; 3]], 
     // edges move onto them.
     let mut changed: Vec<(usize, Vec<[[f32; 3]; 3]>)> = Vec::new();
     let mut moved: HashMap<[i32; 3], [f32; 3]> = HashMap::default();
-    let quant = |p: [f32; 3]| p.map(|c| (c * 1e4).round() as i32);
     let mut cover: Vec<u32> = Vec::new();
     for i in 0..tris.len() {
         let t = tris[i].v;
@@ -1373,5 +1401,71 @@ mod tests {
         run(&mut tris, &[], &visible);
         assert_eq!(tris.len(), moved.len());
         let _ = set_for_test;
+    }
+
+    /// Two chords of one bowl wall, x 0..1 and x 1..2 (slope 0.5, 2 m wide):
+    /// over the first the visible curve leaves the chord by up to 11 cm, over
+    /// the second by `bulge` (vertical m) or, without `curve`, the first is flat.
+    fn two_chords(curve: bool, bulge: f32) -> (Vec<Tri>, Vec<[[f32; 3]; 3]>) {
+        let (x0, y0) = (-1355.0, -1396.0);
+        let z = |x: f32| if x <= 1.0 {
+            0.5 * x - if curve { 0.5 * x * (1.0 - x) } else { 0.0 }
+        } else {
+            0.5 * x - bulge * 4.0 * (x - 1.0) * (2.0 - x)
+        };
+        let mut visible = Vec::new();
+        for k in 0..20 {
+            let (a, b) = (k as f32 / 10.0, (k + 1) as f32 / 10.0);
+            let p = |x: f32, y: f32| [x0 + x, y0 + y, z(x)];
+            visible.push([p(a, 0.), p(b, 0.), p(b, 2.)]);
+            visible.push([p(a, 0.), p(b, 2.), p(a, 2.)]);
+        }
+        let mut gta = Vec::new();
+        for (a, b) in [(0.0f32, 1.0f32), (1.0, 2.0)] {
+            let p = |x: f32, y: f32| [x0 + x, y0 + y, 0.5 * x];
+            gta.push(Tri { v: [p(a, 0.), p(b, 0.), p(b, 2.)], material: 1 });
+            gta.push(Tri { v: [p(a, 0.), p(b, 2.), p(a, 2.)], material: 1 });
+        }
+        (gta, visible)
+    }
+
+    /// Area of GTA's own surface left over the second chord (x 1.05..2).
+    fn gta_left_on_second(gta: &[Tri], out: &Replacement) -> f32 {
+        let second = |t: &[[f32; 3]; 3]| centroid(t).x > -1355.0 + 1.05;
+        gta.iter().filter(|t| second(&t.v)).map(|t| area(&t.v)).sum::<f32>()
+            + out.added.iter().zip(&out.cut).filter(|(t, c)| **c && second(&t.v)).map(|(t, _)| area(&t.v)).sum::<f32>()
+    }
+
+    #[test]
+    fn a_chord_just_under_curve_beside_a_curve_chord_is_part_of_the_curve() {
+        // 2 cm bulge: under CURVE (3 cm) but over CURVE_NEIGHBOUR.
+        let (mut gta, visible) = two_chords(true, 0.02);
+        let out = run(&mut gta, &[], &visible);
+        assert!(gta_left_on_second(&gta, &out) < 0.01, "second chord kept {} m2", gta_left_on_second(&gta, &out));
+        // The same chord with no curve beside it stays GTA's.
+        let (mut gta, visible) = two_chords(false, 0.02);
+        let out = run(&mut gta, &[], &visible);
+        assert!(gta_left_on_second(&gta, &out) > 2.0);
+        // A floor 2 cm off its visible floor beside the curve stays GTA's.
+        let (x0, y0) = (-1355.0f32, -1396.0f32);
+        let mut gta = vec![
+            Tri { v: [[x0, y0, 0.], [x0 + 1., y0, 0.5], [x0 + 1., y0 + 2., 0.5]], material: 1 },
+            Tri { v: [[x0, y0, 0.], [x0 + 1., y0 + 2., 0.5], [x0, y0 + 2., 0.]], material: 1 },
+            Tri { v: [[x0 - 1., y0, 0.], [x0, y0, 0.], [x0, y0 + 2., 0.]], material: 1 },
+            Tri { v: [[x0 - 1., y0, 0.], [x0, y0 + 2., 0.], [x0 - 1., y0 + 2., 0.]], material: 1 },
+        ];
+        let mut visible = two_chords(true, 0.0).1.into_iter().filter(|t| centroid(t).x < x0 + 1.0).collect::<Vec<_>>();
+        for k in 0..10 {
+            let (a, b) = (-1.0 + k as f32 / 10.0, -1.0 + (k + 1) as f32 / 10.0);
+            let p = |x: f32, y: f32| [x0 + x, y0 + y, -0.02 * 4.0 * (x + 1.0) * (-x)];
+            visible.push([p(a, 0.), p(b, 0.), p(b, 2.)]);
+            visible.push([p(a, 0.), p(b, 2.), p(a, 2.)]);
+        }
+        run(&mut gta, &[], &visible);
+        assert_eq!(gta.iter().filter(|t| centroid(&t.v).x < x0).count(), 2, "the floor stays GTA's");
+        // A planar bank beside the curve (no bulge) stays GTA's.
+        let (mut gta, visible) = two_chords(true, 0.0);
+        let out = run(&mut gta, &[], &visible);
+        assert!(gta_left_on_second(&gta, &out) > 2.0);
     }
 }
