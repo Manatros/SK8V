@@ -37,6 +37,7 @@
 #include "thread_census.h"
 #include "marks.h"
 #include "collectibles.h"
+#include "replay.h"
 #include "menu.h"
 #include "vehicle_survey.h"
 #include "ps_pad.h"
@@ -87,6 +88,9 @@ struct Config {
     bool gpsWhileSkating = true; // GpsWhileSkating: GTA's route to the waypoint stays on in Skate mode
     bool skateSpots = true;      // SkateSpots: GTA's skate parks as blips on the map
     bool collectibles = true;    // Collectibles: hidden question marks that unlock shop parts and songs
+    bool replay = true;          // Replay: Back tap opens the last seconds (design 2026-11-02-replay-editor)
+    float replaySeconds = 30.0f; // ReplaySeconds: the recorded window, 10-60
+    float replayWorldScale = 0.0f; // ReplayWorldTimeScale: GTA's time scale while replaying (0 frozen)
     bool boardShop = true;    // BoardShop: Skate 3's boards and parts for sale in street clothing stores (G)
     bool wheelsFromPaint = true; // WheelsFromPaint: painted wheels set the wheel hardness (matte soft .. metallic hard)
     bool vehicleShapes = true; // VehicleShapes: survey vehicles without an extracted bound (a roof to ride, a gap to hippie jump)
@@ -308,6 +312,9 @@ const Key kKeys[] = {
     {"GpsWhileSkating", Store<&Config::gpsWhileSkating>},
     {"SkateSpots", Store<&Config::skateSpots>},
     {"Collectibles", Store<&Config::collectibles>},
+    {"Replay", Store<&Config::replay>},
+    {"ReplaySeconds", Store<&Config::replaySeconds>},
+    {"ReplayWorldTimeScale", Store<&Config::replayWorldScale>},
     {"BoardShop", Store<&Config::boardShop>},
     {"WheelsFromPaint", Store<&Config::wheelsFromPaint>},
     {"VehicleShapes", Store<&Config::vehicleShapes>},
@@ -1096,6 +1103,7 @@ struct Session {
     std::uint64_t watchTick = 0;  // Skate output tick last seen while skating
     DWORD watchSince = 0;         // ... since (wall time)
     int watchFrames = 0;          // ... script frames since (a pause stops these)
+    bool replayRequested = false; // a Back tap asked for the replay (BoardControls)
     DWORD yHeldSince = 0;         // Y pressed while skating (hold to put the board away)
     DWORD keyLeaveUntil = 0;      // keyboard F: Y held for the put-away time
     bool yWasDown = true;
@@ -1393,7 +1401,31 @@ void RememberView(Session& s, const Config& cfg) {
 // Otherwise (menu, death, runtime error, network) the ped is put where the
 // skater last was.
 void CinemaViewportRoom(bool filming);
+// The pose published this frame, for the replay's recording.
+const float* g_replayPose = nullptr;
+int g_replayBones = 0;
+replay::Tap g_replayTap(250);  // Back: a tap opens the replay (BoardControls)
+
+// Ends a running replay and puts play back exactly where it stopped: the
+// ped at its live place, the script camera rendering as before, the stall
+// watchdog fresh (design 2026-11-02-replay-editor).
+void EndReplay(Session& s, const Config& cfg, const std::uint16_t* buttons = nullptr) {
+    if (!replay::Active()) return;
+    replay::Exit();
+    // The buttons that left (B or Back, maybe still held) are no new press for skating.
+    if (buttons) s.aimPrevButtons = *buttons;
+    g_replayTap.Block();
+    if (s.placedValid) Call<void>(gta::SET_ENTITY_COORDS_NO_OFFSET, s.ped, s.placed[0], s.placed[1], s.placed[2], 0, 0, 0);
+    if (s.cam) {
+        Call<void>(gta::SET_CAM_ACTIVE, s.cam, 1);
+        Call<void>(gta::RENDER_SCRIPT_CAMS, g_gtaView ? 0 : 1, 0, 0, 1, 0, 0);
+    }
+    s.watchSince = GetTickCount(), s.watchFrames = 0;
+    (void)cfg;
+}
+
 void Leave(Session& s, const Config& cfg, const char* why, bool voluntary) {
+    EndReplay(s, cfg);  // its camera goes and SK8V's renders again before the hand-off
     RememberView(s, cfg);
     FilmLook(s, cfg, 0, 0.0f);
     g_gtaView = false, s.view = -1; // the next entry picks its view again (CameraView / CameraRemember)
@@ -1737,6 +1769,8 @@ void SendCharacter(const Session& s, const Config& cfg) {
 }
 
 void BeginActive(Session& s, const Config& cfg) {
+    replay::Clear();
+    s.replayRequested = false;
     s.tracks.Reset();
     s.firstTrack = {};
     ApplyWheelGlow(cfg);
@@ -2248,10 +2282,15 @@ void BoardControls(Session& s, const Config& cfg, SvPad& pad) {
         }
     }
 
+    // A Back tap opens the replay (design 2026-11-02-replay-editor): not
+    // while armed or aiming; a hold stays the gun, Back+LB the menu.
+    const bool replayTap = g_replayTap.Update((buttons & cfg.gunButton) != 0, (buttons & ~cfg.gunButton) != 0, GetTickCount()) &&
+                           cfg.gunButton == 0x0020 && replay::Ready() && !s.armed && !s.aiming;
+    if (replayTap) s.replayRequested = true;
     // GunButton on release, unless LB was part of the hold (board chord).
     if (buttons & cfg.gunButton && buttons & 0x0100) s.gunChordUsed = true;
     if ((released & cfg.gunButton) && !(buttons & cfg.gunButton)) {
-        if (!s.gunChordUsed) {
+        if (!s.gunChordUsed && !replayTap) {
             if (s.armed) {
                 Holster(s);
                 Log("SkateV Legacy: gun away");
@@ -2771,6 +2810,7 @@ void UpdateCameraView(Session& s, const Config& cfg, SvPad& pad) {
 }
 
 void UpdateActive(Session& s, const Config& cfg, const SvPad& pad) {
+    g_replayPose = nullptr, g_replayBones = 0;  // set again when a pose is published this frame
     Lap(kPartLifecycle);
     DisableSkateControls(pad.buttons, s.aiming);
     Lap(kPartControls);
@@ -3035,6 +3075,7 @@ void UpdateActive(Session& s, const Config& cfg, const SvPad& pad) {
         static std::vector<float> s_pose(512 * 16);
         const std::uint32_t n = FreshPose(g_runtime.CharacterPose(s_pose.data(), 512), s_pose.data(), s_hitBones[0], o);
         const bool posed = n > 0 && static_cast<int>(n) == s_bones;
+        g_replayPose = posed ? s_pose.data() : nullptr, g_replayBones = posed ? static_cast<int>(n) : 0;
         if (posed) {
             posehook::PublishPose(s_pose.data(), static_cast<int>(n));
             ImpactGrunts(s, cfg, s_pose.data(), s_hitBones, o.tick);
@@ -3116,6 +3157,9 @@ void UpdateActive(Session& s, const Config& cfg, const SvPad& pad) {
     BoardWeather(s, cfg, nativeBoard ? &boardPose : nullptr);
     if (nativeBoard) boardnative::GlowWheels(boardPose);
     if (cfg.drawSkater && !nativeBoard) DrawBoardMesh();
+    // The replay's recording: once per Skate tick (replay.h).
+    if (g_replayPose && !menu::IsOpen())
+        replay::Record(o, s.placedValid ? s.placed : nullptr, g_replayPose, g_replayBones, havePose ? &boardPose : nullptr);
     if (g_quirkRequested.exchange(false) && cfg.backwardsMan) g_runtime.TriggerQuirk(0);
     if (cfg.skateHud && cfg.showDebug) { // dev only; the player sees hud_overlay
         SvScoreState score{};
@@ -3306,11 +3350,11 @@ void LifecycleFrame(Session& s, const Config& cfg, bool f6) {
         // Leaving is SK8V's: hold Y (the keyboard's binding for it) puts the
         // board away. Our F leave was removed with the F entry (Manatros
         // 2026-10-20: "stay with the SK8V version mostly").
-        UpdateCameraView(s, cfg, pad);
+        if (!replay::Active()) UpdateCameraView(s, cfg, pad);
         // Hold Y to put the board away. The press still reaches Skate, so
         // it steps off first, then puts the board away while Y stays down.
         // Only a press made while skating counts; a Y held at entry does not.
-        const bool yDown = (pad.buttons & 0x8000) != 0;
+        const bool yDown = !replay::Active() && (pad.buttons & 0x8000) != 0;  // Y cycles the replay's cameras
         if (yDown && !s.yWasDown) s.yHeldSince = now;
         if (!yDown) s.yHeldSince = 0;
         s.yWasDown = yDown;
@@ -3323,6 +3367,38 @@ void LifecycleFrame(Session& s, const Config& cfg, bool f6) {
         // whole pose, and these checks need only its status and tick.
         const SvOutput& o = s.last;
         const bool dead = Call<BOOL>(gta::IS_ENTITY_DEAD, s.ped, 0);
+        // A request from the menu waits until the menu is closed.
+        if (s.replayRequested && !menu::IsOpen() && !gta::FrontendActive()) {
+            s.replayRequested = false;
+            if (!replay::Active() && !dead && cfg.replay && replay::Enter(s.ped)) Log("SkateV Legacy: replay opened");
+        }
+        if (replay::Active()) {
+            // Play is held: no step, placement, watchdog or put-away while it runs.
+            // Real time drives the playhead (GTA's frame time follows its time scale).
+            // QueryPerformanceCounter: GetTickCount steps 16 ms, which stutters at 100+ fps.
+            static LARGE_INTEGER s_replayClock{}, s_freq{};
+            if (!s_freq.QuadPart) QueryPerformanceFrequency(&s_freq);
+            LARGE_INTEGER clock;
+            QueryPerformanceCounter(&clock);
+            const double elapsed = s_replayClock.QuadPart ? static_cast<double>(clock.QuadPart - s_replayClock.QuadPart) / s_freq.QuadPart : 0.0;
+            const float dt = elapsed > 0.0 && elapsed < 1.0 ? static_cast<float>(elapsed) : 0.0f;
+            s_replayClock = clock;
+            // GTA's controls are taken one by one as in skating; pause stays GTA's.
+            DisableSkateControls(pad.buttons, false);
+            Call<void>(gta::ENABLE_CONTROL_ACTION, 0, 199, 1); // INPUT_FRONTEND_PAUSE
+            Call<void>(gta::ENABLE_CONTROL_ACTION, 0, 200, 1); // INPUT_FRONTEND_PAUSE_ALTERNATE
+            const bool stop = dead || f6 || !cfg.replay || gta::FrontendActive() || Call<BOOL>(gta::NETWORK_IS_SESSION_STARTED) ||
+                              !replay::Tick(s.ped, pad, dt);
+            if (stop) s_replayClock.QuadPart = 0;
+            if (!stop) {
+                Text(replay::Status().c_str(), 0.5f, 0.94f, 0.32f, 255, 255, 255, true);
+                s.watchSince = now, s.watchFrames = 0;
+                break;
+            }
+            EndReplay(s, cfg, &pad.buttons);
+            s.yHeldSince = 0, s.yWasDown = true;  // the Y that cycled cameras is no put-away
+            // Play goes on this very frame: the live pose and board replace the replay's.
+        }
         if (o.tick != s.watchTick) s.watchTick = o.tick, s.watchSince = now, s.watchFrames = 0;
         const bool stalled = ++s.watchFrames > 120 && now - s.watchSince > 5000;
         if (o.status == SV_STATUS_ERROR) {
@@ -3554,9 +3630,6 @@ void AppendDeveloperPage(std::vector<menu::Page>& pages, Session& s) {
             const std::string message = id.empty() ? "No readable test package receipt; package version unknown." :
                 "Test package receipt: " + id + ". Metadata only; installed binaries not verified here.";
             Notify(s, message.c_str(), 9000);
-        }),
-        Action("LS Skate: not integrated", [&s] {
-            Notify(s, "LS Skate is not integrated in this package. Its installed version is unavailable.", 7000);
         }),
     };
     for (auto& page : pages) if (page.title == "Developer") {
@@ -3812,6 +3885,16 @@ std::vector<menu::Page> MenuPages(Session& s) {
         Flag("Shooting on the board", "BoardAim", D.boardAim, Bound("BoardAim")),
         Choice("Radio when skating", "SkateRadio", {"", "RADIO_19_USER"}, {"As it is", "Self Radio"}, Bound("SkateRadio")),
         Number("Camera FOV scale", "CameraFovScale", D.fovScale, 0.5f, 1.5f, 0.05f, Fixed("x%.2f"), Bound("CameraFovScale")),
+        Helped(Flag("Replay (tap Back)", "Replay", D.replay, Bound("Replay", [] {
+                   replay::Configure(g_config.replay, g_config.replaySeconds, g_config.replayWorldScale, Log);
+               })),
+               "Tap Back while skating to watch the last seconds again, as in Skate 3: A play/pause, left stick scrubs, "
+               "LB/RB speed, LT backwards, Y camera, B or Back returns to play where it stopped."),
+        Number("Replay length", "ReplaySeconds", D.replaySeconds, 10, 60, 5, Fixed("%.0f s"), Bound("ReplaySeconds", [] {
+                   replay::Configure(g_config.replay, g_config.replaySeconds, g_config.replayWorldScale, Log);
+               })),
+        Helped(Action("Replay: watch the last seconds", [&s] { s.replayRequested = true; }),
+               "Opens the replay when you close this menu (for keyboard players; works only while skating)."),
         Choice("Board tracks", "BoardTracks", {"1", "0"}, {"On", "Off"}, Bound("BoardTracks")),
         Number("Glowing wheels", "WheelGlow", 0, 0, 1, 0.05f,
                [](float v) { return v == 0.0f ? std::string("Off") : Fixed("%.0f%%")(v * 100.0f); },
@@ -4202,9 +4285,6 @@ std::vector<menu::Page> MenuPages(Session& s) {
             Action("SK8V - official default settings", [] {
                 ApplyPreset("SK8V", {});
             }),
-            Action("LS Skate - unavailable (requires LS adapter)", [&s] {
-                menu::Status("LS Skate implementation/animations unavailable; settings unchanged");
-            }),
             Action("RP - grounded values, no Skate overlays", [] {
                 ApplyPreset("RP", {{"SkateHud", "0"}, {"Hud", "0"}, {"ShowInputs", "0"},
                     {"ShowDebug", "0"}, {"CameraView", "Near"}, {"CameraRemember", "0"},
@@ -4263,6 +4343,7 @@ std::vector<menu::Page> MenuPages(Session& s) {
         }
         if (page.title == "Skating") {
             if (any({"Camera", "CameraFovScale"})) return ""; // already on Camera
+            if (any({"Replay", "ReplaySeconds"}) || item.label.rfind("Replay:", 0) == 0) return "Camera";
             if (k == "SkateRadio") return "Audio and radio";
             if (k == "PutAwayHoldMs") return "Controls";
             if (any({"GtaDelegation", "SwimDepth", "BoardAim", "Stamina"})) return "World";
@@ -4370,7 +4451,8 @@ std::vector<menu::Page> MenuPages(Session& s) {
                    {"Marks on the ground", {"BoardTracks", "Snow"}},
                    {"Board shop", {"BoardShop", "WheelsFromPaint"}}}},
         {"Camera", {{"Views", {"CameraView", "CameraRemember", "Camera", "CameraFovScale"}},
-                    {"Cinematic camera (R)", {"CinemaFilter", "FilmerFilter", "FilmFilterStrength"}}}},
+                    {"Cinematic camera (R)", {"CinemaFilter", "FilmerFilter", "FilmFilterStrength"}},
+                    {"Replay (tap Back)", {"Replay", "ReplaySeconds", "Replay:"}}}},
         {"Controls", {{"Keyboard", {"Keyboard", "PutAwayHoldMs"}},
                       {"Controller buttons", {"MenuButton", "GunButton", "AimButton", "FireButton", "BackwardsManChord"}},
                       {"Missions", {"BoardActionInMissions"}}}},
@@ -4623,6 +4705,7 @@ void ScriptMain() {
         g_runtime.SetVerboseLog(cfg.verboseLog);
         // Collectibles first: the shop keeps as many secret items as there are part collectibles.
         collectibles::Start(g_gameDir, cfg.collectibles, Log);
+        replay::Configure(cfg.replay, cfg.replaySeconds, cfg.replayWorldScale, Log);
         // The board shop's part models and the shop itself (garages in the game folder).
         if (cfg.drawBoard && boardparts::Start(std::filesystem::u8path(cfg.dataRoot).wstring(), Log) && cfg.boardShop)
             boardshop::Start(g_runtime, cfg.dataRoot, util::Narrow(g_gameDir), Log, [](float hardness) {
@@ -4747,7 +4830,7 @@ void ScriptMain() {
         // radar or Skate trick display while they run.
         const bool filming = s.state == LifeState::Skating && s.action != 0;
         if (filming) Call<void>(gta::HIDE_HUD_AND_RADAR_THIS_FRAME);
-        hudoverlay::Tick(cfg.skateHud && s.state == LifeState::Skating && !filming);
+        hudoverlay::Tick(cfg.skateHud && s.state == LifeState::Skating && !filming && !replay::Active());
         injuries::Tick(Call<Ped>(gta::PLAYER_PED_ID), s.state != LifeState::Skating && Call<BOOL>(gta::IS_PED_ON_FOOT, Call<Ped>(gta::PLAYER_PED_ID)),
                        cfg.injuries, Log);
         Lap(kPartHud);
@@ -4783,10 +4866,11 @@ void ScriptMain() {
         {
             // Collectibles: earned only riding (not walking or bailed in Skate).
             const std::string_view st(s.last.state_utf8);
-            const bool riding = s.state == LifeState::Skating && st.rfind("Biped", 0) != 0 && st.rfind("Wipeout", 0) != 0;
+            // The replay moves the ped through recorded places: nothing is found or earned then.
+            const bool riding = s.state == LifeState::Skating && !replay::Active() && st.rfind("Biped", 0) != 0 && st.rfind("Wipeout", 0) != 0;
             const float root[3] = {s.last.skater_position.x, s.last.skater_position.y, s.last.skater_position.z};
-            const bool popups = g_config.skateHud && s.state == LifeState::Skating && s.action == 0;  // not filming
-            collectibles::Tick(g_config.collectibles, riding, popups, root, Call<int>(gta::PLAYER_PED_ID));
+            const bool popups = g_config.skateHud && s.state == LifeState::Skating && s.action == 0 && !replay::Active();  // not filming
+            if (!replay::Active()) collectibles::Tick(g_config.collectibles, riding, popups, root, Call<int>(gta::PLAYER_PED_ID));
             if (const char* notice = collectibles::TakeNotice()) Notify(s, notice, 6000);
         }
         // M while skating: GTA's own interaction menu. It did not open because

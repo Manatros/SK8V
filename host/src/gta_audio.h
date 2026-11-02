@@ -46,5 +46,7 @@ void Tick(bool skating);
 void Stop();
 // Script thread: applies AudioGtaGainDb now (the menu saves it to the INI).
 void SetGainDb(float db);
+// The replay (replay.h) holds Skate: its sound pauses as for GTA's menu.
+void SetReplayPaused(bool paused);
 
 } // namespace gtaaudio

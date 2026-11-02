@@ -83,6 +83,7 @@ bool g_runtimeAudio = false; // configured and pullable
 std::atomic<bool> g_probeOn{false}; // editor test tone on the board stream
 std::atomic<bool> g_paused{false};
 std::atomic<bool> g_pauseRequested{false};
+std::atomic<bool> g_replayPaused{false};
 std::atomic<std::uint64_t> g_scriptTickMs{0};
 
 struct Slot {
@@ -201,7 +202,7 @@ DWORD WINAPI FeederMain(void*) {
         } else {
             Sleep(live ? 2 : 20);
         }
-        const bool paused = AudioShouldPause(GetTickCount64(), g_scriptTickMs.load(), g_pauseRequested.load());
+        const bool paused = AudioShouldPause(GetTickCount64(), g_scriptTickMs.load(), g_pauseRequested.load() || g_replayPaused.load());
         if (g_paused.exchange(paused) != paused) {
             // The feeder is the sole runtime pause writer. Native GTA calls
             // remain on the script thread; this watchdog uses host time only.
@@ -809,6 +810,8 @@ void PollStatus(DWORD now) {
 }
 
 } // namespace
+
+void SetReplayPaused(bool paused) { g_replayPaused = paused; }
 
 void SetGainDb(float db) {
     g_set.gainDb = std::clamp(db, -100.0f, 24.0f);
