@@ -739,6 +739,63 @@ pub fn display_wall(eye: bevy_math::Vec3, mut probe: impl FnMut(bevy_math::Vec3,
     best.map(|(_, at, normal)| (at, normal))
 }
 
+/// The board shop's front (design 2026-11-02-skate-shop-consistency): the
+/// wall `display_wall` would take, else the nearest upright, roughly
+/// straight one 0.3 to 8 m from `eye` (a storefront the anchor stands
+/// close to, with tables in front: no clear-space check). Either must
+/// face within 45 degrees of `SKATE_FRONT` (not a pillar or the shop
+/// across the boardwalk).
+pub fn storefront(eye: bevy_math::Vec3, mut probe: impl FnMut(bevy_math::Vec3, bevy_math::Vec3) -> Option<bevy_math::Vec3>) -> Option<(bevy_math::Vec3, bevy_math::Vec3)> {
+    use bevy_math::{Vec2, Vec3};
+    let front = Vec2::from(SKATE_FRONT).normalize().extend(0.);
+    let facing = |normal: Vec3| normal.dot(front) > std::f32::consts::FRAC_1_SQRT_2;
+    if let Some(wall) = display_wall(eye, &mut probe).filter(|w| facing(w.1)) {
+        return Some(wall);
+    }
+    const DIRECTIONS: usize = 24;
+    let mut best: Option<(f32, Vec3, Vec3)> = None;
+    for k in 0..DIRECTIONS {
+        let dir = Vec2::from_angle(k as f32 / DIRECTIONS as f32 * std::f32::consts::TAU).extend(0.);
+        let Some(hit) = probe(eye, eye + dir * 8.) else { continue };
+        let d = (hit - eye).truncate().length();
+        if !(0.3..=8.).contains(&d) || best.as_ref().is_some_and(|b| d >= b.0) {
+            continue;
+        }
+        let mut along = |from: Vec3| probe(from, from + dir * (d + 1.)).map(|h| (h - from).truncate().length());
+        let upright = [-0.5, 0.5].iter().all(|dz| along(eye + Vec3::Z * *dz).is_some_and(|e| (e - d).abs() < 0.25));
+        let side = dir.cross(Vec3::Z).normalize();
+        let (left, right) = (eye - side * 0.9, eye + side * 0.9);
+        let (Some(l), Some(r)) = (probe(left, left + dir * (d + 1.)), probe(right, right + dir * (d + 1.))) else { continue };
+        let tangent = (r - l).truncate();
+        let straight = tangent.length() > 1.2 && ((l + r) * 0.5 - hit).truncate().length() < 0.3;
+        if !upright || !straight {
+            continue;
+        }
+        let mut normal = tangent.perp().normalize().extend(0.);
+        if normal.dot(eye - hit) < 0. {
+            normal = -normal;
+        }
+        if facing(normal) {
+            best = Some((d, hit, normal));
+        }
+    }
+    best.map(|(_, at, normal)| (at, normal))
+}
+
+/// The Vespucci Skate Shop's front faces this way (out of the shop): from
+/// its anchor toward where Manatros stood looking at it (MARK 33, 10-29).
+pub const SKATE_FRONT: [f32; 2] = [-0.353, 0.936];
+
+/// The board shop's front when no wall was found: along `SKATE_FRONT`
+/// through the first thing a line from `eye` straight into the shop meets
+/// within 4 m, else 1 m into the shop from `eye` (not where the player
+/// stands to press E).
+pub fn fixed_storefront(eye: bevy_math::Vec3, mut probe: impl FnMut(bevy_math::Vec3, bevy_math::Vec3) -> Option<bevy_math::Vec3>) -> (bevy_math::Vec3, bevy_math::Vec3) {
+    let normal = bevy_math::Vec2::from(SKATE_FRONT).normalize().extend(0.);
+    let at = probe(eye, eye - normal * 4.).map_or(eye - normal, |hit| bevy_math::Vec3::new(hit.x, hit.y, eye.z));
+    (at, normal)
+}
+
 /// `count` boards on show along a wall (`at` on it, `normal` into the
 /// room, the floor at `floor`): standing on their tails 0.35 m apart, the
 /// graphic facing out. Each in the board models' frame (length along Z

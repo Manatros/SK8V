@@ -35,6 +35,13 @@ pub struct BoardShop {
     message_frames: u32,
     /// Where each store shows its boards (kept in `SkateVDisplay.txt`).
     shows: Vec<crate::shop::ShowCase>,
+    /// Searches for a board shop's front that found nothing, per store.
+    misses: Vec<((i32, i32), u32)>,
+    /// Stores shown at a fixed front this session (never saved).
+    fixed: Vec<(i32, i32)>,
+    /// What the last search for a board shop's front did, for the host's
+    /// log (`sv_shop_text` 9, cleared when read).
+    note: String,
     /// The part exporter's board frame to the native board's object space
     /// (prepare-board-parts.py's ROTATION and offset).
     frame: bevy_math::Mat4,
@@ -144,6 +151,8 @@ pub fn models_of(riding: &BoardChoice, grip: Option<&str>, base: Option<&str>, h
 
 /// Where the stores' shows are kept, in the garages' folder.
 const DISPLAY_FILE: &str = "SkateVDisplay.txt";
+/// The section of found collectibles (design 2026-11-02-skate-shop-consistency).
+pub const FOUND: &str = "Found";
 
 /// The exporter's board frame (length +Z from the grip end, deck facing -X)
 /// to the native board's object space: rows (0 1 0), (0 0 -1), (-1 0 0),
@@ -218,6 +227,9 @@ impl BoardShop {
                 .or_else(|_| std::fs::read_to_string(garages.join("SkateGTA-display.txt")))
                 .map(|t| crate::shop::shows_from_text(&t))
                 .unwrap_or_default(),
+            misses: Vec::new(),
+            fixed: Vec::new(),
+            note: String::new(),
             frame: exporter_frame(bevy_math::Vec3::new(0.0, 0.352, 0.064)),
             wear: Default::default(),
             riding: Default::default(),
@@ -514,6 +526,20 @@ impl BoardShop {
         if !yours.is_empty() {
             out.push(crate::shop::Section { title: "Yours".into(), offers: yours });
         }
+        // Collectibles: every secret found and not yet owned is on sale here
+        // every day, outside the rotation (design 2026-11-02-skate-shop-consistency).
+        if matches!(tier, Tier::Skate | Tier::Mid) {
+            let found: Vec<crate::shop::Offer> = full.iter().flat_map(|s| s.offers.iter())
+                // Parts only (the decks and grips found; their complete
+                // boards stay in the rotation and Suburban's limit).
+                .filter(|o| !matches!(o.goods, Goods::Complete(_)))
+                .filter(|o| self.secrets.secret(&o.goods) && !self.hidden(&o.goods) && !self.garage.owns(&o.goods))
+                .cloned()
+                .collect();
+            if !found.is_empty() {
+                out.push(crate::shop::Section { title: FOUND.into(), offers: found });
+            }
+        }
         for section in full {
             // Each section's daily order over everything sold; a locked secret
             // gives its slot to the next unlocked one (secrets.rs), so an
@@ -693,13 +719,48 @@ impl BoardShop {
             Some(kept) => kept.clone(),
             None => {
                 let till = clerk.and_then(|(at, forward)| crate::shop::wall_behind(at + Vec3::Z * 0.3, forward, &mut probe));
-                let found = till.map(|w| (w, true)).or_else(|| crate::shop::display_wall(eye, &mut probe).map(|w| (w, false)));
+                let wall = |probe: &mut dyn FnMut(Vec3, Vec3) -> Option<Vec3>| {
+                    if tier == Tier::Skate { crate::shop::storefront(eye, probe) } else { crate::shop::display_wall(eye, probe) }
+                };
+                let mut found = till.map(|w| (w, true)).or_else(|| wall(&mut probe).map(|w| (w, false)));
+                let mut how = if found.is_some_and(|f| f.1) { "behind the till" } else { "on a wall" };
+                // The board shop has no clerk and may have tables before its
+                // front: after 5 misses, with its ground streamed in, a fixed
+                // front (design 2026-11-02-skate-shop-consistency).
+                // Only misses on streamed ground count.
+                if found.is_none() && tier == Tier::Skate && probe(eye, eye - Vec3::Z * 4.0).is_some() {
+                    let misses = match self.misses.iter_mut().find(|m| m.0 == store) {
+                        Some(m) => { m.1 += 1; m.1 }
+                        None => { self.misses.push((store, 1)); 1 }
+                    };
+                    if misses == 1 {
+                        let rays: Vec<String> = (0..24)
+                            .map(|k| {
+                                let dir = bevy_math::Vec2::from_angle(k as f32 / 24. * std::f32::consts::TAU).extend(0.);
+                                probe(eye, eye + dir * 8.).map_or("-".into(), |h| format!("{:.2}", (h - eye).truncate().length()))
+                            })
+                            .collect();
+                        self.note = format!("no storefront found from {:.2} {:.2} {:.2}; rays every 15 deg from east: {}", eye.x, eye.y, eye.z, rays.join(" "));
+                    }
+                    if misses >= 5 {
+                        found = Some((crate::shop::fixed_storefront(eye, &mut probe), false));
+                        how = "at the fixed storefront";
+                    }
+                }
                 let Some(((at, normal), till)) = found else { return Vec::new() };
                 let above = at + normal * 0.3;
                 let floor = probe(above, above - Vec3::Z * 4.0).map_or(eye.z - 1.3, |p| p.z);
+                if tier == Tier::Skate {
+                    self.note = format!("storefront {how} at {:.2} {:.2} {:.2}, facing {:.2} {:.2}, floor {:.2}", at.x, at.y, at.z, normal.x, normal.y, floor);
+                }
                 let show = crate::shop::ShowCase { store, at, normal, floor, till };
                 self.shows.push(show.clone());
-                let _ = std::fs::write(self.garages.join(DISPLAY_FILE), crate::shop::shows_to_text(&self.shows));
+                // A fixed front is not kept: each start searches for the real one first.
+                if how != "at the fixed storefront" {
+                    let _ = std::fs::write(self.garages.join(DISPLAY_FILE), crate::shop::shows_to_text(&self.shows.iter().filter(|s| !self.fixed.contains(&s.store)).cloned().collect::<Vec<_>>()));
+                } else {
+                    self.fixed.push(store);
+                }
                 show
             }
         };
@@ -887,6 +948,7 @@ pub unsafe extern "C" fn sv_shop_text(_rt: *mut c_void, which: u32, buf: *mut u8
             5 => s.preview_part().join(","),
             6 => s.preview_face().to_string(),
             8 => s.neighbours(),
+            9 => std::mem::take(&mut s.note),
             100..=107 => s.crew_board(which - 100).join(","),
             4 => s.wheel_hardness().map(|h| format!("{h:.2}")).unwrap_or_default(),
             7 => s.wheel_colour().map(|[r, g, b]| format!("{r},{g},{b}")).unwrap_or_default(),
@@ -1110,6 +1172,99 @@ mod tests {
         let mut again = shop(&d);
         assert_eq!(again.set_secrets(5), 0);
         assert!(!again.crew_board(0).is_empty());
+    }
+
+    /// Lines against a floor at z 0 (when `floor`), a wall y = `wall` (if
+    /// any) and a long table (x 2..18, y in front of the wall by 0.4 m, z < 1).
+    fn scene(wall: Option<f32>, clutter: bool, floor: bool) -> impl FnMut(bevy_math::Vec3, bevy_math::Vec3) -> Option<bevy_math::Vec3> {
+        use bevy_math::Vec3;
+        move |a: Vec3, b: Vec3| {
+            let d = b - a;
+            let mut best: Option<(f32, Vec3)> = None;
+            let mut take = |t: f32, ok: &dyn Fn(Vec3) -> bool| {
+                if (0.0..=1.0).contains(&t) && ok(a + d * t) && best.is_none_or(|x| t < x.0) {
+                    best = Some((t, a + d * t));
+                }
+            };
+            if floor && d.z.abs() > 1e-6 {
+                take(-a.z / d.z, &|_| true);
+            }
+            if let Some(y) = wall
+                && d.y.abs() > 1e-6
+            {
+                take((y - a.y) / d.y, &|p: Vec3| p.z >= 0.0 && p.z < 4.0);
+                if clutter {
+                    take((y + 0.4 - a.y) / d.y, &|p: Vec3| (2.0..18.0).contains(&p.x) && p.z < 1.0);
+                }
+            }
+            best.map(|x| x.1)
+        }
+    }
+
+    #[test]
+    fn the_board_shop_finds_its_front_close_by_or_cluttered() {
+        let v = bevy_math::Vec3::new;
+        let eye = v(10.0, 20.0, 1.5);
+        // 0.6 m away: too close for the store walls' search.
+        assert!(crate::shop::display_wall(eye, scene(Some(19.4), false, true)).is_none());
+        let (at, normal) = crate::shop::storefront(eye, scene(Some(19.4), false, true)).unwrap();
+        assert!((at.y - 19.4).abs() < 1e-3 && (normal - v(0.0, 1.0, 0.0)).length() < 1e-3, "{at:?} {normal:?}");
+        // 3 m away with a table before it: not clear, still the front.
+        assert!(crate::shop::display_wall(eye, scene(Some(17.0), true, true)).is_none());
+        assert!(crate::shop::storefront(eye, scene(Some(17.0), true, true)).is_some_and(|(at, _)| (at.y - 17.0).abs() < 1e-3));
+        assert!(crate::shop::storefront(eye, scene(None, false, true)).is_none());
+    }
+
+    #[test]
+    fn the_board_shop_shows_at_a_fixed_front_after_five_misses_on_streamed_ground() {
+        let d = dir("front");
+        let mut s = shop(&d);
+        let v = bevy_math::Vec3::new;
+        let (anchor, eye) = (v(10.0, 20.0, 0.0), v(10.0, 20.0, 1.5));
+        // Not streamed: never placed.
+        for _ in 0..8 {
+            assert!(s.display(Tier::Skate, anchor, eye, None, 3, scene(None, false, false)).is_empty());
+        }
+        let mut s = shop(&dir("front2"));
+        for i in 1..5 {
+            assert!(s.display(Tier::Skate, anchor, eye, None, 3, scene(None, false, true)).is_empty(), "miss {i}");
+            if i == 1 {
+                assert!(s.note.contains("no storefront found"), "{}", s.note);
+            }
+        }
+        assert!(!s.display(Tier::Skate, anchor, eye, None, 3, scene(None, false, true)).is_empty());
+        let show = s.shows.iter().find(|x| x.store == crate::shop::store_key(anchor)).unwrap();
+        assert!((show.normal.truncate() - bevy_math::Vec2::from(crate::shop::SKATE_FRONT).normalize()).length() < 1e-3);
+        assert!(show.floor.abs() < 1e-3 && s.note.contains("fixed storefront"), "{}", s.note);
+        // Clothing stores keep their search: no fixed front.
+        let mut c = shop(&dir("front3"));
+        for _ in 0..8 {
+            assert!(c.display(Tier::Mid, v(50.0, 50.0, 0.0), v(50.0, 50.0, 1.5), None, 3, scene(None, false, true)).is_empty());
+        }
+    }
+
+    #[test]
+    fn a_found_secret_is_on_sale_every_day_until_owned() {
+        let d = dir("found");
+        let mut s = shop(&d);
+        s.character("franklin");
+        assert_eq!(s.set_secrets(1), 1);
+        let found = |s: &BoardShop, tier: Tier, day: u32| {
+            s.stock_for(tier, (-1224, -1443), day).into_iter().find(|sec| sec.title == FOUND).map(|sec| sec.offers)
+        };
+        assert!(found(&s, Tier::Skate, 1).is_none(), "locked: not listed");
+        s.unlock_next().unwrap();
+        for day in 0..30 {
+            for tier in [Tier::Skate, Tier::Mid] {
+                let offers = found(&s, tier, day).unwrap_or_else(|| panic!("{tier:?} day {day}"));
+                assert!(offers.iter().any(|o| o.title.contains("Deck One")), "{offers:?}");
+                assert!(offers.iter().all(|o| s.secrets.secret(&o.goods)));
+            }
+            assert!(found(&s, Tier::Low, day).is_none(), "Binco: complete boards only");
+        }
+        let deck = found(&s, Tier::Skate, 3).unwrap().into_iter().find(|o| !matches!(o.goods, Goods::Complete(_))).unwrap();
+        s.garage.add(&deck.goods);
+        assert!(found(&s, Tier::Skate, 3).unwrap_or_default().iter().all(|o| o.goods != deck.goods), "owned: under Yours");
     }
 
     #[test]

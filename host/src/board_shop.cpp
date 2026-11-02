@@ -5,6 +5,7 @@
 #include "menu.h"
 #include "natives.h"
 #include "runtime_bridge.h"
+#include "shop_hours.h"
 #include <windows.h>
 #include <cmath>
 #include <cstring>
@@ -42,7 +43,9 @@ void Log(const std::string& s) {
 // 19:21 recording, mark 1; it was the surfboard storefront at -1302.7 -1369.2 first,
 // prop_venice_board_01/02; design 2026-10-26-shops-step1): store kind 3.
 constexpr float kBeachShop[2] = {-1224.45f, -1442.68f};
-constexpr float kBeachReach = 4.0f, kBeachShow = 30.0f;
+// Its menu opens within 5 m of the anchor (MARK 33 stood 4.2 m off) and stays
+// open within 6 m (design 2026-11-02-skate-shop-consistency).
+constexpr float kBeachReach = 5.0f, kBeachKeep = 6.0f, kBeachShow = 30.0f;
 // The boardwalk's height there when GTA has not streamed its ground yet.
 constexpr float kBeachGround = 4.3f;
 
@@ -189,6 +192,8 @@ void ShowBoards(int ped, int tier) {
             b.models = Split(models[static_cast<std::size_t>(i)], ',');
             g_onShow.push_back(b);
         }
+        const std::string note = g_rt->ShopText(9);
+        if (!note.empty()) Log("board shop: " + note);
         if (n) Log("board shop: " + std::to_string(n) + " boards on show (" + (c ? "a clerk near: behind the till" : "on a wall") + ")");
         else if (!g_showMissed) g_showMissed = true, Log("board shop: no place for boards on show found yet (tried again every 1.5 s)");
     }
@@ -227,10 +232,10 @@ void Hint(const char* text) {
 
 // GTA's own help box (top left), as the store's other goods prompt with it:
 // "~INPUT_CONTEXT~" draws the key the player has for E.
-void HelpBox(const char* text) {
+void HelpBox(const char* text, bool beep = true) {
     Call<void>(BEGIN_TEXT_COMMAND_DISPLAY_HELP, "STRING");
     Call<void>(ADD_TEXT_COMPONENT_SUBSTRING_PLAYER_NAME, text);
-    Call<void>(END_TEXT_COMMAND_DISPLAY_HELP, 0, 0, 1, -1);
+    Call<void>(END_TEXT_COMMAND_DISPLAY_HELP, 0, 0, beep ? 1 : 0, -1);
 }
 
 void Sound(const char* name, const char* set = "HUD_FRONTEND_DEFAULT_SOUNDSET") {
@@ -419,6 +424,24 @@ float g_carryOffset[3] = {0.0f, 0.0f, 0.3f};   // m, in the hammer's frame (its 
 float g_carryRotation[3] = {0.0f, 0.0f, 0.0f}; // degrees about the hammer's X, Y, Z
 std::wstring g_iniPath;
 
+// The Skate Shop's hours (INI SkateShopHours, read once a second).
+shophours::Hours g_hours;
+std::string g_hoursText;
+
+void ReadHours() {
+    static ULONGLONG s_readAt = 0;
+    if (g_iniPath.empty() || GetTickCount64() < s_readAt) return;
+    s_readAt = GetTickCount64() + 1000;
+    wchar_t text[32]{};
+    GetPrivateProfileStringW(L"SkateV", L"SkateShopHours", L"8-22", text, 32, g_iniPath.c_str());
+    char narrow[32]{};
+    for (int i = 0; i < 31 && text[i]; ++i) narrow[i] = static_cast<char>(text[i] < 128 ? text[i] : '?');
+    if (g_hoursText == narrow) return;
+    g_hoursText = narrow;
+    if (shophours::Parse(narrow, g_hours)) Log("board shop: the Skate Shop opens " + shophours::Text(g_hours) + (g_hours.always() ? " (always)" : ""));
+    else Log("board shop: SkateShopHours '" + g_hoursText + "' is not 'open-close' (e.g. 8-22): always open");
+}
+
 void ReadCarry() {
     if (g_iniPath.empty()) return;
     auto one = [](const wchar_t* key, float& out) {
@@ -533,7 +556,9 @@ void Tick(bool busy, bool carryBoard) {
     // The boardwalk's board shop: its boards within 30 m, the menu at its front.
     const bool atBeach = tier < 0 && g_rt->HasShopOpenAt() && BeachDistance(me) <= kBeachShow;
     if (atBeach) tier = 3;
-    const bool beachFront = atBeach && BeachDistance(me) <= kBeachReach;
+    const bool beachFront = atBeach && BeachDistance(me) <= (g_open ? kBeachKeep : kBeachReach);
+    ReadHours();
+    const bool beachOpen = shophours::OpenAt(Call<int>(GET_CLOCK_HOURS), g_hours);
     if (tier != g_tierShown) {
         g_tierShown = tier;
         if (tier == 3) Log("board shop: at the Vespucci board shop (E at its front opens the boards)");
@@ -552,9 +577,24 @@ void Tick(bool busy, bool carryBoard) {
         Menu(ped);
         return;
     }
-    if (!can || menu::IsOpen() || Call<BOOL>(IS_PED_IN_ANY_VEHICLE, ped, false) ||
-        Call<BOOL>(IS_PLAYER_WANTED_LEVEL_GREATER, Call<int>(PLAYER_ID), 0))
-        return;
+    const bool wanted = Call<BOOL>(IS_PLAYER_WANTED_LEVEL_GREATER, Call<int>(PLAYER_ID), 0);
+    // At the Skate Shop's front, why it does not open (nothing silently).
+    if (beachFront && !menu::IsOpen() && !Call<BOOL>(IS_PED_IN_ANY_VEHICLE, ped, false)) {
+        if (busy) {
+            Hint("Skate Shop: step off your board to browse");
+            return;
+        }
+        if (wanted) {
+            HelpBox("The Skate Shop won't serve you while you're wanted.", false);
+            return;
+        }
+        if (!beachOpen) {
+            Call<void>(DISABLE_CONTROL_ACTION, 0, 51, 1);
+            HelpBox(("The Skate Shop is closed. Open " + shophours::Text(g_hours) + ".").c_str(), false);
+            return;
+        }
+    }
+    if (!can || menu::IsOpen() || Call<BOOL>(IS_PED_IN_ANY_VEHICLE, ped, false) || wanted) return;
     const bool atShow = tier == 3 || LookingAtShow(ped);
     if (atShow) Call<void>(DISABLE_CONTROL_ACTION, 0, 51, 1);  // INPUT_CONTEXT: ours while looking at the boards
     // Looking at the boards: GTA's help box, as at the clothes. Elsewhere in
