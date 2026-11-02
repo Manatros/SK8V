@@ -51,6 +51,95 @@ pub struct Body {
 
 static INSTALLED: Mutex<Option<Installed>> = Mutex::new(None);
 static BODIES: Mutex<Vec<Body>> = Mutex::new(Vec::new());
+
+/// Contact witness (design 2026-11-02-contact-witness): the last hard
+/// (non-floor) contacts of the board with the static world, each with the
+/// face it hit as installed then, newest last.
+struct Hit {
+    tick: u64,
+    body: String,
+    point: Vec3,
+    normal: Vec3,
+    face: Option<([Vec3; 3], u32, String)>,
+}
+static HITS: Mutex<std::collections::VecDeque<Hit>> = Mutex::new(std::collections::VecDeque::new());
+/// How far back Mark this spot reports (Skate ticks, 60 a second).
+const HIT_TICKS: u64 = 180;
+const HIT_KEEP: usize = 400;
+static LAST_TICK: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// One tick's hard contacts (Skate space, as `Session::take_static_hits`).
+pub fn record_hits(tick: u64, hits: Vec<(usize, [f32; 3], [f32; 3], String)>) {
+    LAST_TICK.store(tick, std::sync::atomic::Ordering::Relaxed);
+    // The faces first (INSTALLED, then HITS: never both held, so no lock order to keep).
+    let new: Vec<Hit> = if hits.is_empty() {
+        Vec::new()
+    } else {
+        let installed = INSTALLED.lock().unwrap();
+        // Board parts only (wheels, trucks, deck): the skater's own volumes
+        // touch walls in every bail and read as "Attached(n)" (peer review).
+        hits.into_iter().filter(|h| h.3.starts_with("Board(")).map(|(index, point, normal, body)| Hit {
+            tick,
+            body,
+            point: crate::coords::from_skate(Vec3::from_array(point)),
+            normal: crate::coords::basis() * Vec3::from_array(normal),
+            face: installed.as_ref().and_then(|a| a.faces.get(index)).cloned(),
+        }).collect()
+    };
+    let mut kept = HITS.lock().unwrap();
+    while kept.front().is_some_and(|h| h.tick + HIT_TICKS < tick || h.tick > tick) {
+        kept.pop_front();
+    }
+    for hit in new {
+        // One entry per face and body, renewed by each contact, so a board
+        // resting against a lip cannot push the stopping face out (peer review).
+        let face = |h: &Hit| h.face.as_ref().map(|f| f.0);
+        if let Some(i) = kept.iter().position(|h| h.body == hit.body && face(h).is_some() && face(h) == face(&hit)) {
+            kept.remove(i);
+        }
+        kept.push_back(hit);
+        if kept.len() > HIT_KEEP {
+            kept.pop_front();
+        }
+    }
+}
+
+/// The witness lines for MARK-INFO: per face hit, newest first.
+fn hit_lines(now: u64) -> String {
+    let kept = HITS.lock().unwrap();
+    if kept.is_empty() {
+        return "  hard contacts in the last 3 s: none\n".to_owned();
+    }
+    let mut out = format!("  hard contacts in the last 3 s: {}\n", kept.len());
+    // One line per face (its newest contact) and body, newest first.
+    let mut seen: Vec<(String, String)> = Vec::new();
+    for h in kept.iter().rev() {
+        let key = (h.face.as_ref().map_or("?".to_owned(), |f| format!("{:?}", f.0)), h.body.clone());
+        if seen.contains(&key) {
+            continue;
+        }
+        seen.push(key);
+        if seen.len() > 16 {
+            break;
+        }
+        let ago = now.saturating_sub(h.tick) as f32 / 60.0;
+        out.push_str(&format!("    {ago:.2} s ago {} at {:.2} {:.2} {:.2} normal {:.2} {:.2} {:.2}", h.body, h.point.x, h.point.y, h.point.z,
+            h.normal.x, h.normal.y, h.normal.z));
+        match &h.face {
+            Some((t, tag, origin)) => {
+                let c = (t[0] + t[1] + t[2]) / 3.0;
+                let n = (t[1] - t[0]).cross(t[2] - t[0]).normalize_or_zero();
+                let area = (t[1] - t[0]).cross(t[2] - t[0]).length() / 2.0;
+                out.push_str(&format!(": {} centre {:.2} {:.2} {:.2} normal {:.2} {:.2} {:.2} area {:.4} m2 tags {} from {origin}\n",
+                    kind(t), c.x, c.y, c.z, n.x, n.y, n.z, area, tag_names(*tag)));
+                out.push_str(&format!("      corners {:.3} {:.3} {:.3} / {:.3} {:.3} {:.3} / {:.3} {:.3} {:.3}\n",
+                    t[0].x, t[0].y, t[0].z, t[1].x, t[1].y, t[1].z, t[2].x, t[2].y, t[2].z));
+            }
+            None => out.push_str(": face not in the installed area (rebuilt since)\n"),
+        }
+    }
+    out
+}
 static STATUS: Mutex<String> = Mutex::new(String::new());
 
 /// Tag bits and their names (`live.rs`, `skate_host::bridge::NO_GRIND_TAG`).
@@ -117,6 +206,8 @@ fn segment_distance(p: Vec3, a: Vec3, b: Vec3) -> f32 {
 /// The MARK-INFO text for GTA point `centre` and how many faces it names.
 pub fn describe(centre: Vec3, radius: f32) -> (String, usize) {
     let mut out = format!("MARK-INFO at {:.2} {:.2} {:.2} (within {radius:.1} m)\n  {}\n", centre.x, centre.y, centre.z, status());
+    // The witness first: HITS and INSTALLED are never held together.
+    let witness = hit_lines(LAST_TICK.load(std::sync::atomic::Ordering::Relaxed));
     let installed = INSTALLED.lock().unwrap();
     let Some(area) = installed.as_ref() else {
         out.push_str("  no collision area installed\n");
@@ -156,6 +247,7 @@ pub fn describe(centre: Vec3, radius: f32) -> (String, usize) {
             if b.fixed { ", fixed (dropped object)" } else { "" },
             if b.allow_box && b.triangles == 12 { ", BOX (no exact collision)" } else { "" }));
     }
+    out.push_str(&witness);
     (out, near.len())
 }
 
@@ -167,5 +259,23 @@ mod tests {
     fn tags_read_as_names() {
         assert_eq!(tag_names(0), "-");
         assert_eq!(tag_names(crate::live::PARKMESH_TAG | crate::live::PARKCUT_TAG), "park-visible+park-cut");
+    }
+
+    /// Design 2026-11-02 contact witness: hard contacts are kept 3 s, one
+    /// line per face and body, newest first; older ones go.
+    #[test]
+    fn hard_contacts_are_kept_three_seconds_one_line_per_face() {
+        let hit = |i: usize, body: &str| (i, [0.0, 0.5, 0.0], [1.0, 0.1, 0.0], body.to_owned());
+        record_hits(1000, vec![hit(7, "Board(RightFrontWheel)"), hit(7, "Board(RightFrontWheel)"), hit(8, "Board(Deck)")]);
+        record_hits(1100, vec![hit(9, "Board(LeftBackWheel)")]);
+        let lines = hit_lines(1100);
+        assert!(lines.contains("hard contacts in the last 3 s: 4"), "{lines}");
+        // No area installed in this test: the faces are named as rebuilt since.
+        // Two contacts of the front wheel make one line: three lines in all.
+        assert_eq!(lines.matches("face not in the installed area").count(), 3, "one line per face and body: {lines}");
+        assert!(lines.find("LeftBackWheel").unwrap() < lines.find("Deck").unwrap(), "newest first: {lines}");
+        // 3 s (180 ticks) after tick 1000 those are gone; the one at 1100 stays.
+        record_hits(1279, Vec::new());
+        assert!(hit_lines(1279).contains("hard contacts in the last 3 s: 1"), "{}", hit_lines(1279));
     }
 }

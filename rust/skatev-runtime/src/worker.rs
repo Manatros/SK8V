@@ -1835,6 +1835,9 @@ fn run(
             }
             s.advance()?;
             perf.tick(t.elapsed());
+            // Contact witness: hard contacts kept for Mark this spot.
+            let (tick, hits) = s.take_static_hits();
+            crate::spot::record_hits(tick, hits);
             skitch_held = s.skitch_held_tag();
             if s.air_teleport_requested() {
                 log(&format!(

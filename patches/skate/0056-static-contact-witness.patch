@@ -1,0 +1,90 @@
+diff --git a/crates/skate-core/src/physics/board_world.rs b/crates/skate-core/src/physics/board_world.rs
+index 469011c..36a29d1 100644
+--- a/crates/skate-core/src/physics/board_world.rs
++++ b/crates/skate-core/src/physics/board_world.rs
+@@ -126,6 +126,9 @@ pub struct BoardWorld {
+     // which Skate reads as the packed surface ID (wheel surface vote).
+     dynamic_entities: Vec<u32>,
+     dynamic_hits: Vec<(u32, Vector3, Vector3)>,
++    // SkateV contact witness (design 2026-11-02-contact-witness): static
++    // contacts that were not floor, kept until the host takes them.
++    static_hits: Vec<(usize, Vector3, Vector3, CollisionBody)>,
+     /// SkateV contact exchange: the solver body standing for a moving host
+     /// entity (an attached proxy with the entity's velocity and mass). Contacts
+     /// with an unmapped entity keep the static-world body.
+@@ -179,6 +182,7 @@ impl BoardWorld {
+             dynamic_surfaces: Vec::new(),
+             dynamic_entities: Vec::new(),
+             dynamic_hits: Vec::new(),
++            static_hits: Vec::new(),
+             dynamic_bodies: std::collections::HashMap::new(),
+             buffer: ContactBuffer {
+                 count: 0,
+@@ -264,6 +268,13 @@ impl BoardWorld {
+         &self.dynamic_hits
+     }
+ 
++    /// SkateV contact witness: (static triangle index, contact point, normal,
++    /// body) of the contacts kept since the last call whose normal was not a
++    /// floor's (y under STATIC_HIT_MAX_UP), at most STATIC_HIT_CAP of them.
++    pub fn take_static_hits(&mut self) -> Vec<(usize, Vector3, Vector3, CollisionBody)> {
++        std::mem::take(&mut self.static_hits)
++    }
++
+     /// Imported brush floors can meet at split edges without sharing vertices.
+     /// Their continuation is checked at the contact point rather than marking
+     /// the entire edge smooth, which would erase a real ledge on an open span.
+@@ -409,6 +420,7 @@ impl BoardWorld {
+         // return false below that threshold. Air/ground-only queries allocate
+         // nothing extra; narrow-phase candidates remain untouched.
+         let mut seam_candidates = None;
++        let static_hits = &mut self.static_hits;
+         let output = &mut self.contacts;
+         let mut publish = |records: &[ContactRecord]| {
+             output.extend(records.iter().map(collision_from_record));
+@@ -474,6 +486,9 @@ impl BoardWorld {
+                     if internal {
+                         continue;
+                     }
++                    if manifold.normal.y < STATIC_HIT_MAX_UP && static_hits.len() < STATIC_HIT_CAP {
++                        static_hits.push((index, pair.b, manifold.normal, volume.body));
++                    }
+                     let contact = RetailContactInput {
+                         position_on_a: pair.a,
+                         position_on_b: pair.b,
+@@ -569,6 +584,10 @@ impl BoardWorld {
+ /// Up component of a walkable face for SkateV's imported seam filter
+ /// (cos 25.8 degrees, the curb-bevel walkable top limit in skatev-runtime).
+ const IMPORTED_SEAM_MIN_UP: f32 = 0.9;
++/// SkateV contact witness: contacts with a normal flatter than this are kept
++/// for the host (a floor pushes straight up), at most STATIC_HIT_CAP between takes.
++const STATIC_HIT_MAX_UP: f32 = 0.9;
++const STATIC_HIT_CAP: usize = 64;
+ 
+ fn contact_trace_level() -> u8 {
+     static LEVEL: std::sync::OnceLock<u8> = std::sync::OnceLock::new();
+diff --git a/crates/skate-host/src/physics/bridge.rs b/crates/skate-host/src/physics/bridge.rs
+index f987029..3dc6e28 100644
+--- a/crates/skate-host/src/physics/bridge.rs
++++ b/crates/skate-host/src/physics/bridge.rs
+@@ -370,6 +370,20 @@ impl Session {
+     pub fn host_body_masses(&self) -> std::collections::HashMap<u32, f32> {
+         self.physics.host_bodies.inputs.iter().map(|b| (b.tag, b.inverse_mass)).collect()
+     }
++    /// SkateV contact witness (design 2026-11-02-contact-witness): static
++    /// triangles the board touched with a non-floor normal since the last
++    /// call: the current tick, and (triangle index in the installed
++    /// collision, point, normal, body) in Skate space.
++    pub fn take_static_hits(&mut self) -> (u64, Vec<(usize, [f32; 3], [f32; 3], String)>) {
++        let hits = self
++            .physics
++            .world
++            .take_static_hits()
++            .into_iter()
++            .map(|(i, p, n, body)| (i, [p.x, p.y, p.z], [n.x, n.y, n.z], format!("{body:?}")))
++            .collect();
++        (self.physics.ticks, hits)
++    }
+     /// SkateV: dynamic geometry the board touched since the last
+     /// `set_dynamic_triangles`: (tag, point, normal) in Skate space.
+     pub fn dynamic_hits(&self) -> Vec<(u32, [f32; 3], [f32; 3])> {
