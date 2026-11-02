@@ -13,7 +13,7 @@ int main() {
     // Across midnight.
     assert(Parse("20-4", h) && OpenAt(20, h) && OpenAt(23, h) && OpenAt(3, h) && !OpenAt(4, h) && !OpenAt(12, h));
     // Bad text: always open.
-    assert(!Parse("", h) && h.always());
+    assert(!Parse("", h) && h.always());  // a blanked key: always open
     assert(!Parse("nine to five", h) && h.always());
     assert(!Parse("8-30", h) && h.always());
     assert(!Parse("8-22x", h) && h.always());

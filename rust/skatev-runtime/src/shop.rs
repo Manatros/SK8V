@@ -744,13 +744,13 @@ pub fn display_wall(eye: bevy_math::Vec3, mut probe: impl FnMut(bevy_math::Vec3,
 /// straight one 0.3 to 8 m from `eye` (a storefront the anchor stands
 /// close to, with tables in front: no clear-space check). Either must
 /// face within 45 degrees of `SKATE_FRONT` (not a pillar or the shop
-/// across the boardwalk).
-pub fn storefront(eye: bevy_math::Vec3, mut probe: impl FnMut(bevy_math::Vec3, bevy_math::Vec3) -> Option<bevy_math::Vec3>) -> Option<(bevy_math::Vec3, bevy_math::Vec3)> {
+/// across the boardwalk). The third value: found by the relaxed search.
+pub fn storefront(eye: bevy_math::Vec3, mut probe: impl FnMut(bevy_math::Vec3, bevy_math::Vec3) -> Option<bevy_math::Vec3>) -> Option<(bevy_math::Vec3, bevy_math::Vec3, bool)> {
     use bevy_math::{Vec2, Vec3};
     let front = Vec2::from(SKATE_FRONT).normalize().extend(0.);
     let facing = |normal: Vec3| normal.dot(front) > std::f32::consts::FRAC_1_SQRT_2;
-    if let Some(wall) = display_wall(eye, &mut probe).filter(|w| facing(w.1)) {
-        return Some(wall);
+    if let Some((at, normal)) = display_wall(eye, &mut probe).filter(|w| facing(w.1)) {
+        return Some((at, normal, false));
     }
     const DIRECTIONS: usize = 24;
     let mut best: Option<(f32, Vec3, Vec3)> = None;
@@ -779,7 +779,7 @@ pub fn storefront(eye: bevy_math::Vec3, mut probe: impl FnMut(bevy_math::Vec3, b
             best = Some((d, hit, normal));
         }
     }
-    best.map(|(_, at, normal)| (at, normal))
+    best.map(|(_, at, normal)| (at, normal, true))
 }
 
 /// The Vespucci Skate Shop's front faces this way (out of the shop): from

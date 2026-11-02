@@ -194,7 +194,7 @@ void ShowBoards(int ped, int tier) {
         }
         const std::string note = g_rt->ShopText(9);
         if (!note.empty()) Log("board shop: " + note);
-        if (n) Log("board shop: " + std::to_string(n) + " boards on show (" + (c ? "a clerk near: behind the till" : "on a wall") + ")");
+        if (n) Log("board shop: " + std::to_string(n) + " boards on show (" + (c ? "a clerk near: behind the till" : tier == 3 ? "at the storefront" : "on a wall") + ")");
         else if (!g_showMissed) g_showMissed = true, Log("board shop: no place for boards on show found yet (tried again every 1.5 s)");
     }
     for (std::size_t i = 0; i < g_onShow.size(); ++i) {
@@ -426,7 +426,7 @@ std::wstring g_iniPath;
 
 // The Skate Shop's hours (INI SkateShopHours, read once a second).
 shophours::Hours g_hours;
-std::string g_hoursText;
+std::string g_hoursText = "\x01";  // never read: the first read always parses
 
 void ReadHours() {
     static ULONGLONG s_readAt = 0;

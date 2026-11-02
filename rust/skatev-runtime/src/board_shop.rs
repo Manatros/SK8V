@@ -719,11 +719,23 @@ impl BoardShop {
             Some(kept) => kept.clone(),
             None => {
                 let till = clerk.and_then(|(at, forward)| crate::shop::wall_behind(at + Vec3::Z * 0.3, forward, &mut probe));
-                let wall = |probe: &mut dyn FnMut(Vec3, Vec3) -> Option<Vec3>| {
-                    if tier == Tier::Skate { crate::shop::storefront(eye, probe) } else { crate::shop::display_wall(eye, probe) }
+                let mut relaxed = false;
+                let mut wall = |probe: &mut dyn FnMut(Vec3, Vec3) -> Option<Vec3>| {
+                    if tier == Tier::Skate {
+                        crate::shop::storefront(eye, probe).map(|(at, normal, r)| {
+                            relaxed = r;
+                            (at, normal)
+                        })
+                    } else {
+                        crate::shop::display_wall(eye, probe)
+                    }
                 };
                 let mut found = till.map(|w| (w, true)).or_else(|| wall(&mut probe).map(|w| (w, false)));
-                let mut how = if found.is_some_and(|f| f.1) { "behind the till" } else { "on a wall" };
+                let mut how = match found {
+                    Some((_, true)) => "behind the till",
+                    Some(_) if relaxed => "on the nearest front (relaxed search)",
+                    _ => "on a wall (strict search)",
+                };
                 // The board shop has no clerk and may have tables before its
                 // front: after 5 misses, with its ground streamed in, a fixed
                 // front (design 2026-11-02-skate-shop-consistency).
@@ -1063,8 +1075,12 @@ mod tests {
         BoardShop::new(library, available, [identity; 7], dir)
     }
 
+    fn dir_path(name: &str) -> PathBuf {
+        std::env::temp_dir().join(format!("skatev-shop-{name}-{}", std::process::id()))
+    }
+
     fn dir(name: &str) -> PathBuf {
-        let d = std::env::temp_dir().join(format!("skatev-shop-{name}-{}", std::process::id()));
+        let d = dir_path(name);
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();
         d
@@ -1207,12 +1223,15 @@ mod tests {
         let eye = v(10.0, 20.0, 1.5);
         // 0.6 m away: too close for the store walls' search.
         assert!(crate::shop::display_wall(eye, scene(Some(19.4), false, true)).is_none());
-        let (at, normal) = crate::shop::storefront(eye, scene(Some(19.4), false, true)).unwrap();
+        let (at, normal, _) = crate::shop::storefront(eye, scene(Some(19.4), false, true)).unwrap();
         assert!((at.y - 19.4).abs() < 1e-3 && (normal - v(0.0, 1.0, 0.0)).length() < 1e-3, "{at:?} {normal:?}");
         // 3 m away with a table before it: not clear, still the front.
         assert!(crate::shop::display_wall(eye, scene(Some(17.0), true, true)).is_none());
-        assert!(crate::shop::storefront(eye, scene(Some(17.0), true, true)).is_some_and(|(at, _)| (at.y - 17.0).abs() < 1e-3));
+        assert!(crate::shop::storefront(eye, scene(Some(17.0), true, true)).is_some_and(|(at, _, _)| (at.y - 17.0).abs() < 1e-3));
         assert!(crate::shop::storefront(eye, scene(None, false, true)).is_none());
+        // A wall behind the eye faces away from the shop's front (-y): never taken.
+        assert!(crate::shop::storefront(eye, scene(Some(21.0), false, true)).is_none());
+        assert!(crate::shop::storefront(eye, scene(Some(19.4), false, true)).is_some_and(|w| w.2), "the relaxed search");
     }
 
     #[test]
@@ -1236,6 +1255,12 @@ mod tests {
         let show = s.shows.iter().find(|x| x.store == crate::shop::store_key(anchor)).unwrap();
         assert!((show.normal.truncate() - bevy_math::Vec2::from(crate::shop::SKATE_FRONT).normalize()).length() < 1e-3);
         assert!(show.floor.abs() < 1e-3 && s.note.contains("fixed storefront"), "{}", s.note);
+        // Never saved, also not by a later find in another store.
+        assert!(!dir_path("front2").join(DISPLAY_FILE).exists());
+        let other = v(30.0, 20.0, 1.5);
+        assert!(!s.display(Tier::Skate, v(30.0, 20.0, 0.0), other, None, 3, scene(Some(19.4), false, true)).is_empty());
+        let saved = std::fs::read_to_string(dir_path("front2").join(DISPLAY_FILE)).unwrap();
+        assert!(saved.contains("30 20") && !saved.contains("10 20"), "{saved}");
         // Clothing stores keep their search: no fixed front.
         let mut c = shop(&dir("front3"));
         for _ in 0..8 {
