@@ -44,6 +44,7 @@ struct Shared {
     SvGetXrayFn getXray = nullptr; // optional (HallOfMeatXray=0: unused)
     // Optional: Skate's TRAX banner for GTA's radio (runtime hud.rs).
     std::uint32_t(__cdecl* showRadio)(void*, const char*, const char*, const char*, const char*) = nullptr;
+    std::uint32_t(__cdecl* showCentral)(void*, std::uint32_t, const char*) = nullptr;
     bool enabled = false;
     bool registered = false;
     bool trickAnalyzer = true; // viewport flag bit 1 (script thread)
@@ -194,6 +195,7 @@ void Start(const std::wstring& iniPath, void* runtime, LogFn log) {
     // and safe zone are unchanged. The renderer and registration stay alive.
     g.sent = {};
     g.showRadio = reinterpret_cast<decltype(g.showRadio)>(GetProcAddress(module, "sv_show_radio"));
+    g.showCentral = reinterpret_cast<decltype(g.showCentral)>(GetProcAddress(module, "sv_show_central"));
     g.getXray = IniFloat(iniPath, L"HallOfMeatXray", 1.0f) != 0.0f
                     ? reinterpret_cast<SvGetXrayFn>(GetProcAddress(module, "sv_get_xray"))
                     : nullptr;
@@ -228,6 +230,11 @@ void SetVisible(bool visible) {
 bool ShowRadio(const char* top, const char* middle, const char* bottom, const char* station) {
     return g.enabled && g.visible.load() && g.runtime && g.showRadio &&
            g.showRadio(g.runtime, top, middle, bottom, station) == 1;
+}
+
+bool ShowCentral(int style, const char* text) {
+    return g.enabled && g.visible.load() && g.runtime && g.showCentral && text &&
+           g.showCentral(g.runtime, static_cast<std::uint32_t>(style), text) == 1;
 }
 
 void SetTrickAnalyzer(bool on) { g.trickAnalyzer = on; }

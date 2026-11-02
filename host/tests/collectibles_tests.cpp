@@ -80,6 +80,14 @@ int main() {
     assert(Has(back10, FileOp::Delete, "Skate 3 Track 10.mp3"));
     assert(Has(back10, FileOp::Rename, "Skate 3 Track 10.mp3.locked", "Skate 3 Track 10.mp3"));
 
+    // Skate's centre popups (design 2026-11-02-collectible-popups).
+    assert(PopupFound(Kind::Part) == "Hidden board part found");
+    assert(PopupFound(Kind::Song) == "Hidden song found");
+    assert(PopupEarned("part:deck:f2c5:2c7f", "Busenitz Seizures") == "Deck unlocked: Busenitz Seizures");
+    assert(PopupEarned("part:grip:g1", "Black") == "Griptape unlocked: Black");
+    assert(PopupEarned("song:7", "") == "New song: Skate 3 Track 07");
+    assert(PopupEarned("cash:500", "") == "Nothing left to unlock: $500");
+
     std::cout << "collectibles tests passed\n";
     return 0;
 }

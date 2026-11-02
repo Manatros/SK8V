@@ -121,6 +121,16 @@ impl Assets {
         Self::load_movie(root, "trickanalyser.json")
     }
 
+    /// `<data_root>/private/hud-central` (tools/prepare-hom-hud.py --movie hudcentral).
+    pub fn central_dir_for(data_root: &Path) -> PathBuf {
+        data_root.join("private").join("hud-central")
+    }
+
+    /// The centre-screen message movie (`runtime/hudcentral.json`).
+    pub fn load_central(root: &Path) -> Result<Self, String> {
+        Self::load_movie(root, "hudcentral.json")
+    }
+
     /// The Hall of Meat movie (`runtime/homscoring.json`).
     pub fn load_hom(root: &Path) -> Result<Self, String> {
         Self::load_movie(root, "homscoring.json")

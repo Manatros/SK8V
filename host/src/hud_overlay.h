@@ -28,6 +28,9 @@ void Tick(bool skating);
 // GET_RADIO_STATION_NAME id for its logo). False when the HUD or the banner
 // is unavailable (the caller notifies instead).
 bool ShowRadio(const char* top, const char* middle, const char* bottom, const char* station);
+// Skate's centre-screen popup (`style` 0 plain, 1 celebratory) on the next
+// Skate tick; false when the HUD or the prepared movie is not there.
+bool ShowCentral(int style, const char* text);
 // Script thread: Skate 3's Trick Analyzer on or off (viewport flag bit 1).
 void SetTrickAnalyzer(bool on);
 // Time spent in the Present callback (render thread) since the last call.

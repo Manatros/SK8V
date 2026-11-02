@@ -111,6 +111,8 @@ pub(crate) struct Bindings {
     pub(crate) gesture: String,
     /// Its diagram mirrored (the rider stands goofy).
     pub(crate) mirrored: bool,
+    /// The centre message (`Central_GetMessageData`, `Central_GetAudioHook`).
+    pub(crate) central: crate::central::Message,
 }
 
 fn array(vm: &mut Vm, values: impl IntoIterator<Item = Value>) -> Result<Value, String> {
@@ -209,7 +211,7 @@ impl Host for Bindings {
             // Enumeration flags only; the movie never enumerates prototypes.
             ("global", "ASSetPropFlags") => Ok(Value::Undefined),
             // Frontend sounds and screen registration have no GTA counterpart.
-            ("Audio", "PlaySound" | "ChyronIntroDone" | "ChyronOutroDone")
+            ("Audio", "PlaySound" | "PlayGenCentralMsge" | "ChyronIntroDone" | "ChyronOutroDone")
             | ("ScreenManager", "OnLoaded" | "RegisterScreen") => {
                 Ok(Value::Undefined)
             }
@@ -295,6 +297,13 @@ impl Host for Bindings {
                 Ok(Value::Undefined)
             }
             (_, "SetUseSkateChallengeSettings" | "SkateChallenegeSetGest") => Ok(Value::Undefined),
+            // hudcentral: [text, colour, x offset, y offset] and its sound hook.
+            ("HUDComponents", "Central_GetMessageData") => {
+                let m = &self.central;
+                let v = [Value::Text(m.text.clone()), Value::Number(m.colour as f64), Value::Number(0.0), Value::Number(0.0)];
+                array(vm, v)
+            }
+            ("HUDComponents", "Central_GetAudioHook") => Ok(Value::Number(self.central.hook)),
             _ => Err(format!("Unimplemented Hall of Meat HUD binding {native}.{method}")),
         }
     }

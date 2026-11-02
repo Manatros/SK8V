@@ -20,7 +20,7 @@ use crate::worker::{Log, Shared};
 use skate_hud::hom::state;
 use skate_hud::layout::{DEFAULT_MAX_ASPECT, Layout};
 use skate_hud::player::Texture;
-use skate_hud::{AnalyserPlayer, Assets, ChyronPlayer, Frame, HomPlayer, Player, ScoreInput};
+use skate_hud::{AnalyserPlayer, Assets, CentralPlayer, ChyronPlayer, Frame, HomPlayer, Player, ScoreInput};
 use std::ffi::c_void;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
@@ -115,6 +115,13 @@ pub struct HudShared {
     /// Pending radio banner (`sv_show_radio`): the three lines, then the
     /// station id for its logo (GET_RADIO_STATION_NAME).
     pub radio: Option<[String; 4]>,
+    /// Pending centre message (`sv_show_central`): style, text and when it
+    /// was asked for (dropped when Skate is not ticking within
+    /// [`CENTRAL_STALE_SECONDS`]).
+    pub central: Option<(u32, String, std::time::Instant)>,
+    /// The centre movie is loaded and has not failed: `sv_show_central`
+    /// refuses otherwise, so the host shows its own notice.
+    pub central_ready: bool,
 }
 
 /// Skate's scorer -> the movie input (field-for-field; see patch 0010).
@@ -206,6 +213,21 @@ struct ChyronMovie {
     shown_at: Option<std::time::Instant>,
 }
 
+/// How long a centre message stays (plain, celebratory) before its outro,
+/// and how old a request may be when Skate's tick picks it up.
+const CENTRAL_SECONDS: [f32; 2] = [3.0, 4.0];
+const CENTRAL_STALE_SECONDS: f32 = 2.0;
+
+/// Skate's centre-screen message (`hudcentral`): the collectible popups
+/// (design 2026-11-02-collectible-popups).
+struct CentralMovie {
+    assets: Arc<Assets>,
+    texture_base: u32,
+    player: Option<CentralPlayer>,
+    /// When the shown message goes, and whether it is celebratory.
+    shown: Option<(std::time::Instant, f32)>,
+}
+
 /// How long a trick's gesture stays before it fades out.
 const GESTURE_SECONDS: f32 = 3.0;
 
@@ -256,6 +278,7 @@ pub struct Driver {
     hom: Option<HomMovie>,
     chyron: Option<ChyronMovie>,
     analyser: Option<AnalyserMovie>,
+    central: Option<CentralMovie>,
 }
 
 impl Driver {
@@ -367,6 +390,20 @@ impl Driver {
                 None
             }
         };
+        let dir = Assets::central_dir_for(data_root);
+        let central = match Assets::load_central(&dir) {
+            Ok(a) => {
+                let texture_base = textures.len() as u32;
+                textures.extend(a.textures.iter().cloned());
+                log(&format!("centre popups loaded from {} ({} textures)", dir.display(), a.textures.len()));
+                Some(CentralMovie { assets: Arc::new(a), texture_base, player: None, shown: None })
+            }
+            Err(e) => {
+                log(&format!("centre popups unavailable ({e}); run tools/prepare-hom-hud.py --movie hudcentral"));
+                None
+            }
+        };
+        shared.lock().unwrap().hud.central_ready = central.is_some();
         if !textures.is_empty() {
             let mut s = shared.lock().unwrap();
             s.hud.textures = Arc::new(textures);
@@ -380,6 +417,7 @@ impl Driver {
             hom,
             chyron,
             analyser,
+            central,
         }
     }
 
@@ -404,6 +442,12 @@ impl Driver {
                     }
                 }
             }
+        }
+        // A popup asked for before this session (on foot) is not shown late.
+        shared.lock().unwrap().hud.central = None;
+        if let Some(c) = self.central.as_mut() {
+            c.player = None;
+            c.shown = None;
         }
         if let Some(c) = self.chyron.as_mut() {
             c.player = None;
@@ -442,6 +486,7 @@ impl Driver {
         log: &Log,
     ) {
         self.tick_radio(shared, log);
+        self.tick_central(shared, log);
         self.tick_analyser(s, right_stick, shared, log);
         if let Some(p) = self.player.as_mut() {
             if let Err(e) = p.update(&score_input(&s.hud_input())) {
@@ -506,6 +551,47 @@ impl Driver {
         if let Err(e) = run() {
             log(&format!("radio banner stopped: {e}"));
             c.player = None;
+        }
+    }
+
+    /// Centre popups: a fresh request shows (made on demand, as the banner);
+    /// the message goes after its CENTRAL_SECONDS.
+    fn tick_central(&mut self, shared: &Mutex<Shared>, log: &Log) {
+        let request = shared.lock().unwrap().hud.central.take();
+        let request = request.filter(|r| r.2.elapsed().as_secs_f32() <= CENTRAL_STALE_SECONDS);
+        let Some(c) = self.central.as_mut() else { return };
+        if c.player.is_none() && request.is_some() {
+            match CentralPlayer::new(&c.assets) {
+                Ok(p) => c.player = Some(p),
+                Err(e) => {
+                    // Not ready any more: the host shows its own notices
+                    // (peer review 2026-11-02: it kept saying "queued").
+                    log(&format!("centre popup stopped: {e}"));
+                    self.central = None;
+                    shared.lock().unwrap().hud.central_ready = false;
+                    return;
+                }
+            }
+        }
+        let Some(p) = c.player.as_mut() else { return };
+        let mut run = || -> Result<(), String> {
+            if let Some((style, text, _)) = &request {
+                let celebratory = *style == 1;
+                let style = if celebratory { skate_hud::Style::Celebratory } else { skate_hud::Style::Message };
+                p.show(text, style)?;
+                c.shown = Some((std::time::Instant::now(), CENTRAL_SECONDS[celebratory as usize]));
+            } else if c.shown.is_some_and(|(t, secs)| t.elapsed().as_secs_f32() > secs) {
+                c.shown = None;
+                p.hide()?;
+            }
+            p.advance()
+        };
+        if let Err(e) = run() {
+            log(&format!("centre popup stopped: {e}"));
+            c.player = None;
+            c.shown = None;
+            self.central = None;
+            shared.lock().unwrap().hud.central_ready = false;
         }
     }
 
@@ -604,6 +690,19 @@ impl Driver {
                 }
             }
         }
+        let mut central_frame = None;
+        if let (Some(c), Some(l)) = (self.central.as_mut(), layout) {
+            if let Some(p) = c.player.as_ref() {
+                match p.frame(&c.assets, &l) {
+                    Ok(f) => central_frame = Some((f, c.texture_base)),
+                    Err(e) => {
+                        log(&format!("centre popup stopped: {e}"));
+                        self.central = None;
+                        shared.lock().unwrap().hud.central_ready = false;
+                    }
+                }
+            }
+        }
         let mut analyser_frame = None;
         if let (Some(a), Some(l)) = (self.analyser.as_ref(), layout) {
             if let Some(p) = a.player.as_ref() {
@@ -636,7 +735,7 @@ impl Driver {
                 Err(e) => self.fail(&e, log),
             }
         }
-        for (h, base) in hom_frame.into_iter().chain(chyron_frame).chain(analyser_frame) {
+        for (h, base) in hom_frame.into_iter().chain(chyron_frame).chain(analyser_frame).chain(central_frame) {
             let mut f = frame.unwrap_or_else(|| Frame { layout: h.layout, ..Default::default() });
             append_frame(&mut f, &h, base);
             frame = Some(f);
@@ -666,7 +765,12 @@ impl Driver {
             a.shown_at = None;
             a.path.clear();
         }
+        if let Some(c) = self.central.as_mut() {
+            c.player = None;
+            c.shown = None;
+        }
         let mut s = shared.lock().unwrap();
+        s.hud.central = None;
         s.hud.serial += 1;
         s.hud.visible = false;
         s.hud.frame = Arc::default();
@@ -712,6 +816,29 @@ pub unsafe extern "C" fn sv_show_radio(
             }
         };
         shared.lock().unwrap().hud.radio = Some([text(top), text(middle), text(bottom), text(id)]);
+        1
+    })
+}
+
+/// Collectible popups: Skate's centre-screen message shows `text` (UTF-8,
+/// NUL-terminated, cut to 96 characters; the movie keeps one upper-case
+/// line), `style` 0 plain, 1 celebratory. Shown on Skate's next tick while
+/// skating; a request older than 2 s is dropped. Returns 1 when queued, 0
+/// when the movie is not prepared or has failed (the host shows its own
+/// notice then; it asks only while skating).
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sv_show_central(rt: *mut c_void, style: u32, text: *const std::ffi::c_char) -> u32 {
+    crate::guard(0, || {
+        let Some(shared) = runtime_shared(rt) else { return 0 };
+        if text.is_null() || style > 1 {
+            return 0;
+        }
+        let text: String = unsafe { std::ffi::CStr::from_ptr(text) }.to_string_lossy().chars().take(96).collect();
+        let mut s = shared.lock().unwrap();
+        if !s.hud.central_ready {
+            return 0;
+        }
+        s.hud.central = Some((style, text, std::time::Instant::now()));
         1
     })
 }

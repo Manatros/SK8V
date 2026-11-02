@@ -99,6 +99,7 @@ class Prepare:
             ('board', 'skate', ['prepare-board.py'], lambda: py('prepare-board.py', '--assets', self.assets)),
             ('trick-analyser', 'skate', ['prepare-hom-hud.py'], lambda: py(
                 'prepare-hom-hud.py', '--game', self.disc, '--assets', self.assets, '--movie', 'trickanalyser')),
+            ('central-hud', 'skate', ['prepare-hom-hud.py'], self.stage_central_hud),
             ('board-native', 'join', ['prepare-board-native.py'], self.stage_board_native),
             ('ped-colliders', 'join', ['prepare-ped-colliders.py', 'ped_collider_templates.py'], self.stage_ped_colliders),
             ('gta-vehicles', 'gta', ['gta_extract.py', 'build-vehicle-masses.py'], self.stage_vehicles),
@@ -135,6 +136,14 @@ class Prepare:
             print(f'station logos skipped: {e}')
             ytd = []
         py('prepare-hom-hud.py', '--game', self.disc, '--assets', self.assets, '--movie', 'chyron', *ytd)
+
+    def stage_central_hud(self):
+        # Skate's centre popups for the collectibles: cosmetic, so a failure
+        # leaves GTA's notices instead of stopping the setup.
+        try:
+            py('prepare-hom-hud.py', '--game', self.disc, '--assets', self.assets, '--movie', 'hudcentral')
+        except Exception as e:
+            print(f'centre popups skipped (GTA notices stay): {e}')
 
     def stage_ped_colliders(self):
         src = self.work / 'ped-colliders'

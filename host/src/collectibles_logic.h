@@ -63,4 +63,11 @@ struct FileOp {
 // copy: the other is deleted first.
 std::vector<FileOp> SongPlan(const std::vector<SongFile>& files, const Progress& p, bool enabled);
 
+// Skate's centre popups (design 2026-11-02-collectible-popups); the movie
+// upper-cases and keeps one line. A part's kind is known only once earned.
+std::string PopupFound(Kind kind);
+// `reward`: "part:deck:...", "part:grip:...", "song:NN", "cash:N";
+// `name`: the shop's label of the part.
+std::string PopupEarned(const std::string& reward, const std::string& name);
+
 }  // namespace collectibles

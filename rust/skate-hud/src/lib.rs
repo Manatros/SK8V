@@ -43,6 +43,7 @@ pub mod apt_scene;
 pub mod hud_runtime;
 
 pub mod analyser;
+pub mod central;
 pub mod chyron;
 pub mod hom;
 pub mod layout;
@@ -52,6 +53,7 @@ mod presentation;
 pub mod raster;
 
 pub use analyser::AnalyserPlayer;
+pub use central::{CentralPlayer, Style};
 pub use chyron::ChyronPlayer;
 pub use hom::{HomData, HomPlayer};
 pub use layout::Layout;

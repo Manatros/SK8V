@@ -17,8 +17,10 @@ void Start(const std::wstring& gameDir, bool enabled, util::LogFn log);
 void SyncShop();
 
 // Once per script frame. `skating`: Skate rides (not walking, not bailed);
+// `popups`: Skate's HUD shows now (skating, HUD on, not filming), so the
+// moments use Skate's centre popups instead of GTA notices;
 // `skater`: the skater's root; `ped`: the player ped (ignored by the sight line).
-void Tick(bool enabled, bool skating, const float (&skater)[3], int ped);
+void Tick(bool enabled, bool skating, bool popups, const float (&skater)[3], int ped);
 
 // A message for the player, once; nullptr when there is none.
 const char* TakeNotice();

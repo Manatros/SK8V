@@ -7,6 +7,8 @@ user's own game files into the converted data root.
 
 `--movie trickanalyser` prepares the Trick Analyzer (the gesture of the last
 trick) into `private/hud-analyser`, with the gesture_item control merged in.
+`--movie hudcentral` prepares Skate's centre-screen message (collectible popups)
+into `private/hud-central`.
 `--movie chyron` prepares Skate's TRAX now-playing banner (GTA's radio on
 the board) into `private/hud-chyron`; with `--hud-ytd` (GTA's HUD atlas
 `update.rpf/.../scaleform_generic.rpf/hud.ytd`, extracted by tools/prepare.py)
@@ -25,6 +27,7 @@ One adaptation: the donor VM has no ToString (APT opcode 0x4B). Each one is
 rewritten as `push ""` + `add` at the same offset, which converts the value
 the same way (ActionScript string concatenation). Trace (0x26, debug output) becomes
 Pop, which drops its argument the same way.
+Get member by name (0xA5, hudcentral) becomes `push name` + GetMember.
 """
 from pathlib import Path
 import argparse
@@ -52,6 +55,7 @@ MOVIES = {
     'homscoring': (BUNDLE, MANIFEST, 'hud-hom'),
     'chyron': ('data/fe/source/screens/main/chyron', 'runtime/chyron.json', 'hud-chyron'),
     'trickanalyser': ('data/fe/source/screens/hud2/trickanalyser', 'runtime/trickanalyser.json', 'hud-analyser'),
+    'hudcentral': ('data/fe/source/screens/hud2/hudcentral', 'runtime/hudcentral.json', 'hud-central'),
 }
 
 # The Trick Analyzer imports `Gesture Item` (its character 6) from this
@@ -132,6 +136,9 @@ def rewrite_to_string(code):
         if row['opcode'] == 0x4B:
             out.append({'offset': row['offset'], 'opcode': 0xA1, 'operand': '', 'next': row['offset']})
             out.append({'offset': row['offset'], 'opcode': 0x47, 'next': row['next']})
+        elif row['opcode'] == 0xA5:  # get member by name (hudcentral's `_global.Audio`)
+            out.append({'offset': row['offset'], 'opcode': 0xA1, 'operand': row['operand'], 'next': row['offset']})
+            out.append({'offset': row['offset'], 'opcode': 0x4E, 'next': row['next']})
         elif row['opcode'] == 0x26:  # the Trick Analyzer's registration trace
             out.append(dict(row, opcode=0x17))
         else:
@@ -147,6 +154,14 @@ def prepare(game: Path, work: Path, collections: Path, bundle: str = BUNDLE, man
     mappings = font_mapping(collections, cache)
     bundle = cache.load_bundle(BUNDLE)
     origin = merge_gestures(bundle, cache.load_bundle(GESTURES)) if analyser else {}
+    # A character placed but defined in another movie (hudcentral's team logo
+    # loader, character 23, an import the HUD VM cannot follow) becomes an
+    # empty clip, so placing it is harmless; only online team messages used it.
+    placed = {k['character_id'] for c in bundle['characters'].values() for f in c.get('frames', [])
+              for k in f['controls'] if k['type_name'].startswith('place_object') and k['flags'] & 2}
+    for cid in sorted(placed - set(bundle['characters'])):
+        print(f'Character {cid} is not in {BUNDLE}: placed as an empty clip')
+        bundle['characters'][cid] = {'id': cid, 'type_name': 'sprite', 'frames': [{'controls': []}]}
     apt_path = work / 'raw' / (BUNDLE + '.apt')
     const_path = apt_path.with_suffix('.const')
     actions = Actions(apt_path.read_bytes(), const_path.read_bytes())

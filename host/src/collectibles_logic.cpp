@@ -191,4 +191,22 @@ std::vector<FileOp> SongPlan(const std::vector<SongFile>& files, const Progress&
     return ops;
 }
 
+std::string PopupFound(Kind kind) {
+    return kind == Kind::Part ? "Hidden board part found" : "Hidden song found";
+}
+
+std::string PopupEarned(const std::string& reward, const std::string& name) {
+    auto starts = [&](const char* prefix) { return reward.rfind(prefix, 0) == 0; };
+    if (starts("part:deck:")) return "Deck unlocked: " + name;
+    if (starts("part:grip:")) return "Griptape unlocked: " + name;
+    if (starts("part:")) return "Unlocked: " + name;
+    if (starts("song:")) {
+        char text[40];
+        std::snprintf(text, sizeof(text), "New song: Skate 3 Track %02d", std::atoi(reward.c_str() + 5));
+        return text;
+    }
+    if (starts("cash:")) return "Nothing left to unlock: $" + reward.substr(5);
+    return "Unlocked";
+}
+
 }  // namespace collectibles

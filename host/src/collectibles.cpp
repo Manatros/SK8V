@@ -14,6 +14,7 @@
 
 #include "board_shop.h"
 #include "collectibles_logic.h"
+#include "hud_overlay.h"
 #include "natives.h"
 
 namespace collectibles {
@@ -29,6 +30,12 @@ constexpr int kBlipSprite = 66;        // question mark
 constexpr int kPartColour = 5;         // yellow
 constexpr int kSongColour = 27;        // purple
 constexpr int kNoPartsLeftCash = 500;
+// The burst where a collectible is earned (GTA's own effect, requested
+// again whenever it is not loaded).
+constexpr const char* kBurstAsset = "scr_rcbarry2";
+constexpr const char* kBurstEffect = "scr_clown_appears";
+constexpr float kBurstScale = 0.4f;
+constexpr size_t kPopupChars = 40;  // skate_hud::central::MAX_CHARS
 
 util::LogFn g_log = nullptr;
 std::wstring g_placesPath, g_progressPath, g_songsDir;
@@ -38,6 +45,7 @@ std::map<std::string, int> g_blips;
 std::deque<std::string> g_notices;
 std::string g_notice;
 bool g_wasEnabled = true;
+bool g_popups = false;  // Skate's HUD shows: centre popups instead of notices
 bool g_hadSkater = false;
 float g_prev[3] = {};
 DWORD g_nextSight = 0;
@@ -167,6 +175,24 @@ std::string Track(int t) {
     return text;
 }
 
+// Skate's centre popup (`celebratory`: glow and crown); false when it cannot
+// show now, then the caller keeps GTA's notice.
+bool Popup(bool celebratory, const std::string& text) {
+    // The movie keeps one line of 40 characters: a longer one would cut a
+    // shop name, so GTA's notice says it in full instead.
+    return g_popups && text.size() <= kPopupChars && hudoverlay::ShowCentral(celebratory ? 1 : 0, text.c_str());
+}
+
+void Burst(const Item& it) {
+    if (!Call<bool>(HAS_NAMED_PTFX_ASSET_LOADED, kBurstAsset)) {
+        Call<void>(REQUEST_NAMED_PTFX_ASSET, kBurstAsset);
+        return;
+    }
+    Call<void>(USE_PARTICLE_FX_ASSET, kBurstAsset);
+    Call<int>(START_PARTICLE_FX_NON_LOOPED_AT_COORD, kBurstEffect, it.x, it.y, it.z, 0.0f, 0.0f, 0.0f, kBurstScale,
+              false, false, false, false);
+}
+
 void Earn(const Item& it) {
     Unblip(it.id);
     g_progress.state[it.id] = State::Collected;
@@ -187,6 +213,9 @@ void Earn(const Item& it) {
             text = "New song on Self Radio: " + Track(t) + ". Settings > Audio > Perform Quick Scan to hear it.";
         }
     }
+    std::string name;  // the part's shop label, for the popup
+    if (const size_t colon = text.find(": "); reward.rfind("part:", 0) == 0 && colon != std::string::npos)
+        name = text.substr(colon + 2);
     if (reward.empty()) {
         boardshop::Pay(kNoPartsLeftCash);
         reward = "cash:" + std::to_string(kNoPartsLeftCash);
@@ -195,8 +224,16 @@ void Earn(const Item& it) {
     g_progress.reward[it.id] = reward;
     Save();
     if (it.kind == Kind::Song) Reconcile(true);
-    Call<void>(PLAY_SOUND_FRONTEND, -1, "PICK_UP", "HUD_FRONTEND_DEFAULT_SOUNDSET", 1);
-    Notice(Summary() + ": " + text);
+    Burst(it);
+    if (Popup(true, PopupEarned(reward, name))) {
+        Call<void>(PLAY_SOUND_FRONTEND, -1, "CHALLENGE_UNLOCKED", "HUD_AWARDS", 1);
+        // Songs still need GTA's quick scan, which the popup cannot say.
+        if (it.kind == Kind::Song && reward.rfind("song:", 0) == 0)
+            Notice(Summary() + ": Settings > Audio > Perform Quick Scan to hear it.");
+    } else {
+        Call<void>(PLAY_SOUND_FRONTEND, -1, "PICK_UP", "HUD_FRONTEND_DEFAULT_SOUNDSET", 1);
+        Notice(Summary() + ": " + text);
+    }
     Log(it.id + " (" + it.place + ") collected: " + reward);
 }
 
@@ -205,8 +242,9 @@ void Find(const Item& it) {
     Save();
     Blip(it);
     Call<void>(PLAY_SOUND_FRONTEND, -1, "CHECKPOINT_NORMAL", "HUD_MINI_GAME_SOUNDSET", 1);
-    Notice(std::string("You found a hidden ") + (it.kind == Kind::Part ? "board part" : "song") + " (" + it.place +
-           "): reach it while skating");
+    if (!Popup(false, PopupFound(it.kind)))
+        Notice(std::string("You found a hidden ") + (it.kind == Kind::Part ? "board part" : "song") + " (" + it.place +
+               "): reach it while skating");
     Log(it.id + " found");
 }
 
@@ -240,7 +278,11 @@ void SyncShop() {
     while (locked > parts - earned && !boardshop::UnlockNext().empty()) --locked;
 }
 
-void Tick(bool enabled, bool skating, const float (&skater)[3], int ped) {
+void Tick(bool enabled, bool skating, bool popups, const float (&skater)[3], int ped) {
+    g_popups = popups;
+    // The burst's effect loaded ahead of the first collect.
+    if (enabled && !g_items.empty() && !Call<bool>(HAS_NAMED_PTFX_ASSET_LOADED, kBurstAsset))
+        Call<void>(REQUEST_NAMED_PTFX_ASSET, kBurstAsset);
     if (g_items.empty() || g_faulty) return;
     if (enabled != g_wasEnabled) {
         g_wasEnabled = enabled;
