@@ -149,6 +149,19 @@ pub fn models_of(riding: &BoardChoice, grip: Option<&str>, base: Option<&str>, h
     out
 }
 
+/// The models a collectible shows for `goods`: the deck alone, or a
+/// griptape on the default deck (deck first, the grip last, as `models_of`).
+pub fn pickup_models(goods: &Goods) -> Vec<String> {
+    let mut garage = Garage::default();
+    garage.ride(goods);
+    let all = models_of(&garage.riding, garage.grip.as_deref(), None, None);
+    let mut out = vec![all[0].clone()];
+    if matches!(goods, Goods::Grip(_)) && all.len() > 3 {
+        out.push(all[all.len() - 1].clone());
+    }
+    out
+}
+
 /// Where the stores' shows are kept, in the garages' folder.
 const DISPLAY_FILE: &str = "SkateVDisplay.txt";
 /// The section of found collectibles (design 2026-11-02-skate-shop-consistency).
@@ -262,6 +275,45 @@ impl BoardShop {
         self.secrets.remaining()
     }
 
+    fn save_secrets(&self) {
+        let _ = std::fs::write(self.garages.join(crate::secrets::FILE), self.secrets.to_text());
+    }
+
+    /// The secret items in unlock order, one line each:
+    /// `key \t title \t models` (comma-separated; a deck alone, a griptape
+    /// on the default deck), for the collectibles that show them (design
+    /// 2026-11-02-collectibles-v2).
+    pub fn secret_list(&self) -> String {
+        let offers: Vec<crate::shop::Offer> = crate::shop::stock(&self.library, Tier::Skate)
+            .into_iter()
+            .flat_map(|section| section.offers)
+            .collect();
+        let mut out = String::new();
+        for key in self.secrets.order() {
+            let offer = offers.iter().find(|o| crate::secrets::key(&o.goods).as_deref() == Some(key.as_str()));
+            let title = offer.map_or_else(|| key.clone(), |o| o.title.clone());
+            let models = offer.map(|o| pickup_models(&o.goods)).unwrap_or_default();
+            out.push_str(&format!("{key}\t{title}\t{}\n", models.join(",")));
+        }
+        out
+    }
+
+    /// Unlocks `key` and keeps it: 1 unlocked now, 2 it already was, 0 no secret.
+    pub fn unlock(&mut self, key: &str) -> u32 {
+        let result = self.secrets.unlock(key);
+        if result == 1 {
+            self.save_secrets();
+        }
+        result
+    }
+
+    /// Locks every secret again and keeps it (the Developer reset): how many are locked.
+    pub fn relock_all(&mut self) -> usize {
+        self.secrets.relock_all();
+        self.save_secrets();
+        self.secrets.remaining()
+    }
+
     /// Unlocks the next secret item and keeps it: its key and title.
     pub fn unlock_next(&mut self) -> Option<(String, String)> {
         let key = self.secrets.unlock_next()?;
@@ -279,6 +331,19 @@ impl BoardShop {
     /// "Yours".
     fn hidden(&self, goods: &Goods) -> bool {
         self.secrets.locked(goods)
+    }
+
+    /// Goods not sold or shown at a store of `tier`: a locked secret, and
+    /// any secret outside the Skate Shop (design 2026-11-02-collectibles-v2,
+    /// Manatros: "collected boards should be available at the dedicated
+    /// skateshops"). Elsewhere a secret keeps its stand-in for good, so an
+    /// unlock changes nothing there (A18).
+    fn hidden_at(&self, goods: &Goods, tier: Tier) -> bool {
+        self.secrets.locked(goods) || (tier != Tier::Skate && self.secrets.secret(goods))
+    }
+
+    fn board_hidden_at(&self, board: &BoardChoice, tier: Tier) -> bool {
+        self.secrets.board_locked(board) || (tier != Tier::Skate && self.secrets.board_secret(board))
     }
 
     fn garage_path(&self) -> PathBuf {
@@ -485,7 +550,7 @@ impl BoardShop {
             })
             .collect();
         let order = crate::shop::show_picks(&completes, (slot as i32 * 7919, 4049), 0, completes.len());
-        let Some(board) = crate::secrets::substitute(&order, 1, |b| self.secrets.board_secret(b), |b| self.secrets.board_locked(b)).into_iter().next() else {
+        let Some(board) = crate::secrets::substitute(&order, 1, |b| self.secrets.board_secret(b), |b| self.board_hidden_at(b, Tier::Mid)).into_iter().next() else {
             return Vec::new();
         };
         models_of(&board, None, None, None).into_iter().filter(|m| self.available.contains(m)).collect()
@@ -528,7 +593,7 @@ impl BoardShop {
         }
         // Collectibles: every secret found and not yet owned is on sale here
         // every day, outside the rotation (design 2026-11-02-skate-shop-consistency).
-        if matches!(tier, Tier::Skate | Tier::Mid) {
+        if tier == Tier::Skate {
             let found: Vec<crate::shop::Offer> = full.iter().flat_map(|s| s.offers.iter())
                 // Parts only (the decks and grips found; their complete
                 // boards stay in the rotation and Suburban's limit).
@@ -545,7 +610,7 @@ impl BoardShop {
             // gives its slot to the next unlocked one (secrets.rs), so an
             // unlock changes no other slot (A18).
             let all = section.offers.len();
-            let hidden = |offer: &crate::shop::Offer| self.hidden(&offer.goods);
+            let hidden = |offer: &crate::shop::Offer| self.hidden_at(&offer.goods, tier);
             let secret = |offer: &crate::shop::Offer| self.secrets.secret(&offer.goods);
             let offers = if section.title == "Complete boards" {
                 // The first picks are the boards on show (one daily order):
@@ -583,7 +648,7 @@ impl BoardShop {
         }
         let mut sections = crate::shop::stock(&self.library, tier);
         for section in &mut sections {
-            section.offers.retain(|offer| self.sells(&offer.goods) && !self.hidden(&offer.goods));
+            section.offers.retain(|offer| self.sells(&offer.goods) && !self.hidden_at(&offer.goods, tier));
         }
         sections.retain(|s| !s.offers.is_empty());
         self.menu = (!sections.is_empty()).then(|| Menu::new(tier, sections));
@@ -786,7 +851,7 @@ impl BoardShop {
             })
             .collect();
         let order = crate::shop::picks_distinct(&completes, store, day, 0, completes.len());
-        let boards = crate::secrets::substitute(&order, crate::shop::on_show(tier), |b| self.secrets.board_secret(b), |b| self.secrets.board_locked(b));
+        let boards = crate::secrets::substitute(&order, crate::shop::on_show(tier), |b| self.secrets.board_secret(b), |b| self.board_hidden_at(b, tier));
         let to_board = self.frame.inverse();
         show.places(boards.len())
             .into_iter()
@@ -880,6 +945,31 @@ pub unsafe extern "C" fn sv_shop_unlock_next(_rt: *mut c_void, buf: *mut u8, cap
         Some((key, title)) => give(&format!("{key}\t{title}"), buf, cap),
         None => 0,
     })
+}
+
+/// The secret items for the collectibles (`BoardShop::secret_list`).
+/// Returns the bytes it needs (with the NUL), 0 without a shop.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sv_shop_secret_list(_rt: *mut c_void, buf: *mut u8, cap: u32) -> u32 {
+    crate::guard(0, || match with(None, |s| Some(s.secret_list())) {
+        Some(text) => give(&text, buf, cap),
+        None => 0,
+    })
+}
+
+/// Unlocks the secret `key`: 1 unlocked now, 2 it already was, 0 no secret.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sv_shop_unlock(_rt: *mut c_void, key: *const c_char) -> u32 {
+    crate::guard(0, || {
+        let key = unsafe { crate::str_arg(key) };
+        with(0, |s| s.unlock(&key))
+    })
+}
+
+/// Locks every secret again (the Developer reset): how many are locked.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sv_shop_relock_all(_rt: *mut c_void) -> u32 {
+    crate::guard(0, || with(0, |s| s.relock_all() as u32))
 }
 
 /// Host store kinds: 0 Binco / Discount Store, 1 Suburban, 2 Ponsonbys
@@ -1165,11 +1255,11 @@ mod tests {
         let mut s = shop(&d);
         s.character("franklin");
         assert_eq!(s.set_secrets(1), 1, "the one deck is the one lockable item");
-        let sold = |s: &mut BoardShop| {
-            assert!(s.open(Tier::Mid));
+        let sold = |s: &mut BoardShop, tier: Tier| {
+            assert!(s.open(tier));
             s.menu.as_ref().unwrap().sections.iter().flat_map(|x| x.offers.iter()).map(|o| o.title.clone()).collect::<Vec<_>>()
         };
-        let before = sold(&mut s);
+        let before = sold(&mut s, Tier::Mid);
         assert!(!before.iter().any(|t| t.contains("Deck One")), "{before:?}");
         assert!(before.iter().any(|t| t.contains("Truck One")), "trucks are never secret: {before:?}");
         let v = bevy_math::Vec3::new;
@@ -1183,11 +1273,14 @@ mod tests {
         assert_eq!(key, "deck:deckmodel:d1");
         assert!(title.contains("Deck One"), "{title}");
         assert!(s.unlock_next().is_none());
-        assert!(sold(&mut s).iter().any(|t| t.contains("Deck One")));
-        // A new start keeps the file: still unlocked, nothing new chosen.
+        // Unlocked: sold at the Skate Shop only (design 2026-11-02-collectibles-v2).
+        assert!(sold(&mut s, Tier::Skate).iter().any(|t| t.contains("Deck One")));
+        assert!(!sold(&mut s, Tier::Mid).iter().any(|t| t.contains("Deck One")));
+        // A new start keeps the file: still unlocked, nothing new chosen;
+        // crew boards (Suburban's stock) never carry a secret.
         let mut again = shop(&d);
         assert_eq!(again.set_secrets(5), 0);
-        assert!(!again.crew_board(0).is_empty());
+        assert!(again.crew_board(0).is_empty());
     }
 
     /// Lines against a floor at z 0 (when `floor`), a wall y = `wall` (if
@@ -1269,6 +1362,30 @@ mod tests {
     }
 
     #[test]
+    fn secrets_list_unlock_by_key_and_relock_all() {
+        let d = dir("secretkeys");
+        let mut s = shop(&d);
+        s.character("franklin");
+        assert_eq!(s.set_secrets(1), 1);
+        let list = s.secret_list();
+        let line = list.lines().next().unwrap();
+        let cols: Vec<&str> = line.split('\t').collect();
+        assert_eq!(cols[0], "deck:deckmodel:d1");
+        assert!(cols[1].contains("Deck One"), "{line}");
+        assert!(cols[2].starts_with("skatev_d_"), "the deck model first: {line}");
+        assert_eq!(s.unlock("deck:nothing:x"), 0, "no secret");
+        assert_eq!(s.unlock(cols[0]), 1);
+        assert_eq!(s.unlock(cols[0]), 2, "already unlocked");
+        // Kept: a new start still has it unlocked.
+        assert_eq!(shop(&d).set_secrets(1), 0);
+        // The reset locks it again, keeps the choice and saves.
+        assert_eq!(s.relock_all(), 1);
+        let mut again = shop(&d);
+        assert_eq!(again.set_secrets(7), 1, "same single secret, locked");
+        assert_eq!(again.secret_list().lines().next().unwrap().split('\t').next(), Some("deck:deckmodel:d1"));
+    }
+
+    #[test]
     fn a_found_secret_is_on_sale_every_day_until_owned() {
         let d = dir("found");
         let mut s = shop(&d);
@@ -1280,12 +1397,15 @@ mod tests {
         assert!(found(&s, Tier::Skate, 1).is_none(), "locked: not listed");
         s.unlock_next().unwrap();
         for day in 0..30 {
-            for tier in [Tier::Skate, Tier::Mid] {
-                let offers = found(&s, tier, day).unwrap_or_else(|| panic!("{tier:?} day {day}"));
-                assert!(offers.iter().any(|o| o.title.contains("Deck One")), "{offers:?}");
-                assert!(offers.iter().all(|o| s.secrets.secret(&o.goods)));
+            let offers = found(&s, Tier::Skate, day).unwrap_or_else(|| panic!("day {day}"));
+            assert!(offers.iter().any(|o| o.title.contains("Deck One")), "{offers:?}");
+            assert!(offers.iter().all(|o| s.secrets.secret(&o.goods)));
+            // Only the Skate Shop sells what was found (design 2026-11-02-collectibles-v2).
+            for tier in [Tier::Mid, Tier::Low] {
+                assert!(found(&s, tier, day).is_none(), "{tier:?} day {day}: no Found section");
+                let all = s.stock_for(tier, (-1224, -1443), day);
+                assert!(all.iter().flat_map(|sec| &sec.offers).all(|o| !s.secrets.secret(&o.goods)), "{tier:?} day {day}: a secret on sale");
             }
-            assert!(found(&s, Tier::Low, day).is_none(), "Binco: complete boards only");
         }
         let deck = found(&s, Tier::Skate, 3).unwrap().into_iter().find(|o| !matches!(o.goods, Goods::Complete(_))).unwrap();
         s.garage.add(&deck.goods);

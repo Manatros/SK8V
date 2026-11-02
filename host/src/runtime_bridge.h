@@ -74,6 +74,11 @@ public:
     // Collectibles' secret shop items: still locked (-1 without the export), and the next unlock ("key\ttitle", empty: none).
     int ShopSecrets(int count);
     std::string ShopUnlockNext();
+    // Collectibles v2: the secret list ("" without it), unlock by key and
+    // relock all; -1 when the runtime lacks the export.
+    std::string ShopSecretList();
+    int ShopUnlock(const std::string& key);
+    int ShopRelockAll();
     bool ShopOpen(int tier);
     // Today's stock of the store at x, y (its display's boards); an older
     // runtime without it opens the whole catalog (tiers 0 and 1 only).
@@ -150,6 +155,9 @@ private:
     SvShopCharacterFn shopCharacter_ = nullptr;
     SvShopSecretsFn shopSecrets_ = nullptr;
     SvShopUnlockNextFn shopUnlockNext_ = nullptr;
+    SvShopSecretListFn shopSecretList_ = nullptr;
+    SvShopUnlockFn shopUnlock_ = nullptr;
+    SvShopRelockAllFn shopRelockAll_ = nullptr;
     SvShopOpenFn shopOpen_ = nullptr;
     SvShopOpenAtFn shopOpenAt_ = nullptr;
     SvShopCloseFn shopClose_ = nullptr;

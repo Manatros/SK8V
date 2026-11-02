@@ -63,6 +63,19 @@ struct FileOp {
 // copy: the other is deleted first.
 std::vector<FileOp> SongPlan(const std::vector<SongFile>& files, const Progress& p, bool enabled);
 
+// A collectible's fixed item (design 2026-11-02-collectibles-v2): parts in
+// id order get the shop's secrets in unlock order (`secretList`: lines
+// "key\ttitle\tmodels", models comma-separated), songs in id order get the
+// tracks after the starters. A part beyond the list gets no key.
+struct Assigned {
+    std::string key, title;
+    std::vector<std::string> models;
+    int track = 0;
+};
+std::map<std::string, Assigned> Assign(const std::vector<Item>& items, const std::string& secretList);
+// The shop keys earned so far: rewards "part:<key>".
+std::vector<std::string> EarnedKeys(const Progress& p);
+
 // Skate's centre popups (design 2026-11-02-collectible-popups); the movie
 // upper-cases and keeps one line. A part's kind is known only once earned.
 std::string PopupFound(Kind kind);

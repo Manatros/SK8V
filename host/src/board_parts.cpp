@@ -59,6 +59,7 @@ struct Set {
 Set g_ride, g_preview;
 Set g_display[8];
 Set g_crew[4];
+Set g_pickup[4];  // collectibles showing their item
 Set g_hand;
 bool g_glowWheels = false; // SetGlowWheels: wheel parts use their `_glow` copies
 std::string g_glowColour;  // SetGlowWheels: a fixed colour's `_glow_<colour>` copies, or "" (own texture)
@@ -68,6 +69,7 @@ template<class F> void ForEachSet(F f) {
     f(g_ride); f(g_hand); f(g_preview);
     for (Set& set : g_display) f(set);
     for (Set& set : g_crew) f(set);
+    for (Set& set : g_pickup) f(set);
 }
 
 void Log(const char* s) {
@@ -600,6 +602,26 @@ bool Crew(int slot, const std::vector<std::string>& models, const SvBoardPose& p
     return !models.empty() && Show(set, pose);
 }
 
+bool Pickup(int slot, const std::vector<std::string>& models, const SvBoardPose& pose) {
+    ReconcileOnExit reconcile;
+    if (!g_started || slot < 0 || slot >= 4) return false;
+    Set& set = g_pickup[slot];
+    if (models != set.models) {
+        RemoveAll(set);
+        set.models = models;
+        set.announced = true;
+    }
+    return !models.empty() && Show(set, pose);
+}
+
+void ClearPickups() {
+    ReconcileOnExit reconcile;
+    for (Set& set : g_pickup) {
+        RemoveAll(set);
+        set.models.clear();
+    }
+}
+
 std::vector<int> Entities() {
     std::vector<int> out;
     for (const Set* set : {&g_ride, &g_preview})
@@ -607,7 +629,7 @@ std::vector<int> Entities() {
             if (s.object) out.push_back(s.object);
     for (const Shown& s : g_hand.shown)
         if (s.object) out.push_back(s.object);
-    for (const Set* group : {g_display, g_crew})
+    for (const Set* group : {g_display, g_crew, g_pickup})
         for (std::size_t i = 0; i < (group == g_display ? 8u : 4u); ++i)
             for (const Shown& s : group[i].shown)
                 if (s.object) out.push_back(s.object);

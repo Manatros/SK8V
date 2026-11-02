@@ -9,7 +9,30 @@ static bool Has(const std::vector<FileOp>& ops, FileOp::Type type, const std::st
     return std::any_of(ops.begin(), ops.end(), [&](const FileOp& o) { return o.type == type && o.from == from && o.to == to; });
 }
 
+static void AssignTests() {
+    using namespace collectibles;
+    // Ids out of order on purpose: assignment goes by id.
+    std::vector<Item> items(5);
+    items[0].id = "C03", items[0].kind = Kind::Part;
+    items[1].id = "C01", items[1].kind = Kind::Part;
+    items[2].id = "C02", items[2].kind = Kind::Song;
+    items[3].id = "C05", items[3].kind = Kind::Part;
+    items[4].id = "C04", items[4].kind = Kind::Song;
+    const auto a = Assign(items, "deck:a:1\tDeck A\tskatev_d_a\ngrip:g\tGrip G\tskatev_d_default,skatev_g_g\n");
+    assert(a.at("C01").key == "deck:a:1" && a.at("C01").title == "Deck A" && a.at("C01").models.size() == 1);
+    assert(a.at("C03").key == "grip:g" && a.at("C03").models.size() == 2 && a.at("C03").models[1] == "skatev_g_g");
+    assert(a.at("C05").key.empty());  // more parts than secrets: none for the last
+    assert(a.at("C02").track == kStarterSongs + 1 && a.at("C04").track == kStarterSongs + 2);
+    assert(Assign(items, "").at("C01").key.empty());  // an old runtime: no list
+    Progress p;
+    p.reward["C01"] = "part:deck:a:1";
+    p.reward["C02"] = "song:6";
+    const auto keys = EarnedKeys(p);
+    assert(keys.size() == 1 && keys[0] == "deck:a:1");
+}
+
 int main() {
+    AssignTests();
     // Places: comments, the header and malformed lines are skipped.
     const auto places = ParsePlaces(
         "# seed 1\r\nid\tkind\tx\ty\tz\tplace\r\n"

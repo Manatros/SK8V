@@ -115,6 +115,32 @@ impl Secrets {
         self.order.iter().filter(|k| !self.unlocked.contains(*k)).count()
     }
 
+    /// Every secret, in unlock order (design 2026-11-02-collectibles-v2:
+    /// the k-th part collectible holds the k-th).
+    pub fn order(&self) -> &[String] {
+        &self.order
+    }
+
+    pub fn is_unlocked(&self, key: &str) -> bool {
+        self.unlocked.contains(key)
+    }
+
+    /// Unlocks `key`: 1 unlocked now, 2 it already was, 0 no secret.
+    pub fn unlock(&mut self, key: &str) -> u32 {
+        if !self.secret.contains(key) {
+            0
+        } else if self.unlocked.insert(key.to_owned()) {
+            1
+        } else {
+            2
+        }
+    }
+
+    /// Locks every secret again (the Developer reset); the choice stays.
+    pub fn relock_all(&mut self) {
+        self.unlocked.clear();
+    }
+
     /// Unlocks the next locked secret; its key, none when all are unlocked.
     pub fn unlock_next(&mut self) -> Option<String> {
         let next = self.order.iter().find(|k| !self.unlocked.contains(*k))?.clone();

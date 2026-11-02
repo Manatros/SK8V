@@ -50,6 +50,12 @@ bool Hand(const std::vector<std::string>& models, const SvBoardPose& pose);
 // empty `models` removes it.
 bool Crew(int slot, const std::vector<std::string>& models, const SvBoardPose& pose);
 
+// A collectible's item (design 2026-11-02-collectibles-v2), slot 0..3, as
+// `models` in `pose`; empty `models` removes it. ClearPickups removes all.
+// The collectibles own their lifetime (Stop() runs at every leave).
+bool Pickup(int slot, const std::vector<std::string>& models, const SvBoardPose& pose);
+void ClearPickups();
+
 // Every part object shown (riding and preview): presentation only, never collision.
 std::vector<int> Entities();
 

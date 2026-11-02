@@ -35,7 +35,11 @@ std::string SelectedLabel();
 void Step(int direction);
 bool SelectedPlace(float (&xyz)[3]);
 
-// Removes blips (script shutdown, Collectibles off).
+// Removes blips and the items shown (script shutdown, Collectibles off).
 void Clear();
+
+// Developer: every collectible hidden again and the shop's parts locked again
+// (design 2026-11-02-collectibles-v2); returns the notice.
+std::string Reset();
 
 }  // namespace collectibles

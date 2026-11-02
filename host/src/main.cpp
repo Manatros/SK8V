@@ -4268,6 +4268,20 @@ std::vector<menu::Page> MenuPages(Session& s) {
             Call<void>(gta::SET_ENTITY_COORDS_NO_OFFSET, who, p[0] + 4.0f, p[1], p[2] + 0.5f, 0, 0, 0);
             Notify(s, collectibles::SelectedLabel(), 6000);
         }),
+        Helped(Action("Reset collectibles and unlocks (press twice)", [&s] {
+                   // Two presses within 5 s (design 2026-11-02-collectibles-v2).
+                   static ULONGLONG s_armed = 0;
+                   const ULONGLONG now = GetTickCount64();
+                   if (!s_armed || now - s_armed > 5000) {
+                       s_armed = now;
+                       Notify(s, "Press again within 5 s to hide every collectible again and lock their shop parts", 5000);
+                       return;
+                   }
+                   s_armed = 0;
+                   Notify(s, collectibles::Reset(), 9000);
+               }),
+               "Every collectible hidden again, their decks and griptapes locked in the shop and the songs back to the five "
+               "starters, to hunt them again. Bought parts stay in your garage; the old progress is kept as a .bak file."),
         Flag("Board shop", "BoardShop", D.boardShop, {}, true),
         Flag("Wheel paint determines hardness", "WheelsFromPaint", D.wheelsFromPaint, Bound("WheelsFromPaint")),
         Flag("Survey vehicle shapes", "VehicleShapes", D.vehicleShapes, Bound("VehicleShapes")),

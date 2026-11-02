@@ -137,6 +137,48 @@ int TrackOf(const std::string& name) {
     return std::atoi(digits.c_str());
 }
 
+std::map<std::string, Assigned> Assign(const std::vector<Item>& items, const std::string& secretList) {
+    std::vector<Assigned> secrets;
+    std::istringstream lines(secretList);
+    for (std::string line; std::getline(lines, line);) {
+        if (!line.empty() && line.back() == '\r') line.pop_back();
+        const size_t t1 = line.find('\t');
+        if (line.empty() || t1 == std::string::npos || t1 == 0) continue;
+        const size_t t2 = line.find('\t', t1 + 1);
+        Assigned a;
+        a.key = line.substr(0, t1);
+        a.title = line.substr(t1 + 1, t2 == std::string::npos ? std::string::npos : t2 - t1 - 1);
+        if (t2 != std::string::npos) {
+            std::istringstream models(line.substr(t2 + 1));
+            for (std::string m; std::getline(models, m, ',');)
+                if (!m.empty()) a.models.push_back(m);
+        }
+        secrets.push_back(std::move(a));
+    }
+    std::vector<const Item*> sorted;
+    for (const Item& it : items) sorted.push_back(&it);
+    std::sort(sorted.begin(), sorted.end(), [](const Item* a, const Item* b) { return a->id < b->id; });
+    std::map<std::string, Assigned> out;
+    size_t part = 0;
+    int song = 0;
+    for (const Item* it : sorted) {
+        if (it->kind == Kind::Part) {
+            out[it->id] = part < secrets.size() ? secrets[part] : Assigned{};
+            ++part;
+        } else {
+            out[it->id].track = kStarterSongs + 1 + song++;
+        }
+    }
+    return out;
+}
+
+std::vector<std::string> EarnedKeys(const Progress& p) {
+    std::vector<std::string> out;
+    for (const auto& [id, r] : p.reward)
+        if (r.rfind("part:", 0) == 0) out.push_back(r.substr(5));
+    return out;
+}
+
 std::vector<int> EarnedSongs(const Progress& p) {
     std::vector<int> out;
     for (const auto& [id, r] : p.reward)

@@ -37,6 +37,16 @@ void ClearCrewBoard(unsigned slot);
 // unlock ("key\ttitle", empty when none is left), and cash for the player.
 int SetSecrets(int count);  // still locked; -1 without the shop
 std::string UnlockNext();
+// Collectibles v2 (design 2026-11-02-collectibles-v2): the secret list
+// ("key\ttitle\tmodels" lines), unlock by key (1 now, 2 already, 0 no
+// secret, -1 no runtime support), relock all (-1 without support), close an
+// open menu, and the rest pose of a board standing on its tail at `xyz`
+// turned `yawDegrees` (a collectible showing its deck).
+std::string SecretList();
+int Unlock(const std::string& key);
+int RelockAll();
+void CloseMenu();
+bool PickupPose(const float (&xyz)[3], float yawDegrees, SvBoardPose& pose);
 void Pay(int dollars);
 
 // The store's menu is open (other menus and Skate's input stay out).

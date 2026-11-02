@@ -664,4 +664,29 @@ void ClearCrewBoard(unsigned slot) {
     if (slot < 4) boardparts::Crew(static_cast<int>(slot), {}, SvBoardPose{});
 }
 
+std::string SecretList() {
+    return g_ready && g_rt ? g_rt->ShopSecretList() : std::string();
+}
+
+int Unlock(const std::string& key) {
+    return g_ready && g_rt ? g_rt->ShopUnlock(key) : -1;
+}
+
+int RelockAll() {
+    return g_ready && g_rt ? g_rt->ShopRelockAll() : -1;
+}
+
+void CloseMenu() {
+    if (g_open && g_rt) Close();
+}
+
+bool PickupPose(const float (&xyz)[3], float yawDegrees, SvBoardPose& pose) {
+    if (!g_ready || !g_rt) return false;
+    // Board rows X, Y (its length), Z in world: the length straight up, the
+    // board turned about it.
+    const float a = yawDegrees * 0.017453292f, c = std::cos(a), s = std::sin(a);
+    const float at[16] = {c, s, 0.0f, 0.0f,  0.0f, 0.0f, 1.0f, 0.0f,  s, -c, 0.0f, 0.0f,  xyz[0], xyz[1], xyz[2], 1.0f};
+    return g_rt->ShopRestPose(at, pose);
+}
+
 } // namespace boardshop

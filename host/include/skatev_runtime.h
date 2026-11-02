@@ -745,6 +745,12 @@ using SvShopRideFn = std::uint32_t(__cdecl*)(void*, const char* state, float spe
 // returns the bytes it needs, 0 when none is left (design 2026-11-01-collectibles).
 using SvShopSecretsFn = std::uint32_t(__cdecl*)(void*, std::uint32_t count);
 using SvShopUnlockNextFn = std::uint32_t(__cdecl*)(void*, char* buf, std::uint32_t cap);
+// Design 2026-11-02-collectibles-v2: sv_shop_secret_list(rt, buf, cap) writes "key\ttitle\tmodels" lines in
+// unlock order (bytes needed, 0 without a shop); sv_shop_unlock(rt, key): 1 unlocked now, 2 it already was,
+// 0 no secret; sv_shop_relock_all(rt): locks every secret again, returns how many are locked.
+using SvShopSecretListFn = std::uint32_t(__cdecl*)(void*, char* buf, std::uint32_t cap);
+using SvShopUnlockFn = std::uint32_t(__cdecl*)(void*, const char* key);
+using SvShopRelockAllFn = std::uint32_t(__cdecl*)(void*);
 using SvProbeFn = std::uint32_t(__cdecl*)(void* ctx, const float* from, const float* to, float* hit);
 // sv_shop_display(rt, tier, interior[3], eye[3], clerk[6] or null, day, probe, ctx, out[max*16], max,
 // models, cap): the boards on show (entity matrices, comma lists of models a line each); returns how many.

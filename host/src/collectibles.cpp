@@ -8,10 +8,13 @@
 #include <deque>
 #include <filesystem>
 #include <fstream>
+#include <algorithm>
 #include <map>
+#include <set>
 #include <sstream>
 #include <vector>
 
+#include "board_parts.h"
 #include "board_shop.h"
 #include "collectibles_logic.h"
 #include "hud_overlay.h"
@@ -36,6 +39,15 @@ constexpr const char* kBurstAsset = "scr_rcbarry2";
 constexpr const char* kBurstEffect = "scr_clown_appears";
 constexpr float kBurstScale = 0.4f;
 constexpr size_t kPopupChars = 40;  // skate_hud::central::MAX_CHARS
+// Design 2026-11-02-collectibles-v2: up close a collectible shows its item
+// (the deck, or a music prop for a song) instead of the question mark.
+constexpr float kItemRange = 40.0f;
+constexpr int kItemSlots = 4;
+constexpr DWORD kSongRetryEvery = 30000;  // ms between retries of song renames in use
+// The music prop: the first of these in the game (a tape, a record, a CD, a boombox).
+constexpr const char* kMusicModels[] = {"prop_cs_cassette", "prop_cassette_01", "prop_vinyl_record_01", "ba_prop_battle_vinyl_01",
+                                        "prop_cd_case_01", "prop_cs_cd_case", "prop_boombox_01", "prop_ghettoblast_01",
+                                        "prop_portable_hifi_01"};
 
 util::LogFn g_log = nullptr;
 std::wstring g_placesPath, g_progressPath, g_songsDir;
@@ -52,6 +64,15 @@ DWORD g_nextSight = 0;
 int g_sel = -1;
 bool g_songFailLogged = false;
 bool g_faulty = false;  // collectibles.txt exists but could not be read: change nothing
+std::map<std::string, Assigned> g_assigned;  // each collectible's fixed item
+bool g_partsAssigned = false;                // the runtime listed its secrets
+std::set<std::string> g_unlockedKeys;        // shop keys earned so far
+bool g_songsPending = false;                 // a song rename failed: retried
+DWORD g_nextSongRetry = 0;
+std::uint32_t g_musicModel = 0;  // 0: not chosen yet
+bool g_musicChecked = false;
+int g_musicObj[kItemSlots] = {};
+bool g_itemFailLogged = false;
 
 void Log(const std::string& text) {
     if (g_log) g_log(("collectibles: " + text).c_str());
@@ -115,6 +136,8 @@ void Reconcile(bool enabled) {
                             : MoveFileExW(from.c_str(), (std::filesystem::path(g_songsDir) / std::filesystem::u8path(op.to)).c_str(), 0) != 0;
         ok ? ++done : ++failed;
     }
+    g_songsPending = failed > 0;
+    g_nextSongRetry = GetTickCount() + kSongRetryEvery;
     if (done) Log(std::to_string(done) + " song file(s) " + (enabled ? "matched to the songs found" : "given back (Collectibles off)"));
     if (failed && !g_songFailLogged) {
         Log(std::to_string(failed) + " song file(s) in use or not writable; tried again later");
@@ -145,12 +168,15 @@ void Unblip(const std::string& id) {
     g_blips.erase(it);
 }
 
-void Draw(const Item& it, float distance, bool found) {
+void Draw(const Item& it, float distance, bool found, bool mark) {
     const float s = MarkerScale(distance);
     const int r = it.kind == Kind::Part ? 255 : 170, g = it.kind == Kind::Part ? 200 : 70, b = it.kind == Kind::Part ? 0 : 255;
-    // Type 32: the question mark, bobbing and turning.
-    Call<void>(DRAW_MARKER, 32, it.x, it.y, it.z, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, s, s, s, r, g, b, 220, TRUE, FALSE, 2, TRUE,
-               static_cast<const char*>(nullptr), static_cast<const char*>(nullptr), FALSE);
+    // Type 32: the question mark, bobbing and turning (not where the item itself shows).
+    if (mark)
+        Call<void>(DRAW_MARKER, 32, it.x, it.y, it.z, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, s, s, s, r, g, b, 220, TRUE, FALSE, 2, TRUE,
+                   static_cast<const char*>(nullptr), static_cast<const char*>(nullptr), FALSE);
+    else  // the item's soft glow in the marker's colour
+        Call<void>(DRAW_LIGHT_WITH_RANGE, it.x, it.y, it.z, r, g, b, 2.5f, 4.0f);
     // Found ones: a thin beam, to see from far away where to go.
     if (found)
         Call<void>(DRAW_MARKER, 1, it.x, it.y, it.z - 1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.3f, 0.3f, 30.0f, r, g, b, 90, FALSE,
@@ -197,18 +223,31 @@ void Earn(const Item& it) {
     Unblip(it.id);
     g_progress.state[it.id] = State::Collected;
     std::string reward, text;
+    const auto mine = g_assigned.find(it.id);
     if (it.kind == Kind::Part) {
-        const std::string unlocked = boardshop::UnlockNext();
-        if (!unlocked.empty()) {
-            const size_t tab = unlocked.find('\t');
-            reward = "part:" + unlocked.substr(0, tab);
-            text = "Unlocked in the skate shop: " + (tab == std::string::npos ? unlocked : unlocked.substr(tab + 1));
+        // Its own deck or griptape (design 2026-11-02-collectibles-v2); one
+        // already unlocked pays the cash below, never another's item.
+        int result = -1;
+        if (g_partsAssigned && mine != g_assigned.end() && !mine->second.key.empty()) result = boardshop::Unlock(mine->second.key);
+        if (result == 1) {
+            reward = "part:" + mine->second.key;
+            text = "Unlocked in the skate shop: " + mine->second.title;
+            g_unlockedKeys.insert(mine->second.key);
+        } else if (result < 0 && !g_partsAssigned) {  // an older runtime: the next secret
+            const std::string unlocked = boardshop::UnlockNext();
+            if (!unlocked.empty()) {
+                const size_t tab = unlocked.find('\t');
+                reward = "part:" + unlocked.substr(0, tab);
+                text = "Unlocked in the skate shop: " + (tab == std::string::npos ? unlocked : unlocked.substr(tab + 1));
+            }
         }
     } else {
         std::vector<int> tracks;
         for (const auto& f : SongFiles())
             if (const int t = TrackOf(f.name)) tracks.push_back(t);
-        if (const int t = NextSong(g_progress, tracks)) {
+        const auto earned = EarnedSongs(g_progress);
+        const int t = mine != g_assigned.end() ? mine->second.track : 0;
+        if (t && std::find(tracks.begin(), tracks.end(), t) != tracks.end() && std::find(earned.begin(), earned.end(), t) == earned.end()) {
             reward = "song:" + std::to_string(t);
             text = "New song on Self Radio: " + Track(t) + ". Settings > Audio > Perform Quick Scan to hear it.";
         }
@@ -235,6 +274,87 @@ void Earn(const Item& it) {
         Notice(Summary() + ": " + text);
     }
     Log(it.id + " (" + it.place + ") collected: " + reward);
+}
+
+// Whether `it` shows its item: its key or track is still to earn.
+bool ShowsItem(const Item& it) {
+    const auto a = g_assigned.find(it.id);
+    if (a == g_assigned.end()) return false;
+    if (it.kind == Kind::Part) return g_partsAssigned && !a->second.models.empty() && !g_unlockedKeys.count(a->second.key);
+    const auto earned = EarnedSongs(g_progress);
+    return g_musicModel && a->second.track && std::find(earned.begin(), earned.end(), a->second.track) == earned.end();
+}
+
+void DeleteMusic(int slot) {
+    int& obj = g_musicObj[slot];
+    if (obj && Call<BOOL>(DOES_ENTITY_EXIST, obj)) {
+        Call<void>(SET_ENTITY_AS_MISSION_ENTITY, obj, 1, 1);
+        Call<void>(DELETE_OBJECT, &obj);
+    }
+    obj = 0;
+}
+
+void ClearItems() {
+    boardparts::ClearPickups();
+    for (int i = 0; i < kItemSlots; ++i) DeleteMusic(i);
+}
+
+// The music prop, chosen once the game runs: the first of kMusicModels it has.
+void ChooseMusicModel() {
+    if (g_musicChecked) return;
+    g_musicChecked = true;
+    for (const char* name : kMusicModels) {
+        const std::uint32_t hash = util::Joaat(name);
+        if (Call<BOOL>(IS_MODEL_IN_CDIMAGE, hash)) {
+            g_musicModel = hash;
+            Log(std::string("songs show the music prop ") + name);
+            return;
+        }
+    }
+    Log("no music prop in the game: songs keep the question mark");
+}
+
+// Up close, the nearest collectibles show their item; returns their ids.
+std::set<std::string> ShowItems(const Vector3& me) {
+    std::vector<std::pair<float, const Item*>> closest;
+    for (const Item& it : g_items) {
+        if (StateOf(g_progress, it.id) == State::Collected || !ShowsItem(it)) continue;
+        const float dx = it.x - me.x, dy = it.y - me.y, dz = it.z - me.z;
+        const float d = std::sqrt(dx * dx + dy * dy + dz * dz);
+        if (d <= kItemRange) closest.push_back({d, &it});
+    }
+    std::sort(closest.begin(), closest.end(), [](const auto& a, const auto& b) { return a.first < b.first; });
+    if (closest.size() > static_cast<size_t>(kItemSlots)) closest.resize(kItemSlots);
+    std::set<std::string> shown;
+    const float t = GetTickCount() / 1000.0f;
+    const float yaw = std::fmod(t * 90.0f, 360.0f), bob = 0.12f * std::sin(t * 2.0f);
+    int part = 0, music = 0;
+    for (const auto& [d, it] : closest) {
+        const float at[3] = {it->x, it->y, it->z + bob};
+        if (it->kind == Kind::Part) {
+            SvBoardPose pose{};
+            if (boardshop::PickupPose(at, yaw, pose) && boardparts::Pickup(part, g_assigned[it->id].models, pose)) shown.insert(it->id);
+            else if (!g_itemFailLogged) g_itemFailLogged = true, Log(it->id + ": its deck model is not ready (the question mark shows)");
+            ++part;
+        } else {
+            int& obj = g_musicObj[music++];
+            if (!obj) {
+                Call<void>(REQUEST_MODEL, g_musicModel);
+                if (Call<BOOL>(HAS_MODEL_LOADED, g_musicModel)) {
+                    obj = Call<int>(CREATE_OBJECT_NO_OFFSET, g_musicModel, at[0], at[1], at[2], 0, 0, 0);
+                    if (obj) Call<void>(SET_ENTITY_COLLISION, obj, 0, 0), Call<void>(FREEZE_ENTITY_POSITION, obj, 1);
+                }
+            }
+            if (obj && Call<BOOL>(DOES_ENTITY_EXIST, obj)) {
+                Call<void>(SET_ENTITY_COORDS_NO_OFFSET, obj, at[0], at[1], at[2], 0, 0, 0);
+                Call<void>(SET_ENTITY_HEADING, obj, yaw);
+                shown.insert(it->id);
+            }
+        }
+    }
+    for (int i = part; i < kItemSlots; ++i) boardparts::Pickup(i, {}, SvBoardPose{});
+    for (int i = music; i < kItemSlots; ++i) DeleteMusic(i);
+    return shown;
 }
 
 void Find(const Item& it) {
@@ -273,9 +393,41 @@ void SyncShop() {
     for (const Item& it : g_items) parts += it.kind == Kind::Part;
     for (const auto& [id, r] : g_progress.reward) earned += r.rfind("part:", 0) == 0;
     int locked = boardshop::SetSecrets(parts);
-    // A new secrets file (deleted, or a new install) after earlier finds:
-    // unlock as many as were earned, in the same order as before.
-    while (locked > parts - earned && !boardshop::UnlockNext().empty()) --locked;
+    const std::string list = boardshop::SecretList();
+    g_partsAssigned = !list.empty();
+    g_unlockedKeys.clear();
+    for (const std::string& key : EarnedKeys(g_progress)) g_unlockedKeys.insert(key);
+    if (g_partsAssigned) {
+        // A new secrets file (deleted, or a new install) after earlier finds:
+        // the very keys earned are unlocked again.
+        for (const std::string& key : g_unlockedKeys) boardshop::Unlock(key);
+    } else {
+        // An older runtime: as many as were earned, in the same order as before.
+        while (locked > parts - earned && !boardshop::UnlockNext().empty()) --locked;
+    }
+    g_assigned = Assign(g_items, list);
+    Log(std::string("each collectible holds its item") + (g_partsAssigned ? "" : " (songs only: the runtime lists no secrets)"));
+}
+
+std::string Reset() {
+    if (g_faulty) return "Collectibles: the progress file cannot be read, nothing was reset";
+    if (g_items.empty()) return "Collectibles: no places file, nothing to reset";
+    boardshop::CloseMenu();  // its Found list would be stale
+    const int locked = boardshop::RelockAll();
+    if (locked < 0) return "Collectibles: the shop cannot lock its parts again (runtime or shop off), nothing was reset";
+    SYSTEMTIME t;
+    GetLocalTime(&t);
+    wchar_t stamp[32];
+    swprintf_s(stamp, L"%04u%02u%02u-%02u%02u%02u", t.wYear, t.wMonth, t.wDay, t.wHour, t.wMinute, t.wSecond);
+    const std::wstring backup = g_progressPath.substr(0, g_progressPath.size() - 4) + L"-" + stamp + L".bak";
+    if (GetFileAttributesW(g_progressPath.c_str()) != INVALID_FILE_ATTRIBUTES) CopyFileW(g_progressPath.c_str(), backup.c_str(), FALSE);
+    g_progress = Progress{};
+    g_unlockedKeys.clear();
+    Save();
+    Clear();
+    Reconcile(g_wasEnabled);
+    Log("reset (Developer): progress and " + std::to_string(locked) + " shop unlocks; the old progress kept as a .bak");
+    return "Collectibles reset: " + Summary() + ". Bought parts stay in your garage. Settings > Audio > Perform Quick Scan to update Self Radio.";
 }
 
 void Tick(bool enabled, bool skating, bool popups, const float (&skater)[3], int ped) {
@@ -291,7 +443,10 @@ void Tick(bool enabled, bool skating, bool popups, const float (&skater)[3], int
         Reconcile(enabled);
     }
     if (!enabled) return;
+    if (g_songsPending && GetTickCount() >= g_nextSongRetry) Reconcile(true);
+    ChooseMusicModel();
     const Vector3 me = Call<Vector3>(GET_ENTITY_COORDS, ped, 0);
+    const std::set<std::string> items = ShowItems(me);
     // A teleport (travel, respawn) is no ride through everything between.
     const float jx = skater[0] - g_prev[0], jy = skater[1] - g_prev[1], jz = skater[2] - g_prev[2];
     if (jx * jx + jy * jy + jz * jz > 20.0f * 20.0f) g_hadSkater = false;
@@ -306,7 +461,7 @@ void Tick(bool enabled, bool skating, bool popups, const float (&skater)[3], int
         const float d = std::sqrt(dx * dx + dy * dy + dz * dz);
         if (st == State::Found) Blip(it);  // after a load or Collectibles back on
         if (d > kDrawRange) continue;
-        Draw(it, d, st == State::Found);
+        Draw(it, d, st == State::Found, !items.count(it.id));
         if (skating && g_hadSkater) {
             const float c[3] = {it.x, it.y, it.z - kRootBelow};
             if (SegmentHits(g_prev, skater, c, kReach)) {
@@ -381,6 +536,7 @@ bool SelectedPlace(float (&xyz)[3]) {
 }
 
 void Clear() {
+    ClearItems();
     for (auto& [id, b] : g_blips) {
         int handle = b;
         if (Call<BOOL>(DOES_BLIP_EXIST, handle)) Call<void>(REMOVE_BLIP, &handle);
