@@ -2876,6 +2876,7 @@ void UpdateActive(Session& s, const Config& cfg, const SvPad& pad) {
         std::vector<int> presentation = boardparts::Entities();
         presentation.push_back(boardnative::Entity());
         if (const int ghost = objectdropper::Ghost()) presentation.push_back(ghost); // see-through, no collision
+        for (const int prop : collectibles::Entities()) presentation.push_back(prop);  // a song's music prop
         s.world.SetFixed(objectdropper::Objects());
         const GatherArea area = GatherAreaFor(s.last.skater_position, s.last.board_position, s.last.velocity, cfg.dynamicRadius);
         s.world.Gather(s.ped, area.centre, area.radius, presentation);

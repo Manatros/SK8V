@@ -606,6 +606,7 @@ bool Pickup(int slot, const std::vector<std::string>& models, const SvBoardPose&
     ReconcileOnExit reconcile;
     if (!g_started || slot < 0 || slot >= 4) return false;
     Set& set = g_pickup[slot];
+    if (models.empty() && set.models.empty() && set.shown.empty()) return false;  // an idle slot: nothing to do each frame
     if (models != set.models) {
         RemoveAll(set);
         set.models = models;

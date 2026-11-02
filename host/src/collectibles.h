@@ -5,6 +5,7 @@
 // them: each unlocks a deck or griptape in the skate shop or a Skate 3 song
 // on Self Radio. Logic and files: collectibles_logic.
 #include <string>
+#include <vector>
 #include "host_util.h"
 
 namespace collectibles {
@@ -41,5 +42,9 @@ void Clear();
 // Developer: every collectible hidden again and the shop's parts locked again
 // (design 2026-11-02-collectibles-v2); returns the notice.
 std::string Reset();
+
+// The music props shown (presentation only): the dynamic world must not
+// take them as bodies on the very line you ride to collect them.
+std::vector<int> Entities();
 
 }  // namespace collectibles

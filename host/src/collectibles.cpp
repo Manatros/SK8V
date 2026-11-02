@@ -72,7 +72,9 @@ DWORD g_nextSongRetry = 0;
 std::uint32_t g_musicModel = 0;  // 0: not chosen yet
 bool g_musicChecked = false;
 int g_musicObj[kItemSlots] = {};
-bool g_itemFailLogged = false;
+std::map<std::string, DWORD> g_itemWaiting;  // a deck not shown yet: since when (logged once after 15 s)
+std::set<std::string> g_itemFailLogged;
+std::set<int> g_tracksOnDisk;  // song files present (either form), from the last reconcile
 
 void Log(const std::string& text) {
     if (g_log) g_log(("collectibles: " + text).c_str());
@@ -127,7 +129,11 @@ std::vector<SongFile> SongFiles() {
 // Starters and earned songs playable, the others locked (all playable when off).
 void Reconcile(bool enabled) {
     if (g_faulty) return;
-    const auto ops = SongPlan(SongFiles(), g_progress, enabled);
+    const auto files = SongFiles();
+    g_tracksOnDisk.clear();
+    for (const auto& f : files)
+        if (const int t = TrackOf(f.name)) g_tracksOnDisk.insert(t);
+    const auto ops = SongPlan(files, g_progress, enabled);
     int done = 0, failed = 0;
     for (const FileOp& op : ops) {
         const std::filesystem::path from = std::filesystem::path(g_songsDir) / std::filesystem::u8path(op.from);
@@ -276,13 +282,14 @@ void Earn(const Item& it) {
     Log(it.id + " (" + it.place + ") collected: " + reward);
 }
 
-// Whether `it` shows its item: its key or track is still to earn.
-bool ShowsItem(const Item& it) {
+// Whether `it` shows its item: its key or track is still to earn (a song
+// only when its file exists, so it never shows what it cannot give).
+bool ShowsItem(const Item& it, const std::vector<int>& earnedSongs) {
     const auto a = g_assigned.find(it.id);
     if (a == g_assigned.end()) return false;
     if (it.kind == Kind::Part) return g_partsAssigned && !a->second.models.empty() && !g_unlockedKeys.count(a->second.key);
-    const auto earned = EarnedSongs(g_progress);
-    return g_musicModel && a->second.track && std::find(earned.begin(), earned.end(), a->second.track) == earned.end();
+    const int t = a->second.track;
+    return g_musicModel && t && g_tracksOnDisk.count(t) && std::find(earnedSongs.begin(), earnedSongs.end(), t) == earnedSongs.end();
 }
 
 void DeleteMusic(int slot) {
@@ -297,6 +304,8 @@ void DeleteMusic(int slot) {
 void ClearItems() {
     boardparts::ClearPickups();
     for (int i = 0; i < kItemSlots; ++i) DeleteMusic(i);
+    if (g_musicModel) Call<void>(SET_MODEL_AS_NO_LONGER_NEEDED, g_musicModel);
+    g_itemWaiting.clear();
 }
 
 // The music prop, chosen once the game runs: the first of kMusicModels it has.
@@ -317,8 +326,9 @@ void ChooseMusicModel() {
 // Up close, the nearest collectibles show their item; returns their ids.
 std::set<std::string> ShowItems(const Vector3& me) {
     std::vector<std::pair<float, const Item*>> closest;
+    const auto earnedSongs = EarnedSongs(g_progress);  // once a frame
     for (const Item& it : g_items) {
-        if (StateOf(g_progress, it.id) == State::Collected || !ShowsItem(it)) continue;
+        if (StateOf(g_progress, it.id) == State::Collected || !ShowsItem(it, earnedSongs)) continue;
         const float dx = it.x - me.x, dy = it.y - me.y, dz = it.z - me.z;
         const float d = std::sqrt(dx * dx + dy * dy + dz * dz);
         if (d <= kItemRange) closest.push_back({d, &it});
@@ -326,15 +336,23 @@ std::set<std::string> ShowItems(const Vector3& me) {
     std::sort(closest.begin(), closest.end(), [](const auto& a, const auto& b) { return a.first < b.first; });
     if (closest.size() > static_cast<size_t>(kItemSlots)) closest.resize(kItemSlots);
     std::set<std::string> shown;
-    const float t = GetTickCount() / 1000.0f;
+    const float t = (GetTickCount() % 3600000u) / 1000.0f;  // float seconds stay exact
     const float yaw = std::fmod(t * 90.0f, 360.0f), bob = 0.12f * std::sin(t * 2.0f);
     int part = 0, music = 0;
     for (const auto& [d, it] : closest) {
         const float at[3] = {it->x, it->y, it->z + bob};
         if (it->kind == Kind::Part) {
             SvBoardPose pose{};
-            if (boardshop::PickupPose(at, yaw, pose) && boardparts::Pickup(part, g_assigned[it->id].models, pose)) shown.insert(it->id);
-            else if (!g_itemFailLogged) g_itemFailLogged = true, Log(it->id + ": its deck model is not ready (the question mark shows)");
+            if (boardshop::PickupPose(at, yaw, pose) && boardparts::Pickup(part, g_assigned[it->id].models, pose)) {
+                shown.insert(it->id);
+                g_itemWaiting.erase(it->id);
+            } else {
+                // Loading takes a moment; only a long wait is worth a line.
+                const DWORD now = GetTickCount();
+                const DWORD since = g_itemWaiting.emplace(it->id, now).first->second;
+                if (now - since > 15000 && g_itemFailLogged.insert(it->id).second)
+                    Log(it->id + ": its deck model did not show in 15 s (the question mark shows)");
+            }
             ++part;
         } else {
             int& obj = g_musicObj[music++];
@@ -420,7 +438,12 @@ std::string Reset() {
     wchar_t stamp[32];
     swprintf_s(stamp, L"%04u%02u%02u-%02u%02u%02u", t.wYear, t.wMonth, t.wDay, t.wHour, t.wMinute, t.wSecond);
     const std::wstring backup = g_progressPath.substr(0, g_progressPath.size() - 4) + L"-" + stamp + L".bak";
-    if (GetFileAttributesW(g_progressPath.c_str()) != INVALID_FILE_ATTRIBUTES) CopyFileW(g_progressPath.c_str(), backup.c_str(), FALSE);
+    // No backup, no reset: the parts earned are unlocked again at once.
+    if (GetFileAttributesW(g_progressPath.c_str()) != INVALID_FILE_ATTRIBUTES && !CopyFileW(g_progressPath.c_str(), backup.c_str(), FALSE))
+    {
+        for (const std::string& key : g_unlockedKeys) boardshop::Unlock(key);  // the shop as it was
+        return "Collectibles: the progress could not be backed up, nothing was reset";
+    }
     g_progress = Progress{};
     g_unlockedKeys.clear();
     Save();
@@ -533,6 +556,13 @@ bool SelectedPlace(float (&xyz)[3]) {
     const Item& it = g_items[g_sel];
     xyz[0] = it.x, xyz[1] = it.y, xyz[2] = it.z;
     return true;
+}
+
+std::vector<int> Entities() {
+    std::vector<int> out;
+    for (const int obj : g_musicObj)
+        if (obj) out.push_back(obj);
+    return out;
 }
 
 void Clear() {
