@@ -304,6 +304,11 @@ fn in_cells_reusing(size: f32, cell: impl Fn(Cell) -> Rails, centre: [f32; 2], h
 /// A closed collision box under each rail's top line (six faces),
 /// GTA metres, outward winding.
 pub fn boxes(rails: &[Vec<Vec3>]) -> Vec<[Vec3; 3]> {
+    boxes_deep(rails, None)
+}
+
+/// As [`boxes`], `depth` m deep when given (a track rail down to its bed).
+pub fn boxes_deep(rails: &[Vec<Vec3>], depth: Option<f32>) -> Vec<[Vec3; 3]> {
     let mut out = Vec::new();
     for r in rails {
         for w in r.windows(2) {
@@ -314,7 +319,7 @@ pub fn boxes(rails: &[Vec<Vec3>]) -> Vec<[Vec3; 3]> {
             if side == Vec3::ZERO {
                 continue;
             }
-            let down = Vec3::Z * BOX_DEPTH.max(2.0 * half);
+            let down = Vec3::Z * depth.unwrap_or(BOX_DEPTH.max(2.0 * half));
             // Corners at a and b: top-left, top-right, bottom-right, bottom-left.
             let ring = |p: Vec3| [p + side, p - side, p - side - down, p + side - down];
             let (pa, pb) = (ring(a), ring(b));

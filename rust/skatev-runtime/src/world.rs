@@ -1496,6 +1496,15 @@ fn cut_where(rails: Vec<Vec<Vec3>>, cut: impl Fn(Vec3, Vec3) -> bool) -> Vec<Vec
 const EDGE_MIN: f32 = 0.03;
 /// Longest stretch without GTA rail collision boxed between found rail (m).
 const TRACK_GAP_MAX: f32 = 30.0;
+/// A track rail's box reaches this far under its grind line (m): GTA's rails
+/// stand 0.13-0.19 m over the bed, the line 1 cm over the rail.
+const TRACK_BOX_DEPTH: f32 = 0.20;
+/// A rail head is walled when a steep face lies within TRACK_WALL_REACH of
+/// the point TRACK_WALL_DOWN under its line (m) ...
+const TRACK_WALL_DOWN: f32 = 0.08;
+const TRACK_WALL_REACH: f32 = 0.08;
+/// ... and a bare plate when nothing is at its height this far beside it (m).
+const TRACK_BESIDE: f32 = 0.15;
 
 /// Where a track edge line has no GTA surface just under it, between
 /// stretches that have one (a missing piece of a visible rail), a box keeps
@@ -1503,13 +1512,43 @@ const TRACK_GAP_MAX: f32 = 30.0;
 /// Bare line ends and wholly bare lines get none: the node path may not
 /// follow a visible rail there.
 fn track_gap_boxes(tracks: &[Vec<Vec3>], gta: &[[Vec3; 3]], grid: &crate::grid::XyGrid) -> Vec<[Vec3; 3]> {
-    let supported = |p: Vec3| grid.at(p.x, p.y).iter().any(|&i| {
+    let floor = |x: f32, y: f32| grid.at(x, y).iter().filter_map(|&i| {
         let t = gta[i as usize];
         let tri = svwc::Tri { v: t.map(|q| q.to_array()), material: 0 };
-        svwc::clean::floor_at(&tri, [p.x, p.y]).is_some_and(|z| z <= p.z + 0.005 && z >= p.z - 0.06)
+        svwc::clean::floor_at(&tri, [x, y])
+    }).collect::<Vec<f32>>();
+    let supported = |p: Vec3| floor(p.x, p.y).into_iter().any(|z| z <= p.z + 0.005 && z >= p.z - 0.06);
+    // GTA's long straight metro pieces model the rail as a bare plate at
+    // rail height with no sides: the board lands on it but goes through
+    // (M17/M18, Manatros 2026-11-03: "the collision is still missing"). A
+    // plate is a head with no steep face under its edge and nothing at its
+    // height beside it (a level crossing's road is flush beside the rail).
+    let walled = |p: Vec3| grid.at(p.x, p.y).iter().any(|&i| {
+        let t = gta[i as usize];
+        let n = (t[1] - t[0]).cross(t[2] - t[0]).normalize_or_zero();
+        n.z.abs() < 0.5 && crate::world::closest_on_triangle(p - Vec3::Z * TRACK_WALL_DOWN, &t).distance(p - Vec3::Z * TRACK_WALL_DOWN) <= TRACK_WALL_REACH
+    });
+    let plate = |p: Vec3, side: bevy_math::Vec2| supported(p) && !walled(p) && [1.0f32, -1.0].iter().all(|s| {
+        let q = p.truncate() + side * (s * TRACK_BESIDE);
+        !floor(q.x, q.y).into_iter().any(|z| z >= p.z - 0.04 && z <= p.z + 0.05)
     });
     let mut gaps = Vec::new();
+    let mut plates = Vec::new();
     for line in tracks {
+        let sides: Vec<bevy_math::Vec2> = (0..line.len()).map(|i| {
+            let (a, b) = (line[i.saturating_sub(1)], line[(i + 1).min(line.len() - 1)]);
+            let d = (b - a).truncate().normalize_or_zero();
+            bevy_math::Vec2::new(-d.y, d.x)
+        }).collect();
+        let bare: Vec<bool> = (0..line.len()).map(|i| plate(line[i], sides[i])).collect();
+        let mut i = 0;
+        while i < line.len() {
+            if !bare[i] { i += 1; continue; }
+            let start = i;
+            while i < line.len() && bare[i] { i += 1; }
+            let run: Vec<Vec3> = line[start.saturating_sub(1)..(i + 1).min(line.len())].to_vec();
+            if run.len() >= 2 { plates.push(run); }
+        }
         let ok: Vec<bool> = line.iter().map(|&p| supported(p)).collect();
         let mut i = 0;
         while i < line.len() {
@@ -1522,7 +1561,12 @@ fn track_gap_boxes(tracks: &[Vec<Vec3>], gta: &[[Vec3; 3]], grid: &crate::grid::
             if length <= TRACK_GAP_MAX { gaps.push(run); }
         }
     }
-    crate::visrails::boxes(&gaps)
+    // Down to the bed: a 6 cm box hung 11 cm over it and a wheel went under
+    // (M18, 2026-11-02 measurement).
+    gaps.extend(plates);
+    // Fewer, longer boxes: the lines are sampled every 0.5 m (12 faces each).
+    crate::rails::straighten(&mut gaps, TRACK_STRAIGHT);
+    crate::visrails::boxes_deep(&gaps, Some(TRACK_BOX_DEPTH))
 }
 
 fn authoritative_tracks(rails: Vec<Vec<Vec3>>, tracks: Vec<Vec<Vec3>>) -> Vec<Vec<Vec3>> {
@@ -2858,6 +2902,11 @@ mod top_tests {
         for (a, b) in [(5.0, 10.0), (14.0, 20.0)] {
             gta.push([v(a, -0.05, 0.17), v(b, -0.05, 0.17), v(b, 0.05, 0.17)]);
             gta.push([v(a, -0.05, 0.17), v(b, 0.05, 0.17), v(a, 0.05, 0.17)]);
+            // Its sides (a real rail box).
+            for y in [-0.05, 0.05] {
+                gta.push([v(a, y, 0.0), v(b, y, 0.0), v(b, y, 0.17)]);
+                gta.push([v(a, y, 0.0), v(b, y, 0.17), v(a, y, 0.17)]);
+            }
         }
         let grid = crate::grid::XyGrid::triangles(1.0, &gta);
         let line = vec![(0..=20).map(|x| v(x as f32, 0.0, 0.18)).collect::<Vec<_>>()];
@@ -2865,6 +2914,25 @@ mod top_tests {
         assert!(!boxes.is_empty(), "the interior gap is boxed");
         assert!(boxes.iter().flatten().all(|p| p.x >= 9.99 && p.x <= 14.01), "only between 10 and 14: {:?}",
             boxes.iter().flatten().map(|p| p.x).fold((f32::MAX, f32::MIN), |(a, b), x| (a.min(x), b.max(x))));
+        // Down to the bed (M18: a 6 cm box hung over it).
+        assert!(boxes.iter().flatten().any(|p| p.z <= 0.0), "the box reaches the bed");
+    }
+
+    #[test]
+    fn a_bare_rail_plate_gets_a_body_and_a_level_crossing_does_not() {
+        // M17: GTA's rail is a plate at 0.17 with no sides.
+        let v = |x: f32, y: f32, z: f32| Vec3::new(x, y, z);
+        let plate = |lo: f32, hi: f32, z: f32| vec![[v(0., lo, z), v(20., lo, z), v(20., hi, z)], [v(0., lo, z), v(20., hi, z), v(0., hi, z)]];
+        let line = vec![(0..=20).map(|x| v(x as f32, 0.0, 0.18)).collect::<Vec<_>>()];
+        let gta = plate(-0.05, 0.05, 0.17);
+        let boxes = track_gap_boxes(&line, &gta, &crate::grid::XyGrid::triangles(1.0, &gta));
+        assert!(boxes.iter().flatten().any(|p| p.x < 1.0) && boxes.iter().flatten().any(|p| p.x > 19.0), "the whole plate gets a body");
+        assert!(boxes.iter().flatten().any(|p| p.z <= 0.0), "down to the bed");
+        // A road flush with the rail on both sides: no box (no new lip).
+        let mut gta = plate(-0.05, 0.05, 0.17);
+        gta.extend(plate(-1.0, -0.05, 0.17));
+        gta.extend(plate(0.05, 1.0, 0.17));
+        assert!(track_gap_boxes(&line, &gta, &crate::grid::XyGrid::triangles(1.0, &gta)).is_empty());
     }
 
     #[test]

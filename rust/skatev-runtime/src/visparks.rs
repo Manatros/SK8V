@@ -542,6 +542,10 @@ fn replace_park(tris: &mut Vec<Tri>, stairs: &[Tri], visible: &[[[f32; 3]; 3]], 
     // 1102-6's 5.8 deg). Only a bend makes a chord part of the curve beside it.
     let mut turn: HashMap<usize, f32> = HashMap::default();
     for (u, chord) in &candidates {
+        // Only faces of the chord's own surface, and no stray sliver (peer
+        // review 2026-11-03: one small trim facet must not make a wall bend).
+        let p = u.v.map(v3);
+        if u.partner != *chord || (p[1] - p[0]).cross(p[2] - p[0]).length() / 2.0 < 0.01 { continue; }
         let dot = normal(&u.v).dot(normal(&tris[*chord].v));
         let e = turn.entry(*chord).or_insert(1.0);
         *e = e.min(dot);
