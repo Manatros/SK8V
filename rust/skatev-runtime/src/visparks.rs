@@ -640,24 +640,35 @@ fn replace_park(tris: &mut Vec<Tri>, stairs: &[Tri], visible: &[[[f32; 3]; 3]], 
     // pulled up with it (Manatros 2026-11-03: "a vertex placed too high at the
     // walls, so the floor curves up there"): such a corner is pinned.
     let done: std::collections::HashSet<usize> = changed.iter().map(|c| c.0).collect();
-    let mut neighbours = Vec::new();
-    for i in 0..tris.len() {
-        if done.contains(&i) { continue; }
-        let t = tris[i].v;
-        if !t.iter().any(|&p| moved.contains_key(&quant(p))) { continue; }
-        let m = t.map(|p| moved.get(&quant(p)).copied().unwrap_or(p));
-        if normal(&m).dot(normal(&t)) < SNAP_FOLD {
-            pinned.extend(t.iter().map(|&q| quant(q)));
-        } else {
-            neighbours.push(i);
+    let neighbours: Vec<usize> = (0..tris.len())
+        .filter(|&i| !done.contains(&i) && tris[i].v.iter().any(|&p| moved.contains_key(&quant(p))))
+        .collect();
+    // Pins until none is added (re-review 2026-11-03): a pin can make a piece
+    // or neighbour that was fine fold; it then pins all its corners too. Pins
+    // only grow, so this ends; afterwards every face folds nowhere.
+    loop {
+        let before = pinned.len();
+        let place = |q: [f32; 3]| if pinned.contains(&quant(q)) { q } else { snap(q, &used, &vis_grid) };
+        let mut add: Vec<[i32; 3]> = Vec::new();
+        for (i, pieces) in &changed {
+            let n = normal(&tris[*i].v);
+            for p in pieces {
+                if normal(&p.map(place)).dot(n) < SNAP_FOLD { add.extend(p.iter().map(|&q| quant(q))); }
+            }
         }
+        for &i in &neighbours {
+            let t = tris[i].v;
+            let m = t.map(|p| if pinned.contains(&quant(p)) { p } else { moved.get(&quant(p)).copied().unwrap_or(p) });
+            if normal(&m).dot(normal(&t)) < SNAP_FOLD { add.extend(t.iter().map(|&q| quant(q))); }
+        }
+        pinned.extend(add);
+        if pinned.len() == before { break; }
     }
     let place = |q: [f32; 3]| if pinned.contains(&quant(q)) { q } else { snap(q, &used, &vis_grid) };
     // Snapping can squeeze a piece into a sliver: those go too (they broke the
     // lip test of a park curb, 2026-10-26).
     let changed: Vec<(usize, Vec<[[f32; 3]; 3]>)> = changed.into_iter().map(|(i, pieces)| {
-        let n = normal(&tris[i].v);
-        let kept = pieces.iter().map(|p| { let s = p.map(place); if normal(&s).dot(n) >= SNAP_FOLD { s } else { *p } })
+        let kept = pieces.iter().map(|p| p.map(place))
             .filter(|t| {
                 let p = t.map(v3);
                 let area = (p[1] - p[0]).cross(p[2] - p[0]).length() / 2.0;
@@ -669,7 +680,7 @@ fn replace_park(tris: &mut Vec<Tri>, stairs: &[Tri], visible: &[[[f32; 3]; 3]], 
     }).chain(neighbours.into_iter().filter_map(|i| {
         let t = tris[i].v;
         let m = t.map(|p| if pinned.contains(&quant(p)) { p } else { moved.get(&quant(p)).copied().unwrap_or(p) });
-        (m != t && normal(&m).dot(normal(&t)) >= SNAP_FOLD).then(|| (i, vec![m]))
+        (m != t).then(|| (i, vec![m]))
     })).collect();
     for u in &used {
         out.added.push(Tri { v: u.v, material: tris[u.partner].material });
