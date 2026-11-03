@@ -577,6 +577,7 @@ fn replace_park(tris: &mut Vec<Tri>, stairs: &[Tri], visible: &[[[f32; 3]; 3]], 
     // edges move onto them.
     let mut changed: Vec<(usize, Vec<[[f32; 3]; 3]>)> = Vec::new();
     let mut moved: HashMap<[i32; 3], [f32; 3]> = HashMap::default();
+    let mut pinned: std::collections::HashSet<[i32; 3]> = std::collections::HashSet::new();
     let mut cover: Vec<u32> = Vec::new();
     let partners: std::collections::HashSet<usize> = used.iter().map(|u| u.partner).collect();
     for i in 0..tris.len() {
@@ -592,9 +593,11 @@ fn replace_park(tris: &mut Vec<Tri>, stairs: &[Tri], visible: &[[[f32; 3]; 3]], 
         }
         cover.sort_unstable();
         cover.dedup();
+        let replaced_chord = partners.contains(&i);
         cover.retain(|&k| {
             let u = &used[k as usize];
-            let (vlo, vhi) = bounds(&u.v, u.limit);
+            // A replaced chord's covers reach POCKET_REACH (peer review 2026-11-03).
+            let (vlo, vhi) = bounds(&u.v, if replaced_chord { u.limit.max(POCKET_REACH) } else { u.limit });
             vlo.cmple(thi).all() && vhi.cmpge(tlo).all() && normal(&u.v).dot(n) > FACING
         });
         if cover.is_empty() { continue; }
@@ -602,26 +605,59 @@ fn replace_park(tris: &mut Vec<Tri>, stairs: &[Tri], visible: &[[[f32; 3]; 3]], 
         // farther from the curve than a cover's limit, pockets of it stayed
         // standing in the bowl (connector marks 1103-1..8, M21; design
         // 2026-11-03-replaced-chord-pockets).
-        let pieces = if partners.contains(&i) {
+        let pieces = if replaced_chord {
+            // Covers turned 40-60 deg keep their reach measured along their
+            // own normal (cut_along measures along the chord's).
             let wide: Vec<Used> = cover.iter().map(|&k| &used[k as usize])
-                .map(|u| Used { v: u.v, partner: u.partner, limit: if normal(&u.v).dot(n) >= CURVE_FACING { u.limit.max(POCKET_REACH) } else { u.limit } })
+                .map(|u| {
+                    let along = normal(&u.v).dot(n);
+                    Used { v: u.v, partner: u.partner, limit: if along >= CURVE_FACING { u.limit.max(POCKET_REACH) } else { u.limit / along.max(FACING) } }
+                })
                 .collect();
             cut_along(&t, wide.iter(), true)
         } else {
             cut(&t, cover.iter().map(|&k| &used[k as usize]))
         };
         if pieces.len() == 1 && pieces[0] == t { continue; }
-        // Snapping can squeeze a piece into a sliver: those go too (they
-        // broke the lip test of a park curb, 2026-10-26).
-        let snapped: Vec<[[f32; 3]; 3]> = pieces.iter().map(|p| {
-                // A piece is flat in its face before snapping; snapping that
-                // turns it away from the face folds it onto the visible
-                // footprints' edges (shards standing in the bowl: connector
-                // marks 1103-1..8, M21; Manatros 2026-11-03). Such a piece
-                // keeps its own corners.
-                let s = p.map(|q| snap(q, &used, &vis_grid));
-                if normal(&s).dot(n) >= SNAP_FOLD { s } else { *p }
-            })
+        // A piece is flat in its face before snapping; snapping that turns it
+        // away from the face folds it onto the visible footprints' edges
+        // (shards standing in the bowl: connector marks 1103-1..8, M21;
+        // Manatros 2026-11-03). Its corners stay where they are, for every
+        // face sharing them (pinned; peer review 2026-11-03: no cracks).
+        for p in &pieces {
+            let s = p.map(|q| snap(q, &used, &vis_grid));
+            if normal(&s).dot(n) < SNAP_FOLD { pinned.extend(p.iter().map(|&q| quant(q))); }
+        }
+        for &corner in &t {
+            let s = snap(corner, &used, &vis_grid);
+            if s != corner { moved.insert(quant(corner), s); }
+        }
+        changed.push((i, pieces));
+    }
+    if changed.is_empty() { return; }
+    // Neighbours sharing a moved corner move it too (no crack at the seam).
+    // A floor sharing a corner with a wall that snapping moved up must not be
+    // pulled up with it (Manatros 2026-11-03: "a vertex placed too high at the
+    // walls, so the floor curves up there"): such a corner is pinned.
+    let done: std::collections::HashSet<usize> = changed.iter().map(|c| c.0).collect();
+    let mut neighbours = Vec::new();
+    for i in 0..tris.len() {
+        if done.contains(&i) { continue; }
+        let t = tris[i].v;
+        if !t.iter().any(|&p| moved.contains_key(&quant(p))) { continue; }
+        let m = t.map(|p| moved.get(&quant(p)).copied().unwrap_or(p));
+        if normal(&m).dot(normal(&t)) < SNAP_FOLD {
+            pinned.extend(t.iter().map(|&q| quant(q)));
+        } else {
+            neighbours.push(i);
+        }
+    }
+    let place = |q: [f32; 3]| if pinned.contains(&quant(q)) { q } else { snap(q, &used, &vis_grid) };
+    // Snapping can squeeze a piece into a sliver: those go too (they broke the
+    // lip test of a park curb, 2026-10-26).
+    let changed: Vec<(usize, Vec<[[f32; 3]; 3]>)> = changed.into_iter().map(|(i, pieces)| {
+        let n = normal(&tris[i].v);
+        let kept = pieces.iter().map(|p| { let s = p.map(place); if normal(&s).dot(n) >= SNAP_FOLD { s } else { *p } })
             .filter(|t| {
                 let p = t.map(v3);
                 let area = (p[1] - p[0]).cross(p[2] - p[0]).length() / 2.0;
@@ -629,27 +665,12 @@ fn replace_park(tris: &mut Vec<Tri>, stairs: &[Tri], visible: &[[[f32; 3]; 3]], 
                 area >= PIECE_AREA && area / longest >= PIECE_WIDTH
             })
             .collect();
-        for &corner in &t {
-            let s = snap(corner, &used, &vis_grid);
-            if s != corner { moved.insert(quant(corner), s); }
-        }
-        changed.push((i, snapped));
-    }
-    if changed.is_empty() { return; }
-    // Neighbours sharing a moved corner move it too (no crack at the seam).
-    let done: std::collections::HashSet<usize> = changed.iter().map(|c| c.0).collect();
-    for i in 0..tris.len() {
-        if done.contains(&i) { continue; }
+        (i, kept)
+    }).chain(neighbours.into_iter().filter_map(|i| {
         let t = tris[i].v;
-        if !t.iter().any(|&p| moved.contains_key(&quant(p))) { continue; }
-        // A floor sharing a corner with a wall that snapping moved up must not
-        // be pulled up with it (Manatros 2026-11-03: "a vertex placed too high
-        // at the walls, so the floor curves up there"): a neighbour the move
-        // would turn keeps its own corners.
-        let m = t.map(|p| moved.get(&quant(p)).copied().unwrap_or(p));
-        if normal(&m).dot(normal(&t)) < SNAP_FOLD { continue; }
-        changed.push((i, vec![m]));
-    }
+        let m = t.map(|p| if pinned.contains(&quant(p)) { p } else { moved.get(&quant(p)).copied().unwrap_or(p) });
+        (m != t && normal(&m).dot(normal(&t)) >= SNAP_FOLD).then(|| (i, vec![m]))
+    })).collect();
     for u in &used {
         out.added.push(Tri { v: u.v, material: tris[u.partner].material });
         out.surface_from.push(svwc::surfaces::key(&tris[u.partner].v));
