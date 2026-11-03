@@ -1497,12 +1497,15 @@ const EDGE_MIN: f32 = 0.03;
 /// Longest stretch without GTA rail collision boxed between found rail (m).
 const TRACK_GAP_MAX: f32 = 30.0;
 /// A track rail's box reaches this far under its grind line (m): GTA's rails
-/// stand 0.13-0.19 m over the bed, the line 1 cm over the rail.
-const TRACK_BOX_DEPTH: f32 = 0.20;
+/// stand 0.13-0.19 m over the bed, the line 1 cm over the rail; the rest is
+/// buried in the bed.
+const TRACK_BOX_DEPTH: f32 = 0.25;
 /// A rail head is walled when a steep face lies within TRACK_WALL_REACH of
 /// the point TRACK_WALL_DOWN under its line (m) ...
 const TRACK_WALL_DOWN: f32 = 0.08;
 const TRACK_WALL_REACH: f32 = 0.08;
+/// ... and it reaches up to this far under the line (m).
+const TRACK_WALL_TOP: f32 = 0.05;
 /// ... and a bare plate when nothing is at its height this far beside it (m).
 const TRACK_BESIDE: f32 = 0.15;
 
@@ -1523,12 +1526,16 @@ fn track_gap_boxes(tracks: &[Vec<Vec3>], gta: &[[Vec3; 3]], grid: &crate::grid::
     // (M17/M18, Manatros 2026-11-03: "the collision is still missing"). A
     // plate is a head with no steep face under its edge and nothing at its
     // height beside it (a level crossing's road is flush beside the rail).
-    let walled = |p: Vec3| grid.at(p.x, p.y).iter().any(|&i| {
+    // A side runs along the rail and reaches up to its head (a sleeper or
+    // chair under the rail is no side; peer review 2026-11-03).
+    let walled = |p: Vec3, side: bevy_math::Vec2| grid.at(p.x, p.y).iter().any(|&i| {
         let t = gta[i as usize];
         let n = (t[1] - t[0]).cross(t[2] - t[0]).normalize_or_zero();
-        n.z.abs() < 0.5 && crate::world::closest_on_triangle(p - Vec3::Z * TRACK_WALL_DOWN, &t).distance(p - Vec3::Z * TRACK_WALL_DOWN) <= TRACK_WALL_REACH
+        let along = Vec3::new(side.y, -side.x, 0.0);
+        n.z.abs() < 0.5 && n.dot(along).abs() < 0.3 && t.iter().map(|q| q.z).fold(f32::MIN, f32::max) >= p.z - TRACK_WALL_TOP
+            && crate::world::closest_on_triangle(p - Vec3::Z * TRACK_WALL_DOWN, &t).distance(p - Vec3::Z * TRACK_WALL_DOWN) <= TRACK_WALL_REACH
     });
-    let plate = |p: Vec3, side: bevy_math::Vec2| supported(p) && !walled(p) && [1.0f32, -1.0].iter().all(|s| {
+    let plate = |p: Vec3, side: bevy_math::Vec2| supported(p) && !walled(p, side) && [1.0f32, -1.0].iter().all(|s| {
         let q = p.truncate() + side * (s * TRACK_BESIDE);
         !floor(q.x, q.y).into_iter().any(|z| z >= p.z - 0.04 && z <= p.z + 0.05)
     });
@@ -1546,7 +1553,12 @@ fn track_gap_boxes(tracks: &[Vec<Vec3>], gta: &[[Vec3; 3]], grid: &crate::grid::
             if !bare[i] { i += 1; continue; }
             let start = i;
             while i < line.len() && bare[i] { i += 1; }
-            let run: Vec<Vec3> = line[start.saturating_sub(1)..(i + 1).min(line.len())].to_vec();
+            // From halfway to the point before to halfway to the point after:
+            // a body never reaches into a level crossing beside the plate.
+            let mut run: Vec<Vec3> = Vec::new();
+            if start > 0 { run.push(line[start - 1].lerp(line[start], 0.5)); }
+            run.extend_from_slice(&line[start..i]);
+            if i < line.len() { run.push(line[i - 1].lerp(line[i], 0.5)); }
             if run.len() >= 2 { plates.push(run); }
         }
         let ok: Vec<bool> = line.iter().map(|&p| supported(p)).collect();
@@ -2933,6 +2945,27 @@ mod top_tests {
         gta.extend(plate(-1.0, -0.05, 0.17));
         gta.extend(plate(0.05, 1.0, 0.17));
         assert!(track_gap_boxes(&line, &gta, &crate::grid::XyGrid::triangles(1.0, &gta)).is_empty());
+        // The line on the head's edge (two edge lines per rail), sleepers under
+        // the plate: still a body.
+        let edge = vec![(0..=20).map(|x| v(x as f32, 0.045, 0.18)).collect::<Vec<_>>()];
+        let mut gta = plate(-0.05, 0.05, 0.17);
+        for k in 0..30 {
+            let x = k as f32 * 0.6 + 0.3;
+            gta.push([v(x, -0.15, 0.0), v(x, 0.15, 0.0), v(x, 0.15, 0.04)]);
+            gta.push([v(x, -0.15, 0.0), v(x, 0.15, 0.04), v(x, -0.15, 0.04)]);
+        }
+        let boxes = track_gap_boxes(&edge, &gta, &crate::grid::XyGrid::triangles(1.0, &gta));
+        let (lo, hi) = boxes.iter().flatten().map(|p| p.x).fold((f32::MAX, f32::MIN), |(a, b), x| (a.min(x), b.max(x)));
+        assert!(lo < 0.5 && hi > 19.5, "sleepers are no sides: {lo}..{hi}");
+        // A crossing from x 10 on: the body ends halfway to it.
+        let mut gta = plate(-0.05, 0.05, 0.17);
+        for (lo, hi) in [(-1.0, -0.05), (0.05, 1.0)] {
+            gta.push([v(10., lo, 0.17), v(20., lo, 0.17), v(20., hi, 0.17)]);
+            gta.push([v(10., lo, 0.17), v(20., hi, 0.17), v(10., hi, 0.17)]);
+        }
+        let boxes = track_gap_boxes(&line, &gta, &crate::grid::XyGrid::triangles(1.0, &gta));
+        let hi = boxes.iter().flatten().map(|p| p.x).fold(f32::MIN, f32::max);
+        assert!(hi > 9.0 && hi <= 9.51, "the body stops before the crossing: {hi}");
     }
 
     #[test]
