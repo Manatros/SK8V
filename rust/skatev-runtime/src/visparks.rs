@@ -37,6 +37,9 @@ const CURVE_NEIGHBOUR: f32 = 0.015;
 /// ... unless it is a floor or deck (normal z at least this, 14 deg): those
 /// stay GTA's (decision 2026-10-26: flat decks stay GTA's).
 const CURVE_NEIGHBOUR_MAX_Z: f32 = 0.97;
+/// ... and only when one of its visible faces turns at least 4 deg from it
+/// (cosine): a bend, not a flat offset.
+const CURVE_NEIGHBOUR_TURN: f32 = 0.99756;
 
 /// The parks' visible meshes, world space, by park id.
 static FILE: OnceLock<Option<Vec<(String, Vec<[[f32; 3]; 3]>)>>> = OnceLock::new();
@@ -533,7 +536,18 @@ fn replace_park(tris: &mut Vec<Tri>, stairs: &[Tri], visible: &[[[f32; 3]; 3]], 
     for &k in &seeds {
         for p in tris[k].v { curve_corners.entry(quant(p)).or_default().push(k); }
     }
-    let beside_curve = |k: usize| deviates.get(&k).is_some_and(|d| (CURVE_NEIGHBOUR..CURVE).contains(d))
+    // Whether the visible faces over a chord turn away from it: a flat
+    // visible wall 2 cm in front of GTA's is offset, not curved (M20,
+    // Manatros 2026-11-03: "partly even worse"; its faces turn 2.5-2.9 deg,
+    // 1102-6's 5.8 deg). Only a bend makes a chord part of the curve beside it.
+    let mut turn: HashMap<usize, f32> = HashMap::default();
+    for (u, chord) in &candidates {
+        let dot = normal(&u.v).dot(normal(&tris[*chord].v));
+        let e = turn.entry(*chord).or_insert(1.0);
+        *e = e.min(dot);
+    }
+    let bends = |k: usize| turn.get(&k).is_some_and(|&dot| dot <= CURVE_NEIGHBOUR_TURN);
+    let beside_curve = |k: usize| deviates.get(&k).is_some_and(|d| (CURVE_NEIGHBOUR..CURVE).contains(d)) && bends(k)
         && normal(&tris[k].v).z < CURVE_NEIGHBOUR_MAX_Z
         && tris[k].v.iter().any(|&p| curve_corners.get(&quant(p))
             .is_some_and(|ks| ks.iter().any(|&j| normal(&tris[j].v).dot(normal(&tris[k].v)) >= CURVE_FACING)));
@@ -1438,12 +1452,13 @@ mod tests {
 
     #[test]
     fn a_chord_just_under_curve_beside_a_curve_chord_is_part_of_the_curve() {
-        // 2 cm bulge: under CURVE (3 cm) but over CURVE_NEIGHBOUR.
-        let (mut gta, visible) = two_chords(true, 0.02);
+        // 3 cm vertical bulge (2.7 cm off the chord, faces turning up to 5 deg;
+        // 1102-6: 2.97 cm, 5.8 deg): under CURVE (3 cm) but over CURVE_NEIGHBOUR.
+        let (mut gta, visible) = two_chords(true, 0.03);
         let out = run(&mut gta, &[], &visible);
         assert!(gta_left_on_second(&gta, &out) < 0.01, "second chord kept {} m2", gta_left_on_second(&gta, &out));
         // The same chord with no curve beside it stays GTA's.
-        let (mut gta, visible) = two_chords(false, 0.02);
+        let (mut gta, visible) = two_chords(false, 0.03);
         let out = run(&mut gta, &[], &visible);
         assert!(gta_left_on_second(&gta, &out) > 2.0);
         // A floor 2 cm off its visible floor beside the curve stays GTA's.
@@ -1463,6 +1478,13 @@ mod tests {
         }
         run(&mut gta, &[], &visible);
         assert_eq!(gta.iter().filter(|t| centroid(&t.v).x < x0).count(), 2, "the floor stays GTA's");
+        // A flat visible plane 2 cm off the second chord (offset, no turn) stays GTA's.
+        let (mut gta, mut visible) = two_chords(true, 0.0);
+        for t in visible.iter_mut().filter(|t| centroid(t).x > -1355.0 + 1.0) {
+            for p in t.iter_mut() { p[2] += 0.02; }
+        }
+        let out = run(&mut gta, &[], &visible);
+        assert!(gta_left_on_second(&gta, &out) > 2.0, "an offset plane is no curve");
         // A planar bank beside the curve (no bulge) stays GTA's.
         let (mut gta, visible) = two_chords(true, 0.0);
         let out = run(&mut gta, &[], &visible);
