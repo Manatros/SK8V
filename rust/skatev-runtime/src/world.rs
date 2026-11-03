@@ -646,10 +646,11 @@ fn build_area_rules(center: Vec3, tris: impl Iterator<Item = ([[f32; 3]; 3], u32
     // Track edges keep their curve on the steel head.
     crate::rails::straighten(&mut found, STRAIGHT);
     crate::rails::straighten(&mut tracks, TRACK_STRAIGHT);
-    found.extend(tracks);
     // Flights again on the merged set: a step's metal nosing trim in GTA's
     // visible model becomes a visual rail on every nose (Vespucci funbox
-    // stairs, 2026-10-24 bake).
+    // stairs, 2026-10-24 bake). Track lines are never noses: at a junction
+    // the edge lines of neighbouring tracks at other heights climb like a
+    // flight (design 2026-11-03-metro-rail-snap), so they join afterwards.
     let (found, flight_noses) = crate::rails::off_flight_noses_split(found);
     noses.extend(flight_noses);
     // StepRails: every nose grindable (Manatros 2026-10-24: some prefer it).
@@ -657,6 +658,7 @@ fn build_area_rules(center: Vec3, tris: impl Iterator<Item = ([[f32; 3]; 3], u32
     if crate::live::STEP_RAILS.load(std::sync::atomic::Ordering::Relaxed) {
         found.append(&mut noses);
     }
+    found.extend(tracks);
     // Only tube/visual rails receive missing-solid boxes; finder ledges and
     // tracks keep their authored collision. A nearby face alone is not proof
     // that a tube/visual rail already has a solid body.
@@ -899,6 +901,47 @@ const RAIL_SEARCH: f32 = 0.08;
 const RAIL_SEARCH_UP: f32 = 0.35;
 /// The line rides this much over the rail collision's top (metres).
 const RAIL_CLEAR: f32 = 0.01;
+/// Design 2026-11-03-metro-rail-snap: GTA's rail strip is looked for this far
+/// either side (m; M17: the strips lie 11-17 cm off the node line), every
+/// RAIL_SAMPLE m ...
+const RAIL_REACH: f32 = 0.25;
+const RAIL_SAMPLE: f32 = 0.01;
+/// ... as a head at most this wide (m) ...
+const RAIL_HEAD_MAX: f32 = 0.15;
+/// ... with nothing or something this much lower beside it (m) ...
+const RAIL_DROP: f32 = 0.02;
+/// ... and at most this far across from the previous point's head (m).
+const RAIL_STEP: f32 = 0.05;
+
+/// Rail heads in a row of floor heights across the track (`RAIL_SAMPLE`
+/// apart, index 0 at -RAIL_REACH): a run is neighbouring samples that step
+/// less than `RAIL_DROP` (a rail's head on its foot is one run, a gap or a
+/// drop ends it); its head is the samples within 1 cm of its top, as the
+/// +-8 cm rule takes them. (middle offset, width, top) of each run that does
+/// not touch either end of the row and whose head is at most `RAIL_HEAD_MAX`.
+fn rail_heads(row: &[Option<f32>]) -> Vec<(f32, f32, f32)> {
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < row.len() {
+        if row[i].is_none() { i += 1; continue; }
+        let start = i;
+        i += 1;
+        while let (Some(z), Some(before)) = (row.get(i).copied().flatten(), row[i - 1]) {
+            if (z - before).abs() >= RAIL_DROP { break; }
+            i += 1;
+        }
+        let end = i - 1;
+        if start == 0 || end + 1 == row.len() { continue; }
+        let top = row[start..=end].iter().flatten().fold(f32::MIN, |m, &z| m.max(z));
+        let head: Vec<usize> = (start..=end).filter(|&k| row[k].is_some_and(|z| z >= top - 0.01)).collect();
+        let (lo, hi) = (head[0], head[head.len() - 1]);
+        let width = (hi - lo) as f32 * RAIL_SAMPLE;
+        if width > RAIL_HEAD_MAX { continue; }
+        let middle = head.iter().sum::<usize>() as f32 / head.len() as f32 * RAIL_SAMPLE - RAIL_REACH;
+        out.push((middle, width, top));
+    }
+    out
+}
 
 /// Track lines snapped onto GTA's rail collision: each point takes the
 /// highest surface within `RAIL_SEARCH` either side (across the track, from
@@ -934,6 +977,8 @@ fn onto_rail_boxes_indexed(lines: Vec<Vec<Vec3>>, gta: &[[Vec3; 3]], grid: &crat
         .flat_map(|line| {
             if line.len() < 2 { return Vec::new(); }
             let widths = std::cell::RefCell::new(Vec::new());
+            // The last point that found a rail head, and the head's offset.
+            let mut previous: Option<(Vec3, f32)> = None;
             let snapped: Vec<Option<Vec3>> = (0..line.len())
                 .map(|i| {
                     let p = line[i];
@@ -941,6 +986,25 @@ fn onto_rail_boxes_indexed(lines: Vec<Vec<Vec3>>, gta: &[[Vec3; 3]], grid: &crat
                     let along = (b - a).truncate().normalize_or_zero();
                     let side = bevy_math::Vec2::new(-along.y, along.x);
                     let bed = p.z - crate::tracks::RAIL_TOP;
+                    // GTA's rail head within RAIL_REACH, keeping to the steel
+                    // the line was on (design 2026-11-03-metro-rail-snap).
+                    let steps = (RAIL_REACH / RAIL_SAMPLE).round() as i32;
+                    let row: Vec<Option<f32>> = (-steps..=steps).map(|k| {
+                        let q = p.truncate() + side * (k as f32 * RAIL_SAMPLE);
+                        floor(q.x, q.y, bed + 0.03, bed + RAIL_SEARCH_UP)
+                    }).collect();
+                    let want = previous.filter(|(q, _)| q.distance(p) < 2.0).map(|(_, o)| o);
+                    let aim = want.unwrap_or(0.0);
+                    let head = rail_heads(&row).into_iter()
+                        .filter(|h| want.is_none_or(|w| (h.0 - w).abs() <= RAIL_STEP))
+                        .min_by(|x, y| (x.0 - aim).abs().total_cmp(&(y.0 - aim).abs()).then(x.0.abs().total_cmp(&y.0.abs())));
+                    if let Some((middle, width, top)) = head {
+                        previous = Some((p, middle));
+                        widths.borrow_mut().push(width);
+                        let q = p.truncate() + side * middle;
+                        return Some(Vec3::new(q.x, q.y, top + RAIL_CLEAR));
+                    }
+                    // No rail head: today's rule.
                     // Highest surface across the rail, and where it is.
                     let samples: Vec<(f32, f32)> = (-8..=8)
                         .filter_map(|k| {
@@ -2803,6 +2867,65 @@ mod top_tests {
             assert!(((a.y + b.y) * 0.5 - 0.04).abs() < 0.011, "centred on the head: {a} {b}");
             assert!((a.y - b.y).abs() >= EDGE_MIN && (a.y - b.y).abs() <= 0.08, "on its edges: {a} {b}");
         }
+    }
+
+    /// A 20 m strip at height `top` across y lo..hi (two triangles), and the bed.
+    fn strip(lo: f32, hi: f32, top: f32) -> Vec<[Vec3; 3]> {
+        let v = |x: f32, y: f32, z: f32| Vec3::new(x, y, z);
+        vec![[v(0., lo, top), v(20., lo, top), v(20., hi, top)], [v(0., lo, top), v(20., hi, top), v(0., hi, top)]]
+    }
+
+    fn bed() -> Vec<[Vec3; 3]> {
+        let v = |x: f32, y: f32, z: f32| Vec3::new(x, y, z);
+        vec![[v(-5., -2., 0.), v(25., -2., 0.), v(25., 2., 0.)], [v(-5., -2., 0.), v(25., 2., 0.), v(-5., 2., 0.)]]
+    }
+
+    fn line() -> Vec<Vec<Vec3>> {
+        let v = |x: f32| Vec3::new(x, 0., crate::tracks::RAIL_TOP);
+        vec![(0..=16).map(|k| v(2. + k as f32)).collect()]
+    }
+
+    fn centre(snapped: &[Vec<Vec3>]) -> f32 {
+        let all: Vec<f32> = snapped.iter().flatten().map(|p| p.y).collect();
+        all.iter().sum::<f32>() / all.len() as f32
+    }
+
+    #[test]
+    fn a_track_line_finds_the_rail_strip_beside_the_node_line() {
+        // Design 2026-11-03-metro-rail-snap (M17: strips 11-17 cm off).
+        let mut gta = bed();
+        gta.extend(strip(0.11, 0.19, 0.213));
+        let snapped = onto_rail_boxes(line(), &gta);
+        assert_eq!(snapped.len(), 2);
+        assert!((centre(&snapped) - 0.15).abs() < 0.011, "centred on the strip: {}", centre(&snapped));
+        assert!(snapped.iter().flatten().all(|p| (p.z - (0.213 + RAIL_CLEAR)).abs() < 1e-4));
+    }
+
+    #[test]
+    fn a_slab_cut_off_by_the_search_window_is_no_rail() {
+        // A slab at rail height from 18 cm on: today's rule (nothing within 8 cm: no line).
+        let mut gta = bed();
+        gta.extend(strip(0.18, 1.5, 0.17));
+        assert!(onto_rail_boxes(line(), &gta).is_empty());
+        // A curb higher than the rail does not hide the rail.
+        let mut gta = bed();
+        gta.extend(strip(0.10, 0.17, 0.17));
+        gta.extend(strip(-0.6, -0.12, 0.25));
+        assert!((centre(&onto_rail_boxes(line(), &gta)) - 0.135).abs() < 0.011);
+    }
+
+    #[test]
+    fn a_track_line_keeps_to_its_rail_past_a_second_strip() {
+        // The rail 12 cm off on one side; from x 8 a second strip 10 cm off on
+        // the other side (a check rail at a switch) is nearer the node line.
+        let v = |x: f32, y: f32, z: f32| Vec3::new(x, y, z);
+        let mut gta = bed();
+        gta.extend(strip(0.08, 0.16, 0.17));
+        gta.push([v(8., -0.14, 0.17), v(20., -0.14, 0.17), v(20., -0.06, 0.17)]);
+        gta.push([v(8., -0.14, 0.17), v(20., -0.06, 0.17), v(8., -0.06, 0.17)]);
+        let snapped = onto_rail_boxes(line(), &gta);
+        let mids: Vec<f32> = (0..snapped[0].len()).map(|i| (snapped[0][i].y + snapped[1][i].y) * 0.5).collect();
+        assert!(mids.iter().all(|m| (m - 0.12).abs() < 0.011), "kept to its rail: {mids:?}");
     }
 
     #[test]
