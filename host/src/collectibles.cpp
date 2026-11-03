@@ -27,6 +27,7 @@ using namespace gta;
 constexpr float kDrawRange = 300.0f;   // markers drawn this far (hunting while skating)
 constexpr float kFindRange = 40.0f;    // found with a clear sight line from this close
 constexpr float kReach = 1.5f;         // earned when the skater's root passes this close
+constexpr float kAirReach = 1.0f;      // ... an air collectible: closer, and only in the air
 constexpr float kRootBelow = 0.6f;     // the skater's root (hip) is below the marker centre
 constexpr DWORD kSightEvery = 1000;    // ms between sight-line probes
 constexpr int kBlipSprite = 66;        // question mark
@@ -106,7 +107,7 @@ bool Save() {
     }
     if (written && MoveFileExW(tmp.c_str(), g_progressPath.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) return true;
     DeleteFileW(tmp.c_str());
-    Log("could not write GTAxSkate\\collectibles.txt; progress of this session is not kept");
+    Log("could not write GTAxSkate\\collectibles3.txt; progress of this session is not kept");
     return false;
 }
 
@@ -158,10 +159,10 @@ void Blip(const Item& it) {
     const int b = Call<int>(ADD_BLIP_FOR_COORD, it.x, it.y, it.z);
     if (!b) return;
     Call<void>(SET_BLIP_SPRITE, b, kBlipSprite);
-    Call<void>(SET_BLIP_COLOUR, b, it.kind == Kind::Part ? kPartColour : kSongColour);
+    Call<void>(SET_BLIP_COLOUR, b, GivesParts(it.kind) ? kPartColour : kSongColour);
     Call<void>(SET_BLIP_AS_SHORT_RANGE, b, TRUE);
     Call<void>(BEGIN_TEXT_COMMAND_SET_BLIP_NAME, "STRING");
-    Call<void>(ADD_TEXT_COMPONENT_SUBSTRING_PLAYER_NAME, it.kind == Kind::Part ? "Hidden board part" : "Hidden song");
+    Call<void>(ADD_TEXT_COMPONENT_SUBSTRING_PLAYER_NAME, it.kind == Kind::Board ? "Hidden board" : it.kind == Kind::Part ? "Hidden board part" : "Hidden song");
     Call<void>(END_TEXT_COMMAND_SET_BLIP_NAME, b);
     g_blips[it.id] = b;
 }
@@ -176,7 +177,8 @@ void Unblip(const std::string& id) {
 
 void Draw(const Item& it, float distance, bool found, bool mark) {
     const float s = MarkerScale(distance);
-    const int r = it.kind == Kind::Part ? 255 : 170, g = it.kind == Kind::Part ? 200 : 70, b = it.kind == Kind::Part ? 0 : 255;
+    const bool givesParts = GivesParts(it.kind);
+    const int r = givesParts ? 255 : 170, g = givesParts ? 200 : 70, b = givesParts ? 0 : 255;
     // Type 32: the question mark, bobbing and turning (not where the item itself shows).
     if (mark)
         Call<void>(DRAW_MARKER, 32, it.x, it.y, it.z, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, s, s, s, r, g, b, 220, TRUE, FALSE, 2, TRUE,
@@ -230,7 +232,19 @@ void Earn(const Item& it) {
     g_progress.state[it.id] = State::Collected;
     std::string reward, text;
     const auto mine = g_assigned.find(it.id);
-    if (it.kind == Kind::Part) {
+    if (it.kind == Kind::Board) {
+        // Its own complete board (collectibles v3): every key it holds.
+        int got = 0;
+        if (g_partsAssigned && mine != g_assigned.end())
+            for (const std::string& key : mine->second.keys)
+                if (boardshop::Unlock(key) == 1) ++got, g_unlockedKeys.insert(key);
+        if (got) {
+            std::string keys;
+            for (const std::string& key : mine->second.keys) keys += (keys.empty() ? "" : ",") + key;
+            reward = "board:" + keys;
+            text = "Unlocked in the skate shop: " + mine->second.title;
+        }
+    } else if (it.kind == Kind::Part) {
         // Its own deck or griptape (design 2026-11-02-collectibles-v2); one
         // already unlocked pays the cash below, never another's item.
         int result = -1;
@@ -259,7 +273,7 @@ void Earn(const Item& it) {
         }
     }
     std::string name;  // the part's shop label, for the popup
-    if (const size_t colon = text.find(": "); reward.rfind("part:", 0) == 0 && colon != std::string::npos)
+    if (const size_t colon = text.find(": "); (reward.rfind("part:", 0) == 0 || reward.rfind("board:", 0) == 0) && colon != std::string::npos)
         name = text.substr(colon + 2);
     if (reward.empty()) {
         boardshop::Pay(kNoPartsLeftCash);
@@ -287,7 +301,7 @@ void Earn(const Item& it) {
 bool ShowsItem(const Item& it, const std::vector<int>& earnedSongs) {
     const auto a = g_assigned.find(it.id);
     if (a == g_assigned.end()) return false;
-    if (it.kind == Kind::Part) return g_partsAssigned && !a->second.models.empty() && !g_unlockedKeys.count(a->second.key);
+    if (GivesParts(it.kind)) return g_partsAssigned && !a->second.models.empty() && !g_unlockedKeys.count(a->second.key);
     const int t = a->second.track;
     return g_musicModel && t && g_tracksOnDisk.count(t) && std::find(earnedSongs.begin(), earnedSongs.end(), t) == earnedSongs.end();
 }
@@ -341,7 +355,7 @@ std::set<std::string> ShowItems(const Vector3& me) {
     int part = 0, music = 0;
     for (const auto& [d, it] : closest) {
         const float at[3] = {it->x, it->y, it->z + bob};
-        if (it->kind == Kind::Part) {
+        if (GivesParts(it->kind)) {
             SvBoardPose pose{};
             if (boardshop::PickupPose(at, yaw, pose) && boardparts::Pickup(part, g_assigned[it->id].models, pose)) {
                 shown.insert(it->id);
@@ -381,7 +395,7 @@ void Find(const Item& it) {
     Blip(it);
     Call<void>(PLAY_SOUND_FRONTEND, -1, "CHECKPOINT_NORMAL", "HUD_MINI_GAME_SOUNDSET", 1);
     if (!Popup(false, PopupFound(it.kind)))
-        Notice(std::string("You found a hidden ") + (it.kind == Kind::Part ? "board part" : "song") + " (" + it.place +
+        Notice(std::string("You found a hidden ") + (it.kind == Kind::Board ? "board" : it.kind == Kind::Part ? "board part" : "song") + " (" + it.place +
                "): reach it while skating");
     Log(it.id + " found");
 }
@@ -391,13 +405,15 @@ void Find(const Item& it) {
 void Start(const std::wstring& gameDir, bool enabled, util::LogFn log) {
     g_log = log;
     g_placesPath = gameDir + L"GTAxSkate\\collectibles.tsv";
-    g_progressPath = gameDir + L"GTAxSkate\\collectibles.txt";
+    // Collectibles v3 starts fresh (design 2026-11-03-collectibles-v3); v2's
+    // collectibles.txt stays for a rollback.
+    g_progressPath = gameDir + L"GTAxSkate\\collectibles3.txt";
     g_songsDir = SongsDir();
     std::string text;
     g_items = Read(g_placesPath, text) ? ParsePlaces(text) : std::vector<Item>{};
     g_faulty = !Read(g_progressPath, text);
     g_progress = ParseProgress(text);
-    if (g_faulty) Log("GTAxSkate\\collectibles.txt exists but cannot be read: progress, songs and the shop stay as they are this session");
+    if (g_faulty) Log("GTAxSkate\\collectibles3.txt exists but cannot be read: progress, songs and the shop stay as they are this session");
     g_wasEnabled = enabled;
     Log(std::to_string(g_items.size()) + " places, " + Summary());
     if (g_items.empty()) return;  // no places file: songs stay as they are
@@ -408,8 +424,9 @@ void SyncShop() {
     // No places file: nothing to earn, so nothing is locked either.
     if (g_faulty || g_items.empty()) return;
     int parts = 0, earned = 0;
-    for (const Item& it : g_items) parts += it.kind == Kind::Part;
-    for (const auto& [id, r] : g_progress.reward) earned += r.rfind("part:", 0) == 0;
+    // A board holds four secrets (deck, griptape, trucks, wheels).
+    for (const Item& it : g_items) parts += it.kind == Kind::Part ? 1 : it.kind == Kind::Board ? 4 : 0;
+    earned = static_cast<int>(EarnedKeys(g_progress).size());
     int locked = boardshop::SetSecrets(parts);
     const std::string list = boardshop::SecretList();
     g_partsAssigned = !list.empty();
@@ -453,7 +470,7 @@ std::string Reset() {
     return "Collectibles reset: " + Summary() + ". Bought parts stay in your garage. Settings > Audio > Perform Quick Scan to update Self Radio.";
 }
 
-void Tick(bool enabled, bool skating, bool popups, const float (&skater)[3], int ped) {
+void Tick(bool enabled, bool skating, bool popups, const float (&skater)[3], int ped, bool inAir) {
     g_popups = popups;
     // The burst's effect loaded ahead of the first collect.
     if (enabled && !g_items.empty() && !Call<bool>(HAS_NAMED_PTFX_ASSET_LOADED, kBurstAsset))
@@ -485,9 +502,9 @@ void Tick(bool enabled, bool skating, bool popups, const float (&skater)[3], int
         if (st == State::Found) Blip(it);  // after a load or Collectibles back on
         if (d > kDrawRange) continue;
         Draw(it, d, st == State::Found, !items.count(it.id));
-        if (skating && g_hadSkater) {
+        if (skating && g_hadSkater && (!it.air || inAir)) {
             const float c[3] = {it.x, it.y, it.z - kRootBelow};
-            if (SegmentHits(g_prev, skater, c, kReach)) {
+            if (SegmentHits(g_prev, skater, c, it.air ? kAirReach : kReach)) {
                 Earn(it);
                 continue;
             }
@@ -514,7 +531,7 @@ std::string Summary() {
     for (const Item& it : g_items) {
         const bool done = StateOf(g_progress, it.id) == State::Collected;
         ++all, got += done;
-        if (it.kind == Kind::Part) ++parts, partsGot += done;
+        if (GivesParts(it.kind)) ++parts, partsGot += done;
         else ++songs, songsGot += done;
     }
     char text[128];
@@ -541,7 +558,7 @@ std::string SelectedLabel() {
     if (g_sel < 0 || g_sel >= static_cast<int>(g_items.size())) g_sel = 0;
     const Item& it = g_items[g_sel];
     const State st = StateOf(g_progress, it.id);
-    return "Collectible: " + it.id + (it.kind == Kind::Part ? " part " : " song ") +
+    return "Collectible: " + it.id + (it.kind == Kind::Board ? " board " : it.kind == Kind::Part ? " part " : " song ") +
            (st == State::Collected ? "[collected] " : st == State::Found ? "[found] " : "[hidden] ") + it.place;
 }
 

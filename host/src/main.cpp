@@ -37,6 +37,7 @@
 #include "thread_census.h"
 #include "marks.h"
 #include "collectibles.h"
+#include "collectibles_logic.h"
 #include "replay.h"
 #include "menu.h"
 #include "vehicle_survey.h"
@@ -4885,7 +4886,8 @@ void ScriptMain() {
             const bool riding = s.state == LifeState::Skating && !replay::Active() && st.rfind("Biped", 0) != 0 && st.rfind("Wipeout", 0) != 0;
             const float root[3] = {s.last.skater_position.x, s.last.skater_position.y, s.last.skater_position.z};
             const bool popups = g_config.skateHud && s.state == LifeState::Skating && s.action == 0 && !replay::Active();  // not filming
-            if (!replay::Active()) collectibles::Tick(g_config.collectibles, riding, popups, root, Call<int>(gta::PLAYER_PED_ID));
+            if (!replay::Active()) collectibles::Tick(g_config.collectibles, riding, popups, root, Call<int>(gta::PLAYER_PED_ID),
+                                                       collectibles::BoardInAir(s.last.state_utf8));
             if (const char* notice = collectibles::TakeNotice()) Notify(s, notice, 6000);
         }
         // M while skating: GTA's own interaction menu. It did not open because

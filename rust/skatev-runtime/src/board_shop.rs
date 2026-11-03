@@ -149,12 +149,18 @@ pub fn models_of(riding: &BoardChoice, grip: Option<&str>, base: Option<&str>, h
     out
 }
 
-/// The models a collectible shows for `goods`: the deck alone, or a
-/// griptape on the default deck (deck first, the grip last, as `models_of`).
+/// The models a collectible shows for `goods`: the deck alone, a griptape on
+/// the default deck (deck first, the grip last, as `models_of`), or the
+/// trucks or wheels alone (collectibles v3).
 pub fn pickup_models(goods: &Goods) -> Vec<String> {
     let mut garage = Garage::default();
     garage.ride(goods);
     let all = models_of(&garage.riding, garage.grip.as_deref(), None, None);
+    match goods {
+        Goods::Part(Part::Trucks, _) => return vec![all[1].clone()],
+        Goods::Part(Part::Wheels, _) => return vec![all[2].clone()],
+        _ => {}
+    }
     let mut out = vec![all[0].clone()];
     if matches!(goods, Goods::Grip(_)) && all.len() > 3 {
         out.push(all[all.len() - 1].clone());

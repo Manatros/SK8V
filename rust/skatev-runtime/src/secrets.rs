@@ -1,8 +1,10 @@
 //! Secret shop items (contributed by GTAxSkate, design
-//! 2026-11-01-collectibles): some decks and griptapes stay out of the shop
-//! until a collectible in the world unlocks them. The choice is made once
-//! and kept in `SkateVSecrets.txt` next to the garages, so later catalog
-//! additions never become secret and progress never drifts.
+//! 2026-11-01-collectibles): some decks, griptapes, trucks and wheels stay
+//! out of the shop until a collectible in the world unlocks them. The choice
+//! is made once and kept in `SkateVSecrets3.txt` next to the garages, so later
+//! catalog additions never become secret and progress never drifts
+//! (collectibles v3, design 2026-11-03-collectibles-v3; v2's
+//! `SkateVSecrets.txt` stays untouched for a rollback).
 
 use std::collections::{BTreeSet, HashSet};
 
@@ -10,25 +12,33 @@ use skate_boards::{BoardChoice, Part};
 
 use crate::shop::{Goods, DECK_GRIP};
 
-pub const FILE: &str = "SkateVSecrets.txt";
+pub const FILE: &str = "SkateVSecrets3.txt";
+/// Kinds a secret can be, in the order collectibles take them.
+const KINDS: [&str; 4] = ["deck", "grip", "trucks", "wheels"];
+/// At most one in this many of a kind's goods is secret (design rev 2: the
+/// shop never runs dry).
+const KIND_SHARE: usize = 3;
 
 fn fnv(text: &str) -> u32 {
     text.bytes().fold(0x811c_9dc5u32, |h, b| (h ^ u32::from(b)).wrapping_mul(0x0100_0193))
 }
 
-/// The key of goods that can be secret: a deck (not a paint) or a
-/// griptape (not the deck's own grip). None for everything else.
+/// The key of goods that can be secret: a deck, trucks or wheels (not a
+/// paint) or a griptape (not the deck's own grip). None for everything else.
 pub fn key(goods: &Goods) -> Option<String> {
     match goods {
-        Goods::Part(Part::Deck, r) if r.asset != skate_boards::paints::ASSET => Some(format!("deck:{}:{}", r.asset, r.material)),
+        Goods::Part(part, r) if r.asset != skate_boards::paints::ASSET => {
+            let kind = match part { Part::Deck => "deck", Part::Trucks => "trucks", Part::Wheels => "wheels" };
+            Some(format!("{kind}:{}:{}", r.asset, r.material))
+        }
         Goods::Grip(id) if id != DECK_GRIP => Some(format!("grip:{id}")),
         _ => None,
     }
 }
 
-/// The deck key of a complete board, if it has a deck.
-fn deck_key(board: &BoardChoice) -> Option<String> {
-    board.get(Part::Deck).and_then(|r| key(&Goods::Part(Part::Deck, r.clone())))
+/// The keys of a complete board's parts (deck, trucks, wheels).
+fn board_keys(board: &BoardChoice) -> Vec<String> {
+    Part::ALL.iter().filter_map(|&p| board.get(p).and_then(|r| key(&Goods::Part(p, r.clone())))).collect()
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -40,12 +50,27 @@ pub struct Secrets {
 }
 
 impl Secrets {
-    /// The `count` keys of `keys` with the lowest hash (ties by name).
+    /// `count` keys of `keys`: per kind the lowest hashes (ties by name), at
+    /// most one in `KIND_SHARE` of the kind, taken in turn deck, grip,
+    /// trucks, wheels so each kind gets its share of the collectibles.
     pub fn choose(keys: impl IntoIterator<Item = String>, count: usize) -> Self {
-        let mut all: Vec<String> = keys.into_iter().collect::<BTreeSet<_>>().into_iter().collect();
-        all.sort_by(|a, b| fnv(a).cmp(&fnv(b)).then_with(|| a.cmp(b)));
-        all.truncate(count);
-        Self::from_parts(all, BTreeSet::new())
+        let all: BTreeSet<String> = keys.into_iter().collect();
+        let mut kinds: Vec<Vec<String>> = KINDS.iter().map(|kind| {
+            let mut of: Vec<String> = all.iter().filter(|k| k.split(':').next() == Some(*kind)).cloned().collect();
+            of.sort_by(|a, b| fnv(a).cmp(&fnv(b)).then_with(|| a.cmp(b)));
+            of.truncate(of.len().div_ceil(KIND_SHARE));
+            of.reverse();
+            of
+        }).collect();
+        let mut order = Vec::new();
+        while order.len() < count && kinds.iter().any(|k| !k.is_empty()) {
+            for kind in &mut kinds {
+                if order.len() < count {
+                    if let Some(k) = kind.pop() { order.push(k); }
+                }
+            }
+        }
+        Self::from_parts(order, BTreeSet::new())
     }
 
     fn from_parts(order: Vec<String>, unlocked: BTreeSet<String>) -> Self {
@@ -87,7 +112,7 @@ impl Secrets {
         self.secret.contains(key) && !self.unlocked.contains(key)
     }
 
-    /// Goods still hidden: a locked item, or a complete board whose deck is locked.
+    /// Goods still hidden: a locked item, or a complete board with a locked part.
     pub fn locked(&self, goods: &Goods) -> bool {
         match goods {
             Goods::Complete(board) => self.board_locked(board),
@@ -96,10 +121,10 @@ impl Secrets {
     }
 
     pub fn board_locked(&self, board: &BoardChoice) -> bool {
-        deck_key(board).is_some_and(|k| self.key_locked(&k))
+        board_keys(board).iter().any(|k| self.key_locked(k))
     }
 
-    /// Goods that are secret at all (locked or unlocked); a complete board by its deck.
+    /// Goods that are secret at all (locked or unlocked); a complete board by any part.
     pub fn secret(&self, goods: &Goods) -> bool {
         match goods {
             Goods::Complete(board) => self.board_secret(board),
@@ -108,7 +133,7 @@ impl Secrets {
     }
 
     pub fn board_secret(&self, board: &BoardChoice) -> bool {
-        deck_key(board).is_some_and(|k| self.secret.contains(&k))
+        board_keys(board).iter().any(|k| self.secret.contains(k))
     }
 
     pub fn remaining(&self) -> usize {
@@ -182,13 +207,29 @@ mod tests {
     }
 
     #[test]
-    fn only_decks_and_griptapes_can_be_secret() {
+    fn decks_griptapes_trucks_and_wheels_can_be_secret_but_no_paint() {
         assert_eq!(key(&deck("d1")).as_deref(), Some("deck:deckmodel:d1"));
         assert_eq!(key(&Goods::Grip("g1".into())).as_deref(), Some("grip:g1"));
         assert_eq!(key(&Goods::Grip(DECK_GRIP.into())), None);
         assert_eq!(key(&Goods::Part(Part::Deck, PartRef::new(skate_boards::paints::ASSET, "paint_red"))), None);
-        assert_eq!(key(&Goods::Part(Part::Wheels, PartRef::new("wheelmodel", "w1"))), None);
+        assert_eq!(key(&Goods::Part(Part::Wheels, PartRef::new("wheelmodel", "w1"))).as_deref(), Some("wheels:wheelmodel:w1"));
+        assert_eq!(key(&Goods::Part(Part::Trucks, PartRef::new("truckmodel", "t1"))).as_deref(), Some("trucks:truckmodel:t1"));
+        assert_eq!(key(&Goods::Part(Part::Wheels, PartRef::new(skate_boards::paints::ASSET, "paint_red"))), None);
         assert_eq!(key(&Goods::Sticker("s1".into())), None);
+    }
+
+    #[test]
+    fn the_choice_takes_kinds_in_turn_and_keeps_two_thirds_on_sale() {
+        let keys = (0..30).map(|i| format!("deck:m:{i}"))
+            .chain((0..9).map(|i| format!("trucks:t:{i}")))
+            .chain((0..30).map(|i| format!("grip:{i}")))
+            .chain((0..12).map(|i| format!("wheels:w:{i}")));
+        let s = Secrets::choose(keys, 100);
+        let of = |kind: &str| s.order.iter().filter(|k| k.starts_with(kind)).count();
+        assert_eq!((of("deck:"), of("grip:"), of("trucks:"), of("wheels:")), (10, 10, 3, 4));
+        // In turn: deck, grip, trucks, wheels, deck, ...
+        assert!(s.order[0].starts_with("deck:") && s.order[1].starts_with("grip:")
+            && s.order[2].starts_with("trucks:") && s.order[3].starts_with("wheels:"));
     }
 
     #[test]
@@ -217,7 +258,7 @@ mod tests {
     }
 
     #[test]
-    fn a_complete_board_is_locked_by_its_deck() {
+    fn a_complete_board_is_locked_by_any_locked_part() {
         let s = Secrets::choose(["deck:deckmodel:d1".to_owned()], 1);
         let mut board = BoardChoice::default();
         board.set(Part::Deck, Some(PartRef::new("deckmodel", "d1")));
@@ -225,7 +266,11 @@ mod tests {
         assert!(s.locked(&deck("d1")));
         assert!(!s.locked(&deck("d2")));
         board.set(Part::Deck, Some(PartRef::new("deckmodel", "d2")));
-        assert!(!s.locked(&Goods::Complete(board)));
+        assert!(!s.locked(&Goods::Complete(board.clone())));
+        // Its trucks locked: hidden too (collectibles v3).
+        let t = Secrets::from_text("secret trucks:truckmodel:t1\n");
+        board.set(Part::Trucks, Some(PartRef::new("truckmodel", "t1")));
+        assert!(t.locked(&Goods::Complete(board)));
     }
 
     #[test]

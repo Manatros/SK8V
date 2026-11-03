@@ -61,7 +61,9 @@ std::vector<Item> ParsePlaces(const std::string& text) {
         it.id = f[0];
         if (f[1] == "part") it.kind = Kind::Part;
         else if (f[1] == "song") it.kind = Kind::Song;
+        else if (f[1] == "board") it.kind = Kind::Board;
         else continue;
+        it.air = f.size() > 6 && Trim(f[6]) == "air";
         if (it.id.empty() || !Number(f[2], it.x) || !Number(f[3], it.y) || !Number(f[4], it.z)) continue;
         it.place = f[5];
         out.push_back(it);
@@ -147,6 +149,7 @@ std::map<std::string, Assigned> Assign(const std::vector<Item>& items, const std
         const size_t t2 = line.find('\t', t1 + 1);
         Assigned a;
         a.key = line.substr(0, t1);
+        a.keys = {a.key};
         a.title = line.substr(t1 + 1, t2 == std::string::npos ? std::string::npos : t2 - t1 - 1);
         if (t2 != std::string::npos) {
             std::istringstream models(line.substr(t2 + 1));
@@ -159,13 +162,35 @@ std::map<std::string, Assigned> Assign(const std::vector<Item>& items, const std
     for (const Item& it : items) sorted.push_back(&it);
     std::sort(sorted.begin(), sorted.end(), [](const Item* a, const Item* b) { return a->id < b->id; });
     std::map<std::string, Assigned> out;
+    // Boards first (collectibles v3): each takes the next unused secret of
+    // every kind, so every board is complete; parts then take the rest in order.
+    std::vector<bool> taken(secrets.size(), false);
+    for (const Item* it : sorted) {
+        if (it->kind != Kind::Board) continue;
+        Assigned board;
+        for (const char* kind : {"deck:", "grip:", "trucks:", "wheels:"}) {
+            for (size_t k = 0; k < secrets.size(); ++k) {
+                if (taken[k] || secrets[k].key.rfind(kind, 0) != 0) continue;
+                taken[k] = true;
+                board.keys.push_back(secrets[k].key);
+                // A griptape's line shows it on the default deck: the board takes the grip alone.
+                if (secrets[k].key.rfind("grip:", 0) == 0 && secrets[k].models.size() > 1) board.models.push_back(secrets[k].models.back());
+                else board.models.insert(board.models.end(), secrets[k].models.begin(), secrets[k].models.end());
+                if (board.title.empty()) board.title = "Complete board: " + secrets[k].title;
+                break;
+            }
+        }
+        if (!board.keys.empty()) board.key = board.keys[0];
+        out[it->id] = board;
+    }
     size_t part = 0;
     int song = 0;
     for (const Item* it : sorted) {
         if (it->kind == Kind::Part) {
+            while (part < secrets.size() && taken[part]) ++part;
             out[it->id] = part < secrets.size() ? secrets[part] : Assigned{};
             ++part;
-        } else {
+        } else if (it->kind == Kind::Song) {
             out[it->id].track = kStarterSongs + 1 + song++;
         }
     }
@@ -175,7 +200,13 @@ std::map<std::string, Assigned> Assign(const std::vector<Item>& items, const std
 std::vector<std::string> EarnedKeys(const Progress& p) {
     std::vector<std::string> out;
     for (const auto& [id, r] : p.reward)
-        if (r.rfind("part:", 0) == 0) out.push_back(r.substr(5));
+        if (r.rfind("part:", 0) == 0) {
+            out.push_back(r.substr(5));
+        } else if (r.rfind("board:", 0) == 0) {
+            std::istringstream keys(r.substr(6));
+            for (std::string k; std::getline(keys, k, ',');)
+                if (!k.empty()) out.push_back(k);
+        }
     return out;
 }
 
@@ -234,13 +265,21 @@ std::vector<FileOp> SongPlan(const std::vector<SongFile>& files, const Progress&
 }
 
 std::string PopupFound(Kind kind) {
+    if (kind == Kind::Board) return "Hidden board found";
     return kind == Kind::Part ? "Hidden board part found" : "Hidden song found";
+}
+
+bool BoardInAir(const std::string& state) {
+    return state.find("Air") != std::string::npos && state.rfind("Wipeout", 0) != 0 && state.rfind("Biped", 0) != 0;
 }
 
 std::string PopupEarned(const std::string& reward, const std::string& name) {
     auto starts = [&](const char* prefix) { return reward.rfind(prefix, 0) == 0; };
     if (starts("part:deck:")) return "Deck unlocked: " + name;
     if (starts("part:grip:")) return "Griptape unlocked: " + name;
+    if (starts("part:trucks:")) return "Trucks unlocked: " + name;
+    if (starts("part:wheels:")) return "Wheels unlocked: " + name;
+    if (starts("board:")) return "Board unlocked: " + name;
     if (starts("part:")) return "Unlocked: " + name;
     if (starts("song:")) {
         char text[40];

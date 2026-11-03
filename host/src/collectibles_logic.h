@@ -9,13 +9,17 @@
 
 namespace collectibles {
 
-enum class Kind { Part, Song };
+// A board (collectibles v3, design 2026-11-03-collectibles-v3) gives a deck,
+// griptape, trucks and wheels at once; it counts as a part everywhere else.
+enum class Kind { Part, Song, Board };
+inline bool GivesParts(Kind k) { return k != Kind::Song; }
 
 struct Item {
     std::string id;
     Kind kind = Kind::Part;
     float x = 0, y = 0, z = 0;  // the marker's centre, 0.9 m above a rail
     std::string place;
+    bool air = false;  // counts only while the board is in the air (column 7 "air")
 };
 
 // Malformed lines and comments are skipped.
@@ -69,12 +73,17 @@ std::vector<FileOp> SongPlan(const std::vector<SongFile>& files, const Progress&
 // tracks after the starters. A part beyond the list gets no key.
 struct Assigned {
     std::string key, title;
+    std::vector<std::string> keys;  // every key it gives (a board: four)
     std::vector<std::string> models;
     int track = 0;
 };
 std::map<std::string, Assigned> Assign(const std::vector<Item>& items, const std::string& secretList);
-// The shop keys earned so far: rewards "part:<key>".
+// The shop keys earned so far: rewards "part:<key>" and "board:<k1>,<k2>,...".
 std::vector<std::string> EarnedKeys(const Progress& p);
+
+// Whether Skate's state (SvOutput::state_utf8) is the board in the air: not
+// grinding, walking or wiping out (an air collectible counts only then).
+bool BoardInAir(const std::string& state);
 
 // Skate's centre popups (design 2026-11-02-collectible-popups); the movie
 // upper-cases and keeps one line. A part's kind is known only once earned.
