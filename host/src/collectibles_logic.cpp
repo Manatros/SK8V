@@ -152,9 +152,16 @@ std::map<std::string, Assigned> Assign(const std::vector<Item>& items, const std
         a.keys = {a.key};
         a.title = line.substr(t1 + 1, t2 == std::string::npos ? std::string::npos : t2 - t1 - 1);
         if (t2 != std::string::npos) {
-            std::istringstream models(line.substr(t2 + 1));
+            const size_t t3 = line.find('\t', t2 + 1);
+            std::istringstream models(line.substr(t2 + 1, t3 == std::string::npos ? std::string::npos : t3 - t2 - 1));
             for (std::string m; std::getline(models, m, ',');)
                 if (!m.empty()) a.models.push_back(m);
+            // A deck's complete board (collectibles v3), for a board collectible.
+            if (t3 != std::string::npos) {
+                std::istringstream board(line.substr(t3 + 1));
+                for (std::string m; std::getline(board, m, ',');)
+                    if (!m.empty()) a.boardModels.push_back(m);
+            }
         }
         secrets.push_back(std::move(a));
     }
@@ -162,25 +169,22 @@ std::map<std::string, Assigned> Assign(const std::vector<Item>& items, const std
     for (const Item& it : items) sorted.push_back(&it);
     std::sort(sorted.begin(), sorted.end(), [](const Item* a, const Item* b) { return a->id < b->id; });
     std::map<std::string, Assigned> out;
-    // Boards first (collectibles v3): each takes the next unused secret of
-    // every kind, so every board is complete; parts then take the rest in order.
+    // Boards first (collectibles v3, peer review): each takes the next unused
+    // secret deck and gives its complete board (deck, trucks, wheels) into the
+    // garage; parts then take the rest in order (griptapes, trucks, wheels,
+    // decks in turn), so the scarce kinds go to parts.
     std::vector<bool> taken(secrets.size(), false);
     for (const Item* it : sorted) {
         if (it->kind != Kind::Board) continue;
         Assigned board;
-        for (const char* kind : {"deck:", "grip:", "trucks:", "wheels:"}) {
-            for (size_t k = 0; k < secrets.size(); ++k) {
-                if (taken[k] || secrets[k].key.rfind(kind, 0) != 0) continue;
-                taken[k] = true;
-                board.keys.push_back(secrets[k].key);
-                // A griptape's line shows it on the default deck: the board takes the grip alone.
-                if (secrets[k].key.rfind("grip:", 0) == 0 && secrets[k].models.size() > 1) board.models.push_back(secrets[k].models.back());
-                else board.models.insert(board.models.end(), secrets[k].models.begin(), secrets[k].models.end());
-                if (board.title.empty()) board.title = "Complete board: " + secrets[k].title;
-                break;
-            }
+        for (size_t k = 0; k < secrets.size(); ++k) {
+            if (taken[k] || secrets[k].key.rfind("deck:", 0) != 0) continue;
+            taken[k] = true;
+            board = secrets[k];
+            board.keys = {board.key};
+            if (!board.boardModels.empty()) board.models = board.boardModels;
+            break;
         }
-        if (!board.keys.empty()) board.key = board.keys[0];
         out[it->id] = board;
     }
     size_t part = 0;

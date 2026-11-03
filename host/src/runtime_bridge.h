@@ -78,6 +78,8 @@ public:
     // relock all; -1 when the runtime lacks the export.
     std::string ShopSecretList();
     int ShopUnlock(const std::string& key);
+    // A board collectible's complete board into the garage: its title, "" when none.
+    std::string ShopGiveBoard(const std::string& key);
     int ShopRelockAll();
     bool ShopOpen(int tier);
     // Today's stock of the store at x, y (its display's boards); an older
@@ -157,6 +159,8 @@ private:
     SvShopUnlockNextFn shopUnlockNext_ = nullptr;
     SvShopSecretListFn shopSecretList_ = nullptr;
     SvShopUnlockFn shopUnlock_ = nullptr;
+    using SvShopGiveBoardFn = uint32_t (*)(void*, const char*, uint8_t*, uint32_t);
+    SvShopGiveBoardFn shopGiveBoard_ = nullptr;
     SvShopRelockAllFn shopRelockAll_ = nullptr;
     SvShopOpenFn shopOpen_ = nullptr;
     SvShopOpenAtFn shopOpenAt_ = nullptr;

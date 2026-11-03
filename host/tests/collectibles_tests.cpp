@@ -116,16 +116,17 @@ int main() {
     const auto v3 = ParsePlaces("D001\tboard\t1\t2\t3\tVespucci\nD002\tpart\t4\t5\t6\tDavis\tair\nD003\tpart\t7\t8\t9\tDavis\n");
     assert(v3.size() == 3 && v3[0].kind == Kind::Board && !v3[0].air && v3[1].air && !v3[2].air);
     const std::string list =
-        "deck:a:1\tDeck A\tdA\ngrip:g1\tGrip 1\tdA,g1\ntrucks:t:1\tTrucks 1\tt1\nwheels:w:1\tWheels 1\tw1\n"
-        "deck:a:2\tDeck B\tdB\ngrip:g2\tGrip 2\tdA,g2\n";
+        "deck:a:1\tDeck A\tdA\tdA,t0,w0\ngrip:g1\tGrip 1\tdA,g1\ntrucks:t:1\tTrucks 1\tt1\nwheels:w:1\tWheels 1\tw1\n"
+        "deck:a:2\tDeck B\tdB\tdB,t0,w0\ngrip:g2\tGrip 2\tdA,g2\n";
     const auto a3 = Assign(v3, list);
-    // The board takes one of each kind; the parts the rest, in order.
-    assert((a3.at("D001").keys == std::vector<std::string>{"deck:a:1", "grip:g1", "trucks:t:1", "wheels:w:1"}));
-    assert(a3.at("D001").title == "Complete board: Deck A");
-    assert((a3.at("D001").models == std::vector<std::string>{"dA", "g1", "t1", "w1"}));
-    assert(a3.at("D002").key == "deck:a:2" && a3.at("D003").key == "grip:g2");
-    Progress boardWon = ParseProgress("collected D001 board:deck:a:1,grip:g1,trucks:t:1,wheels:w:1\ncollected D002 part:deck:a:2\n");
-    assert(EarnedKeys(boardWon).size() == 5);
+    // The board takes the first secret deck and shows its complete board; the
+    // parts take the rest in order (griptape, trucks, ... before the next deck).
+    assert((a3.at("D001").keys == std::vector<std::string>{"deck:a:1"}));
+    assert(a3.at("D001").title == "Deck A");
+    assert((a3.at("D001").models == std::vector<std::string>{"dA", "t0", "w0"}));
+    assert(a3.at("D002").key == "grip:g1" && a3.at("D003").key == "trucks:t:1");
+    Progress boardWon = ParseProgress("collected D001 board:deck:a:1\ncollected D002 part:grip:g1\n");
+    assert(EarnedKeys(boardWon).size() == 2);
     assert(PopupFound(Kind::Board) == "Hidden board found");
     assert(PopupEarned("board:deck:a:1,grip:g1", "Deck A") == "Board unlocked: Deck A");
     assert(PopupEarned("part:trucks:t:1", "Trucks 1") == "Trucks unlocked: Trucks 1");

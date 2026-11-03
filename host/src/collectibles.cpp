@@ -233,16 +233,15 @@ void Earn(const Item& it) {
     std::string reward, text;
     const auto mine = g_assigned.find(it.id);
     if (it.kind == Kind::Board) {
-        // Its own complete board (collectibles v3): every key it holds.
-        int got = 0;
-        if (g_partsAssigned && mine != g_assigned.end())
-            for (const std::string& key : mine->second.keys)
-                if (boardshop::Unlock(key) == 1) ++got, g_unlockedKeys.insert(key);
-        if (got) {
-            std::string keys;
-            for (const std::string& key : mine->second.keys) keys += (keys.empty() ? "" : ",") + key;
-            reward = "board:" + keys;
-            text = "Unlocked in the skate shop: " + mine->second.title;
+        // Its own complete board (collectibles v3): the deck unlocked and the
+        // board in the garage.
+        if (g_partsAssigned && mine != g_assigned.end() && !mine->second.key.empty() && boardshop::Unlock(mine->second.key) >= 0) {
+            const std::string title = boardshop::GiveBoard(mine->second.key);
+            if (!title.empty()) {
+                reward = "board:" + mine->second.key;
+                text = "A complete board in your garage: " + title;
+                g_unlockedKeys.insert(mine->second.key);
+            }
         }
     } else if (it.kind == Kind::Part) {
         // Its own deck or griptape (design 2026-11-02-collectibles-v2); one
@@ -424,8 +423,7 @@ void SyncShop() {
     // No places file: nothing to earn, so nothing is locked either.
     if (g_faulty || g_items.empty()) return;
     int parts = 0, earned = 0;
-    // A board holds four secrets (deck, griptape, trucks, wheels).
-    for (const Item& it : g_items) parts += it.kind == Kind::Part ? 1 : it.kind == Kind::Board ? 4 : 0;
+    for (const Item& it : g_items) parts += GivesParts(it.kind);
     earned = static_cast<int>(EarnedKeys(g_progress).size());
     int locked = boardshop::SetSecrets(parts);
     const std::string list = boardshop::SecretList();

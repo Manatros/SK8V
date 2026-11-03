@@ -668,6 +668,10 @@ std::string SecretList() {
     return g_ready && g_rt ? g_rt->ShopSecretList() : std::string();
 }
 
+std::string GiveBoard(const std::string& key) {
+    return g_ready && g_rt ? g_rt->ShopGiveBoard(key) : std::string();
+}
+
 int Unlock(const std::string& key) {
     return g_ready && g_rt ? g_rt->ShopUnlock(key) : -1;
 }

@@ -44,6 +44,9 @@ std::string UnlockNext();
 // turned `yawDegrees` (a collectible showing its deck).
 std::string SecretList();
 int Unlock(const std::string& key);
+// A board collectible (collectibles v3): the complete board for deck `key` into
+// the garage; its title, "" when none was given.
+std::string GiveBoard(const std::string& key);
 int RelockAll();
 void CloseMenu();
 bool PickupPose(const float (&xyz)[3], float yawDegrees, SvBoardPose& pose);

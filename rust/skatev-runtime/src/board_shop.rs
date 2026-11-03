@@ -267,13 +267,28 @@ impl BoardShop {
             Err(e) if e.kind() != std::io::ErrorKind::NotFound => Default::default(),
             Err(_) if count == 0 => Default::default(),
             Err(_) => {
-                let keys: Vec<String> = crate::shop::stock(&self.library, Tier::Skate)
+                let offers: Vec<crate::shop::Offer> = crate::shop::stock(&self.library, Tier::Skate)
                     .into_iter()
                     .flat_map(|section| section.offers)
                     .filter(|offer| self.sells(&offer.goods))
+                    .collect();
+                // Trucks and wheels on the shop's complete boards never become
+                // secret: a locked one would hide every board using it
+                // (collectibles v3 peer review).
+                let on_boards: std::collections::HashSet<String> = offers.iter()
+                    .filter_map(|o| match &o.goods { Goods::Complete(b) => Some(b.clone()), _ => None })
+                    .flat_map(|b| [Part::Trucks, Part::Wheels].into_iter()
+                        .filter_map(move |p| b.get(p).and_then(|r| crate::secrets::key(&Goods::Part(p, r.clone())))))
+                    .collect();
+                let keys: Vec<String> = offers.iter()
                     .filter_map(|offer| crate::secrets::key(&offer.goods))
+                    .filter(|k| !on_boards.contains(k))
                     .collect();
                 let chosen = crate::secrets::Secrets::choose(keys, count);
+                for kind in ["deck", "grip", "trucks", "wheels"] {
+                    let n = chosen.order().iter().filter(|k| k.split(':').next() == Some(kind)).count();
+                    eprintln!("secrets: {n} {kind} secret");
+                }
                 let _ = std::fs::write(&path, chosen.to_text());
                 chosen
             }
@@ -288,7 +303,8 @@ impl BoardShop {
     /// The secret items in unlock order, one line each:
     /// `key \t title \t models` (comma-separated; a deck alone, a griptape
     /// on the default deck), for the collectibles that show them (design
-    /// 2026-11-02-collectibles-v2).
+    /// 2026-11-02-collectibles-v2); a deck's line ends with `\t board models`,
+    /// the complete board a board collectible gives (collectibles v3).
     pub fn secret_list(&self) -> String {
         let offers: Vec<crate::shop::Offer> = crate::shop::stock(&self.library, Tier::Skate)
             .into_iter()
@@ -299,7 +315,13 @@ impl BoardShop {
             let offer = offers.iter().find(|o| crate::secrets::key(&o.goods).as_deref() == Some(key.as_str()));
             let title = offer.map_or_else(|| key.clone(), |o| o.title.clone());
             let models = offer.map(|o| pickup_models(&o.goods)).unwrap_or_default();
-            out.push_str(&format!("{key}\t{title}\t{}\n", models.join(",")));
+            if key.starts_with("deck:") {
+                let board = self.board_for(key);
+                let all = models_of(&board, None, None, None);
+                out.push_str(&format!("{key}\t{title}\t{}\t{}\n", models.join(","), all.join(",")));
+            } else {
+                out.push_str(&format!("{key}\t{title}\t{}\n", models.join(",")));
+            }
         }
         out
     }
@@ -311,6 +333,36 @@ impl BoardShop {
             self.save_secrets();
         }
         result
+    }
+
+    /// The complete board a board collectible gives for the deck `key`: the
+    /// shop's complete board with that deck, or the deck on the default board.
+    fn board_for(&self, key: &str) -> BoardChoice {
+        let stock = crate::shop::stock(&self.library, Tier::Skate);
+        if let Some(board) = stock.iter().flat_map(|s| s.offers.iter()).find_map(|o| match &o.goods {
+            Goods::Complete(b) if b.get(Part::Deck).and_then(|r| crate::secrets::key(&Goods::Part(Part::Deck, r.clone()))).as_deref() == Some(key) => Some(b.clone()),
+            _ => None,
+        }) {
+            return board;
+        }
+        let mut board = BoardChoice::default();
+        let mut parts = key.splitn(3, ':').skip(1);
+        if let (Some(asset), Some(material)) = (parts.next(), parts.next()) {
+            board.set(Part::Deck, Some(PartRef::new(asset, material)));
+        }
+        board
+    }
+
+    /// Gives the complete board for the deck `key` (a board collectible,
+    /// collectibles v3): into the garage and kept. Its title, None without a deck.
+    pub fn give_board(&mut self, key: &str) -> Option<String> {
+        let board = self.board_for(key);
+        board.get(Part::Deck)?;
+        self.garage.add(&Goods::Complete(board));
+        self.save();
+        let title = crate::shop::stock(&self.library, Tier::Skate).into_iter().flat_map(|s| s.offers)
+            .find(|o| crate::secrets::key(&o.goods).as_deref() == Some(key)).map_or_else(|| key.to_owned(), |o| o.title);
+        Some(title)
     }
 
     /// Locks every secret again and keeps it (the Developer reset): how many are locked.
@@ -969,6 +1021,19 @@ pub unsafe extern "C" fn sv_shop_unlock(_rt: *mut c_void, key: *const c_char) ->
     crate::guard(0, || {
         let key = unsafe { crate::str_arg(key) };
         with(0, |s| s.unlock(&key))
+    })
+}
+
+/// Gives the complete board for the deck `key` (a board collectible) and
+/// writes its title to `buf`. Returns the bytes it needs, 0 when it gave none.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sv_shop_give_board(_rt: *mut c_void, key: *const c_char, buf: *mut u8, cap: u32) -> u32 {
+    crate::guard(0, || {
+        let key = unsafe { crate::str_arg(key) };
+        match with(None, |s| s.give_board(&key)) {
+            Some(title) => give(&title, buf, cap),
+            None => 0,
+        }
     })
 }
 

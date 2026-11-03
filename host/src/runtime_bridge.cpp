@@ -76,6 +76,7 @@ bool RuntimeBridge::Load(const wchar_t* dllPath, const std::string& dataRoot, co
     optional(shopUnlockNext_, "sv_shop_unlock_next");
     optional(shopSecretList_, "sv_shop_secret_list");
     optional(shopUnlock_, "sv_shop_unlock");
+    optional(shopGiveBoard_, "sv_shop_give_board");
     optional(shopRelockAll_, "sv_shop_relock_all");
     optional(shopOpen_, "sv_shop_open");
     optional(shopOpenAt_, "sv_shop_open_at");
@@ -353,6 +354,19 @@ std::string RuntimeBridge::ShopSecretList() {
     if (shopSecretList_(runtime_, text.data(), need) != need) return {};
     text.resize(need - 1);
     return text;
+}
+
+std::string RuntimeBridge::ShopGiveBoard(const std::string& key) {
+    if (!runtime_ || !shopGiveBoard_) return {};
+    std::string out(256, '\0');
+    const uint32_t need = shopGiveBoard_(runtime_, key.c_str(), reinterpret_cast<uint8_t*>(out.data()), static_cast<uint32_t>(out.size()));
+    if (!need) return {};
+    if (need > out.size()) {
+        out.assign(need, '\0');
+        if (!shopGiveBoard_(runtime_, key.c_str(), reinterpret_cast<uint8_t*>(out.data()), static_cast<uint32_t>(out.size()))) return {};
+    }
+    out.resize(std::strlen(out.c_str()));
+    return out;
 }
 
 int RuntimeBridge::ShopUnlock(const std::string& key) {

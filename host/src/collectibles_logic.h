@@ -73,7 +73,8 @@ std::vector<FileOp> SongPlan(const std::vector<SongFile>& files, const Progress&
 // tracks after the starters. A part beyond the list gets no key.
 struct Assigned {
     std::string key, title;
-    std::vector<std::string> keys;  // every key it gives (a board: four)
+    std::vector<std::string> keys;  // every key it gives
+    std::vector<std::string> boardModels;  // a deck's complete board (collectibles v3)
     std::vector<std::string> models;
     int track = 0;
 };
