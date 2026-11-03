@@ -235,6 +235,11 @@ pub fn replace(tris: &mut Vec<Tri>, stairs: &[Tri]) -> Replacement {
 /// (area / longest edge, m): nothing stands on less, and the gap is smaller.
 const PIECE_AREA: f32 = 2e-4;
 const PIECE_WIDTH: f32 = 0.003;
+/// A chord the curve replaces is cut by its covers out to this far (m).
+const POCKET_REACH: f32 = 0.5;
+/// A cut piece whose normal snapping turned further than this (cosine,
+/// 25 deg) from its face's is a fold, not a surface (design 2026-11-03-snap-folds).
+const SNAP_FOLD: f32 = 0.906;
 /// A vertex this close to a visible footprint edge moves onto it (m).
 const ON_EDGE: f32 = 0.001;
 /// A GTA surface counts as a visible triangle's own when it lies within the
@@ -573,6 +578,7 @@ fn replace_park(tris: &mut Vec<Tri>, stairs: &[Tri], visible: &[[[f32; 3]; 3]], 
     let mut changed: Vec<(usize, Vec<[[f32; 3]; 3]>)> = Vec::new();
     let mut moved: HashMap<[i32; 3], [f32; 3]> = HashMap::default();
     let mut cover: Vec<u32> = Vec::new();
+    let partners: std::collections::HashSet<usize> = used.iter().map(|u| u.partner).collect();
     for i in 0..tris.len() {
         let t = tris[i].v;
         let n = normal(&t);
@@ -592,11 +598,30 @@ fn replace_park(tris: &mut Vec<Tri>, stairs: &[Tri], visible: &[[[f32; 3]; 3]], 
             vlo.cmple(thi).all() && vhi.cmpge(tlo).all() && normal(&u.v).dot(n) > FACING
         });
         if cover.is_empty() { continue; }
-        let pieces = cut(&t, cover.iter().map(|&k| &used[k as usize]));
+        // A chord the curve replaces goes whole: where the flat chord lies
+        // farther from the curve than a cover's limit, pockets of it stayed
+        // standing in the bowl (connector marks 1103-1..8, M21; design
+        // 2026-11-03-replaced-chord-pockets).
+        let pieces = if partners.contains(&i) {
+            let wide: Vec<Used> = cover.iter().map(|&k| &used[k as usize])
+                .map(|u| Used { v: u.v, partner: u.partner, limit: if normal(&u.v).dot(n) >= CURVE_FACING { u.limit.max(POCKET_REACH) } else { u.limit } })
+                .collect();
+            cut_along(&t, wide.iter(), true)
+        } else {
+            cut(&t, cover.iter().map(|&k| &used[k as usize]))
+        };
         if pieces.len() == 1 && pieces[0] == t { continue; }
         // Snapping can squeeze a piece into a sliver: those go too (they
         // broke the lip test of a park curb, 2026-10-26).
-        let snapped: Vec<[[f32; 3]; 3]> = pieces.iter().map(|p| p.map(|q| snap(q, &used, &vis_grid)))
+        let snapped: Vec<[[f32; 3]; 3]> = pieces.iter().map(|p| {
+                // A piece is flat in its face before snapping; snapping that
+                // turns it away from the face folds it onto the visible
+                // footprints' edges (shards standing in the bowl: connector
+                // marks 1103-1..8, M21; Manatros 2026-11-03). Such a piece
+                // keeps its own corners.
+                let s = p.map(|q| snap(q, &used, &vis_grid));
+                if normal(&s).dot(n) >= SNAP_FOLD { s } else { *p }
+            })
             .filter(|t| {
                 let p = t.map(v3);
                 let area = (p[1] - p[0]).cross(p[2] - p[0]).length() / 2.0;
@@ -617,7 +642,13 @@ fn replace_park(tris: &mut Vec<Tri>, stairs: &[Tri], visible: &[[[f32; 3]; 3]], 
         if done.contains(&i) { continue; }
         let t = tris[i].v;
         if !t.iter().any(|&p| moved.contains_key(&quant(p))) { continue; }
-        changed.push((i, vec![t.map(|p| moved.get(&quant(p)).copied().unwrap_or(p))]));
+        // A floor sharing a corner with a wall that snapping moved up must not
+        // be pulled up with it (Manatros 2026-11-03: "a vertex placed too high
+        // at the walls, so the floor curves up there"): a neighbour the move
+        // would turn keeps its own corners.
+        let m = t.map(|p| moved.get(&quant(p)).copied().unwrap_or(p));
+        if normal(&m).dot(normal(&t)) < SNAP_FOLD { continue; }
+        changed.push((i, vec![m]));
     }
     for u in &used {
         out.added.push(Tri { v: u.v, material: tris[u.partner].material });
@@ -655,6 +686,14 @@ fn bounds(t: &[[f32; 3]; 3], widen: f32) -> (Vec3, Vec3) {
 /// it lies within `MATCH` of that plane (a convex region). The rest comes back
 /// as triangles in `t`'s plane; pieces too small to stand on are dropped.
 fn cut<'a>(t: &[[f32; 3]; 3], cover: impl Iterator<Item = &'a Used>) -> Vec<[[f32; 3]; 3]> {
+    cut_along(t, cover, false)
+}
+
+/// As [`cut`]; with `square` each visible triangle is projected along `t`'s
+/// own normal (a chord the curve replaces: over a convex crease, projecting
+/// each face along its own normal leaves a wedge of the chord uncovered,
+/// M21), and its limit is measured along that normal too.
+fn cut_along<'a>(t: &[[f32; 3]; 3], cover: impl Iterator<Item = &'a Used>, square: bool) -> Vec<[[f32; 3]; 3]> {
     let [a, b, c] = t.map(v3);
     let n = (b - a).cross(c - a).normalize();
     let eu = (b - a).normalize();
@@ -670,8 +709,12 @@ fn cut<'a>(t: &[[f32; 3]; 3], cover: impl Iterator<Item = &'a Used>) -> Vec<[[f3
         let nv = normal(v);
         let along = nv.dot(n);
         if along <= FACING { continue; }
-        // Visible corners projected along nv onto t's plane.
-        let x: Vec<Vec2> = v.iter().map(|&p| { let p = v3(p); to2(p - nv * ((p - a).dot(n) / along)) }).collect();
+        // Visible corners projected along nv (or n) onto t's plane.
+        let dir = if square { n } else { nv };
+        let x: Vec<Vec2> = v.iter().map(|&p| { let p = v3(p); to2(p - dir * ((p - a).dot(n) / dir.dot(n))) }).collect();
+        // Along n, the visible plane's height over t is s/along: the same
+        // limit along n is limit*along along nv.
+        let limit = if square { limit * along } else { limit };
         // Half-planes (point, inward normal) of the region: the projected
         // triangle's edges, then |signed distance along nv| <= MATCH.
         let ccw = (x[1] - x[0]).perp_dot(x[2] - x[0]);
