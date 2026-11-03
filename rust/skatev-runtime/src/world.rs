@@ -917,8 +917,10 @@ const RAIL_STEP: f32 = 0.05;
 /// apart, index 0 at -RAIL_REACH): a run is neighbouring samples that step
 /// less than `RAIL_DROP` (a rail's head on its foot is one run, a gap or a
 /// drop ends it); its head is the samples within 1 cm of its top, as the
-/// +-8 cm rule takes them. (middle offset, width, top) of each run that does
-/// not touch either end of the row and whose head is at most `RAIL_HEAD_MAX`.
+/// +-8 cm rule takes them. (middle offset, width, top) of each head piece
+/// (neighbouring head samples) of a run that does not touch either end of the
+/// row, has nothing or something lower beside it (a groove beside a rail or a
+/// curb is no rail) and is at most `RAIL_HEAD_MAX` wide.
 fn rail_heads(row: &[Option<f32>]) -> Vec<(f32, f32, f32)> {
     let mut out = Vec::new();
     let mut i = 0;
@@ -933,12 +935,19 @@ fn rail_heads(row: &[Option<f32>]) -> Vec<(f32, f32, f32)> {
         let end = i - 1;
         if start == 0 || end + 1 == row.len() { continue; }
         let top = row[start..=end].iter().flatten().fold(f32::MIN, |m, &z| m.max(z));
-        let head: Vec<usize> = (start..=end).filter(|&k| row[k].is_some_and(|z| z >= top - 0.01)).collect();
-        let (lo, hi) = (head[0], head[head.len() - 1]);
-        let width = (hi - lo) as f32 * RAIL_SAMPLE;
-        if width > RAIL_HEAD_MAX { continue; }
-        let middle = head.iter().sum::<usize>() as f32 / head.len() as f32 * RAIL_SAMPLE - RAIL_REACH;
-        out.push((middle, width, top));
+        let higher = |k: usize| row[k].is_some_and(|z| z > top - RAIL_DROP);
+        if higher(start - 1) || higher(end + 1) { continue; }
+        let mut k = start;
+        while k <= end {
+            if !row[k].is_some_and(|z| z >= top - 0.01) { k += 1; continue; }
+            let lo = k;
+            while k + 1 <= end && row[k + 1].is_some_and(|z| z >= top - 0.01) { k += 1; }
+            let width = (k - lo) as f32 * RAIL_SAMPLE;
+            if width <= RAIL_HEAD_MAX {
+                out.push(((lo + k) as f32 * 0.5 * RAIL_SAMPLE - RAIL_REACH, width, top));
+            }
+            k += 1;
+        }
     }
     out
 }
@@ -977,6 +986,9 @@ fn onto_rail_boxes_indexed(lines: Vec<Vec<Vec3>>, gta: &[[Vec3; 3]], grid: &crat
         .flat_map(|line| {
             if line.len() < 2 { return Vec::new(); }
             let widths = std::cell::RefCell::new(Vec::new());
+            // Head widths alone: a line on a rail takes its edges from the
+            // heads, not from fallback slabs (peer review 2026-11-03).
+            let head_widths = std::cell::RefCell::new(Vec::new());
             // The last point that found a rail head, and the head's offset.
             let mut previous: Option<(Vec3, f32)> = None;
             let snapped: Vec<Option<Vec3>> = (0..line.len())
@@ -995,12 +1007,16 @@ fn onto_rail_boxes_indexed(lines: Vec<Vec<Vec3>>, gta: &[[Vec3; 3]], grid: &crat
                     }).collect();
                     let want = previous.filter(|(q, _)| q.distance(p) < 2.0).map(|(_, o)| o);
                     let aim = want.unwrap_or(0.0);
-                    let head = rail_heads(&row).into_iter()
+                    let heads = rail_heads(&row);
+                    let head = heads.iter().copied()
                         .filter(|h| want.is_none_or(|w| (h.0 - w).abs() <= RAIL_STEP))
                         .min_by(|x, y| (x.0 - aim).abs().total_cmp(&(y.0 - aim).abs()).then(x.0.abs().total_cmp(&y.0.abs())));
+                    // Heads, but none on this line's steel (a frog, a joint):
+                    // interpolated, not the +-8 cm rule that may take the other one.
+                    if head.is_none() && want.is_some() && !heads.is_empty() { return None; }
                     if let Some((middle, width, top)) = head {
                         previous = Some((p, middle));
-                        widths.borrow_mut().push(width);
+                        head_widths.borrow_mut().push(width);
                         let q = p.truncate() + side * middle;
                         return Some(Vec3::new(q.x, q.y, top + RAIL_CLEAR));
                     }
@@ -1039,7 +1055,8 @@ fn onto_rail_boxes_indexed(lines: Vec<Vec<Vec3>>, gta: &[[Vec3; 3]], grid: &crat
             // Both edges of the rail head grindable (Manatros 2026-10-24/25:
             // "the track rails should have 2 separate grindable edges"); a
             // head narrower than EDGE_MIN keeps one line on its middle.
-            let mut w = widths.into_inner();
+            let mut w = head_widths.into_inner();
+            if w.is_empty() { w = widths.into_inner(); }
             w.sort_by(f32::total_cmp);
             let half = w.get(w.len() / 2).copied().unwrap_or(0.0) * 0.5;
             if half * 2.0 < EDGE_MIN { return vec![result]; }
@@ -2912,6 +2929,12 @@ mod top_tests {
         gta.extend(strip(0.10, 0.17, 0.17));
         gta.extend(strip(-0.6, -0.12, 0.25));
         assert!((centre(&onto_rail_boxes(line(), &gta)) - 0.135).abs() < 0.011);
+        // A groove nearer the line between a slab and the rail is no rail.
+        let mut gta = bed();
+        gta.extend(strip(0.10, 0.17, 0.17));
+        gta.extend(strip(-0.06, -0.01, 0.06));
+        gta.extend(strip(-0.6, -0.06, 0.16));
+        assert!((centre(&onto_rail_boxes(line(), &gta)) - 0.135).abs() < 0.011, "groove taken: {}", centre(&onto_rail_boxes(line(), &gta)));
     }
 
     #[test]
