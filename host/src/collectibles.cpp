@@ -53,6 +53,8 @@ constexpr const char* kMusicModels[] = {"prop_cs_cassette", "prop_cassette_01", 
 util::LogFn g_log = nullptr;
 std::wstring g_placesPath, g_progressPath, g_songsDir;
 std::vector<Item> g_items;
+std::vector<Item> g_lineBoards;  // one board per trick line (rev 4)
+LineRun g_line;                  // the line being ridden
 Progress g_progress;
 std::map<std::string, int> g_blips;
 std::deque<std::string> g_notices;
@@ -233,15 +235,12 @@ void Earn(const Item& it) {
     std::string reward, text;
     const auto mine = g_assigned.find(it.id);
     if (it.kind == Kind::Board) {
-        // Its own complete board (collectibles v3): the deck unlocked and the
-        // board in the garage.
-        if (g_partsAssigned && mine != g_assigned.end() && !mine->second.key.empty() && boardshop::Unlock(mine->second.key) >= 0) {
-            const std::string title = boardshop::GiveBoard(mine->second.key);
-            if (!title.empty()) {
-                reward = "board:" + mine->second.key;
-                text = "A complete board in your garage: " + title;
-                g_unlockedKeys.insert(mine->second.key);
-            }
+        // A complete board (collectibles v3 rev 4): its deck unlocked, so the
+        // shop's complete boards with it can be bought; nothing is given.
+        if (g_partsAssigned && mine != g_assigned.end() && !mine->second.key.empty() && boardshop::Unlock(mine->second.key) == 1) {
+            reward = "board:" + mine->second.key;
+            text = "Complete board unlocked in the skate shop: " + mine->second.title;
+            g_unlockedKeys.insert(mine->second.key);
         }
     } else if (it.kind == Kind::Part) {
         // Its own deck or griptape (design 2026-11-02-collectibles-v2); one
@@ -298,6 +297,7 @@ void Earn(const Item& it) {
 // Whether `it` shows its item: its key or track is still to earn (a song
 // only when its file exists, so it never shows what it cannot give).
 bool ShowsItem(const Item& it, const std::vector<int>& earnedSongs) {
+    if (it.kind == Kind::Line) return false;  // waypoints show a marker only
     const auto a = g_assigned.find(it.id);
     if (a == g_assigned.end()) return false;
     if (GivesParts(it.kind)) return g_partsAssigned && !a->second.models.empty() && !g_unlockedKeys.count(a->second.key);
@@ -424,7 +424,9 @@ void SyncShop() {
     if (g_faulty || g_items.empty()) return;
     int parts = 0, earned = 0;
     int boards = 0;
+    g_lineBoards = LineBoards(g_items);
     for (const Item& it : g_items) parts += GivesParts(it.kind), boards += it.kind == Kind::Board;
+    parts += static_cast<int>(g_lineBoards.size()), boards += static_cast<int>(g_lineBoards.size());
     earned = static_cast<int>(EarnedKeys(g_progress).size());
     int locked = boardshop::SetSecrets(parts, boards);
     const std::string list = boardshop::SecretList();
@@ -439,7 +441,9 @@ void SyncShop() {
         // An older runtime: as many as were earned, in the same order as before.
         while (locked > parts - earned && !boardshop::UnlockNext().empty()) --locked;
     }
-    g_assigned = Assign(g_items, list);
+    std::vector<Item> withLines = g_items;
+    withLines.insert(withLines.end(), g_lineBoards.begin(), g_lineBoards.end());
+    g_assigned = Assign(withLines, list);
     Log(std::string("each collectible holds its item") + (g_partsAssigned ? "" : " (songs only: the runtime lists no secrets)"));
 }
 
@@ -469,7 +473,9 @@ std::string Reset() {
     return "Collectibles reset: " + Summary() + ". Bought parts stay in your garage. Settings > Audio > Perform Quick Scan to update Self Radio.";
 }
 
-void Tick(bool enabled, bool skating, bool popups, const float (&skater)[3], int ped, bool inAir) {
+void Tick(bool enabled, bool skating, bool popups, const float (&skater)[3], int ped, const char* state) {
+    const std::string stateName(state ? state : "");
+    const bool inAir = BoardInAir(stateName);
     g_popups = popups;
     // The burst's effect loaded ahead of the first collect.
     if (enabled && !g_items.empty() && !Call<bool>(HAS_NAMED_PTFX_ASSET_LOADED, kBurstAsset))
@@ -493,7 +499,45 @@ void Tick(bool enabled, bool skating, bool popups, const float (&skater)[3], int
     const bool sight = now >= g_nextSight;
     const Item* nearestHidden = nullptr;
     float nearestHiddenDist = kFindRange;
+    // Trick lines (rev 4): the first waypoint of each line not yet earned, or
+    // the next one of the line being ridden; each leg within kLegMs, no bail.
+    {
+        std::string hitLine;
+        int hitStep = 0, steps = 0;
+        for (const Item& it : g_items) {
+            if (it.kind != Kind::Line) continue;
+            const std::string line = LineGroup(it.id);
+            if (StateOf(g_progress, line) == State::Collected) continue;
+            const int step = LineStep(it.id);
+            const bool current = g_line.line.empty() ? step == 1 : (line == g_line.line && step == g_line.next);
+            if (!current) continue;
+            const float dx = it.x - me.x, dy = it.y - me.y, dz = it.z - me.z;
+            const float d = std::sqrt(dx * dx + dy * dy + dz * dz);
+            if (d <= kDrawRange) Draw(it, d, true, true);
+            if (skating && g_hadSkater && (!it.air || inAir)) {
+                const float c[3] = {it.x, it.y, it.z - kRootBelow};
+                if (SegmentHits(g_prev, skater, c, it.air ? kAirReach : kReach)) hitLine = line, hitStep = step;
+            }
+        }
+        if (!hitLine.empty() || !g_line.line.empty()) {
+            for (const Item& it : g_items)
+                if (it.kind == Kind::Line && LineGroup(it.id) == (hitLine.empty() ? g_line.line : hitLine)) steps = std::max(steps, LineStep(it.id));
+            const std::string riding = g_line.line;
+            const int next = g_line.next;
+            switch (LineUpdate(g_line, hitLine, hitStep, steps, now, !skating || stateName.rfind("Wipeout", 0) == 0)) {
+                case LineEvent::Started: Notice("Trick line started: " + std::to_string(steps) + " waypoints, ride through each within " + std::to_string(kLegMs / 1000) + " s"); break;
+                case LineEvent::Next: Notice("Trick line: " + std::to_string(next) + "/" + std::to_string(steps)); break;
+                case LineEvent::Failed: Notice("Trick line failed: start again at its first waypoint"); break;
+                case LineEvent::Done:
+                    for (const Item& b : g_lineBoards)
+                        if (b.id == riding) Earn(b);
+                    break;
+                case LineEvent::None: break;
+            }
+        }
+    }
     for (const Item& it : g_items) {
+        if (it.kind == Kind::Line) continue;
         const State st = StateOf(g_progress, it.id);
         if (st == State::Collected) continue;
         const float dx = it.x - me.x, dy = it.y - me.y, dz = it.z - me.z;
@@ -528,10 +572,15 @@ const char* TakeNotice() {
 std::string Summary() {
     int all = 0, got = 0, parts = 0, partsGot = 0, songs = 0, songsGot = 0;
     for (const Item& it : g_items) {
+        if (it.kind == Kind::Line) continue;  // counted once per line below
         const bool done = StateOf(g_progress, it.id) == State::Collected;
         ++all, got += done;
         if (GivesParts(it.kind)) ++parts, partsGot += done;
         else ++songs, songsGot += done;
+    }
+    for (const Item& line : g_lineBoards) {
+        const bool done = StateOf(g_progress, line.id) == State::Collected;
+        ++all, got += done, ++parts, partsGot += done;
     }
     char text[128];
     std::snprintf(text, sizeof(text), "Collectibles: %d/%d (parts %d/%d, songs %d/%d)", got, all, partsGot, parts, songsGot, songs);

@@ -11,8 +11,10 @@ namespace collectibles {
 
 // A board (collectibles v3, design 2026-11-03-collectibles-v3) gives a deck,
 // griptape, trucks and wheels at once; it counts as a part everywhere else.
-enum class Kind { Part, Song, Board };
-inline bool GivesParts(Kind k) { return k != Kind::Song; }
+// A line waypoint (rev 4): rows "L01-1", "L01-2", ... of one trick line,
+// ridden through in order; the whole line earns a board.
+enum class Kind { Part, Song, Board, Line };
+inline bool GivesParts(Kind k) { return k == Kind::Part || k == Kind::Board; }
 
 struct Item {
     std::string id;
@@ -81,6 +83,26 @@ struct Assigned {
 std::map<std::string, Assigned> Assign(const std::vector<Item>& items, const std::string& secretList);
 // The shop keys earned so far: rewards "part:<key>" and "board:<k1>,<k2>,...".
 std::vector<std::string> EarnedKeys(const Progress& p);
+
+// Trick lines (collectibles v3 rev 4). The line of a waypoint id ("L01-2" ->
+// "L01") and its step (2); 0 when the id has no step.
+std::string LineGroup(const std::string& id);
+int LineStep(const std::string& id);
+// One board item per trick line (id = the line, at its first waypoint), so the
+// lines get their boards from Assign like any other board.
+std::vector<Item> LineBoards(const std::vector<Item>& items);
+
+// A line being ridden: which line, the next step (1-based), when the leg began.
+struct LineRun {
+    std::string line;
+    int next = 0;
+    unsigned legStart = 0;
+};
+inline constexpr unsigned kLegMs = 8000;  // each leg within this
+enum class LineEvent { None, Started, Next, Done, Failed };
+// One frame: `hitLine`/`hitStep` the waypoint passed now ("" / 0 for none),
+// `steps` that line's step count, `bailed` a wipeout or off the board.
+LineEvent LineUpdate(LineRun& run, const std::string& hitLine, int hitStep, int steps, unsigned now, bool bailed);
 
 // Whether Skate's state (SvOutput::state_utf8) is the board in the air: not
 // grinding, walking or wiping out (an air collectible counts only then).

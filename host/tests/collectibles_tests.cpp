@@ -135,6 +135,27 @@ int main() {
     assert(BoardInAir("PhysicsAir") && BoardInAir("KnownAir") && BoardInAir("PhysicsAirSecondary"));
     assert(!BoardInAir("PhysicsGround") && !BoardInAir("GrindFiveO") && !BoardInAir("BipedGround") && !BoardInAir("WipeoutAir"));
 
+    // Trick lines (rev 4).
+    const auto lines = ParsePlaces("L01-1\tline\t1\t2\t3\tVespucci\nL01-2\tline\t4\t5\t6\tVespucci\tair\nL01-3\tline\t7\t8\t9\tVespucci\n");
+    assert(lines.size() == 3 && lines[0].kind == Kind::Line && lines[1].air);
+    assert(LineGroup("L01-2") == "L01" && LineStep("L01-2") == 2 && LineStep("C01") == 0);
+    const auto lb = LineBoards(lines);
+    assert(lb.size() == 1 && lb[0].id == "L01" && lb[0].kind == Kind::Board);
+    LineRun run;
+    assert(LineUpdate(run, "L01", 2, 3, 100, false) == LineEvent::None);  // not from the middle
+    assert(LineUpdate(run, "L01", 1, 3, 100, false) == LineEvent::Started && run.next == 2);
+    assert(LineUpdate(run, "", 0, 3, 5000, false) == LineEvent::None);
+    assert(LineUpdate(run, "L01", 2, 3, 5000, false) == LineEvent::Next && run.next == 3);
+    assert(LineUpdate(run, "L01", 3, 3, 9000, false) == LineEvent::Done && run.line.empty());
+    LineRun slow;
+    LineUpdate(slow, "L01", 1, 3, 0, false);
+    assert(LineUpdate(slow, "", 0, 3, kLegMs + 1, false) == LineEvent::Failed);
+    LineRun bail;
+    LineUpdate(bail, "L01", 1, 3, 0, false);
+    assert(LineUpdate(bail, "", 0, 3, 10, true) == LineEvent::Failed);
+    // A board earned unlocks only its deck (rev 4): the reward names the deck.
+    assert(PopupEarned("board:deck:a:1", "Deck A") == "Board unlocked: Deck A");
+
     std::cout << "collectibles tests passed\n";
     return 0;
 }

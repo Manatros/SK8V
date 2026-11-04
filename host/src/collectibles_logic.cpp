@@ -62,6 +62,7 @@ std::vector<Item> ParsePlaces(const std::string& text) {
         if (f[1] == "part") it.kind = Kind::Part;
         else if (f[1] == "song") it.kind = Kind::Song;
         else if (f[1] == "board") it.kind = Kind::Board;
+        else if (f[1] == "line") it.kind = Kind::Line;
         else continue;
         it.air = f.size() > 6 && Trim(f[6]) == "air";
         if (it.id.empty() || !Number(f[2], it.x) || !Number(f[3], it.y) || !Number(f[4], it.z)) continue;
@@ -271,6 +272,57 @@ std::vector<FileOp> SongPlan(const std::vector<SongFile>& files, const Progress&
 std::string PopupFound(Kind kind) {
     if (kind == Kind::Board) return "Hidden board found";
     return kind == Kind::Part ? "Hidden board part found" : "Hidden song found";
+}
+
+std::string LineGroup(const std::string& id) {
+    const size_t dash = id.rfind('-');
+    return dash == std::string::npos ? id : id.substr(0, dash);
+}
+
+int LineStep(const std::string& id) {
+    const size_t dash = id.rfind('-');
+    return dash == std::string::npos ? 0 : std::atoi(id.c_str() + dash + 1);
+}
+
+std::vector<Item> LineBoards(const std::vector<Item>& items) {
+    std::map<std::string, Item> first;
+    for (const Item& it : items) {
+        if (it.kind != Kind::Line || LineStep(it.id) != 1) continue;
+        Item board = it;
+        board.id = LineGroup(it.id);
+        board.kind = Kind::Board;
+        board.air = false;
+        first[board.id] = board;
+    }
+    std::vector<Item> out;
+    for (auto& [id, it] : first) out.push_back(it);
+    return out;
+}
+
+LineEvent LineUpdate(LineRun& run, const std::string& hitLine, int hitStep, int steps, unsigned now, bool bailed) {
+    if (!run.line.empty()) {
+        if (bailed || now - run.legStart > kLegMs) {
+            run = LineRun{};
+            return LineEvent::Failed;
+        }
+        if (hitLine == run.line && hitStep == run.next) {
+            if (run.next >= steps) {
+                run = LineRun{};
+                return LineEvent::Done;
+            }
+            ++run.next;
+            run.legStart = now;
+            return LineEvent::Next;
+        }
+        return LineEvent::None;
+    }
+    if (!bailed && hitStep == 1 && !hitLine.empty() && steps > 1) {
+        run.line = hitLine;
+        run.next = 2;
+        run.legStart = now;
+        return LineEvent::Started;
+    }
+    return LineEvent::None;
 }
 
 bool BoardInAir(const std::string& state) {

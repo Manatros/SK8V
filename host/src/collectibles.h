@@ -21,9 +21,9 @@ void SyncShop();
 // `popups`: Skate's HUD shows now (skating, HUD on, not filming), so the
 // moments use Skate's centre popups instead of GTA notices;
 // `skater`: the skater's root; `ped`: the player ped (ignored by the sight line).
-// `inAir`: the board has left the ground (Skate's state; air collectibles
-// count only then, design 2026-11-03-collectibles-v3).
-void Tick(bool enabled, bool skating, bool popups, const float (&skater)[3], int ped, bool inAir);
+// `state`: Skate's state name (SvOutput::state_utf8): air collectibles count
+// only in the air, a trick line fails on a wipeout (design 2026-11-03-collectibles-v3).
+void Tick(bool enabled, bool skating, bool popups, const float (&skater)[3], int ped, const char* state);
 
 // A message for the player, once; nullptr when there is none.
 const char* TakeNotice();

@@ -4887,7 +4887,7 @@ void ScriptMain() {
             const float root[3] = {s.last.skater_position.x, s.last.skater_position.y, s.last.skater_position.z};
             const bool popups = g_config.skateHud && s.state == LifeState::Skating && s.action == 0 && !replay::Active();  // not filming
             if (!replay::Active()) collectibles::Tick(g_config.collectibles, riding, popups, root, Call<int>(gta::PLAYER_PED_ID),
-                                                       collectibles::BoardInAir(s.last.state_utf8));
+                                                       s.last.state_utf8);
             if (const char* notice = collectibles::TakeNotice()) Notify(s, notice, 6000);
         }
         // M while skating: GTA's own interaction menu. It did not open because
