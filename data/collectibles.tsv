@@ -1,4 +1,4 @@
-# GTAxSkate collectibles, scripts/collectibles/place3.py rules v3 seed 20261103
+# GTAxSkate collectibles, scripts/collectibles/place3.py rules v3b seed 20261103
 id	kind	x	y	z	place	air
 D001	board	-1378.22	-1414.78	4.39	Vespucci Beach Skatepark	
 D002	board	308.03	-210.55	62.18	Hawick Skate Spot	
@@ -40,114 +40,132 @@ D037	board	1663.86	4655.49	47.88	Grapeseed
 D038	board	-25.60	6396.81	32.55	Paleto Bay	
 D039	board	1665.18	-82.64	172.91	Land Act Dam	
 D040	board	2712.64	1568.30	25.00	Palmer-Taylor Power Station	
-D041	song	779.05	199.76	84.43	Scattered (Vinewood)	
-D042	song	-1897.32	616.70	129.50	Scattered (Pacific Bluffs)	
-D043	song	-847.75	551.68	95.97	Scattered (Rockford Hills)	
-D044	song	-529.83	5297.38	75.44	Scattered (Raton Canyon)	
-D045	song	5.43	1034.15	220.04	Scattered (Vinewood Hills)	
-D046	song	-1113.24	328.66	67.02	Scattered (Rockford Hills)	
-D047	song	1119.63	-1010.05	45.72	Scattered (East Los Santos)	
-D048	song	835.90	-104.17	81.13	Scattered (Vinewood)	
-D049	song	-738.99	-384.46	36.22	Scattered (Rockford Hills)	
-D050	song	-722.96	72.21	60.62	Scattered (Rockford Hills)	
-D051	song	1548.36	-2167.09	78.10	Scattered (Port)	
-D052	song	-89.90	428.89	114.02	Scattered (Vinewood)	
-D053	song	-901.16	-2244.25	7.74	Scattered (Airport)	
-D054	song	-456.69	-1014.11	24.52	Scattered (Downtown)	
-D055	song	477.63	-1896.85	26.09	Scattered (South Los Santos)	
-D056	song	-400.11	547.02	124.45	Scattered (Vinewood Hills)	
-D057	song	2631.61	2939.11	42.21	Scattered (Grand Senora Desert)	
-D058	song	1289.25	289.73	82.99	Scattered (Vinewood)	
-D059	song	-1369.78	622.18	135.06	Scattered (Rockford Hills)	
-D060	song	2856.21	4234.19	50.67	Scattered (Sandy Shores)	
-D061	song	1153.86	2359.71	56.34	Scattered (Grand Senora Desert)	
-D062	song	166.94	2797.95	50.70	Scattered (Harmony)	
-D063	song	817.53	-1786.54	22.07	Scattered (South Los Santos)	
-D064	song	1670.05	6412.26	31.06	Scattered (Mount Gordo)	
-D065	song	-930.08	-1248.35	8.61	Scattered (Vespucci)	
-D066	song	1192.46	-3107.71	6.26	Scattered (Port)	
-D067	song	1662.10	4971.90	43.37	Scattered (Grapeseed)	
-D068	song	-209.90	2558.79	54.00	Scattered (Great Chaparral)	
-D069	song	-613.18	-705.75	31.14	Scattered (Rockford Hills)	
-D070	song	-1354.11	116.35	56.71	Scattered (Rockford Hills)	
-D071	song	-1017.44	-1901.82	14.05	Scattered (Vespucci)	
-D072	song	1361.19	1150.60	114.39	Scattered (Grand Senora Desert)	
-D073	song	221.96	512.97	141.28	Scattered (Vinewood)	
-D074	song	-1151.67	2651.44	18.22	Scattered (Great Chaparral)	
-D075	song	-112.66	6107.54	38.88	Scattered (Paleto Bay)	
-D076	song	784.59	-2950.15	6.72	Scattered (Port)	
-D077	song	789.74	2161.99	53.00	Scattered (Harmony)	
-D078	song	1146.04	2046.27	59.83	Scattered (Grand Senora Desert)	
-D079	song	2555.82	515.55	108.66	Scattered (Tataviam Mountains)	
-D080	song	112.79	3889.98	27.13	Scattered (Raton Canyon)	
-D081	song	1422.29	3682.88	34.91	Scattered (Sandy Shores)	
-D082	part	219.43	100.45	97.76	Scattered (Vinewood)	air
-D083	part	1244.72	6890.77	-25.69	Scattered (Paleto Bay)	air
-D084	part	1863.14	3859.20	37.04	Scattered (Sandy Shores)	air
-D085	part	1088.19	-1761.29	35.91	Scattered (East Los Santos)	air
-D086	part	-1235.38	-177.69	44.34	Scattered (Rockford Hills)	air
-D087	part	2322.80	4011.00	28.71	Scattered (Sandy Shores)	air
-D088	part	-380.31	-93.49	42.68	Scattered (Rockford Hills)	air
-D089	part	-694.06	-2114.15	13.67	Scattered (Airport)	air
-D090	part	-839.11	-119.59	31.53	Scattered (Rockford Hills)	air
-D091	part	930.87	-3097.36	8.89	Scattered (Port)	air
-D092	part	335.91	-2758.26	10.26	Scattered (Port)	air
-D093	part	1240.04	-3282.19	13.48	Scattered (Port)	air
-D094	part	-1060.80	833.86	166.93	Scattered (Vinewood Hills)	air
-D095	part	-1147.24	-1521.40	8.08	Scattered (Vespucci)	air
-D096	part	416.74	-3056.10	-17.07	Scattered (Port)	air
-D097	part	-1900.00	-587.52	16.19	Scattered (Pacific Bluffs)	air
-D098	part	747.02	7394.68	-127.61	Scattered (Paleto Bay)	air
-D099	part	100.41	-254.51	51.44	Scattered (Vinewood)	air
-D100	part	1023.89	-1273.61	26.17	Scattered (East Los Santos)	air
-D101	part	-1206.18	5617.68	-5.80	Scattered (Paleto Bay)	air
-D102	part	-739.05	-2330.75	15.21	Scattered (Airport)	air
-D103	part	-256.35	6200.23	32.67	Scattered (Paleto Bay)	air
-D104	part	854.85	-2291.08	34.10	Scattered (Port)	air
-D105	part	-1058.94	-3563.22	4.96	Scattered (Airport)	air
-D106	part	-2038.52	519.67	107.11	Scattered (Pacific Bluffs)	air
-D107	part	146.69	-2161.51	13.80	Scattered (South Los Santos)	air
-D108	part	-2703.22	2418.99	3.91	Scattered (Tongva Hills)	air
-D109	part	-517.85	-316.96	40.10	Scattered (Rockford Hills)	air
-D110	part	371.88	-2517.15	7.96	Scattered (Port)	air
-D111	part	-1272.05	5978.08	-26.82	Scattered (Paleto Bay)	air
-D112	part	-1551.38	-442.16	38.72	Scattered (Del Perro)	air
-D113	part	-192.52	1559.81	322.24	Scattered (Vinewood Hills)	air
-D114	part	1225.18	-1666.37	45.80	Scattered (East Los Santos)	air
-D115	part	-553.28	2906.23	18.31	Scattered (Great Chaparral)	air
-D116	part	-246.15	-329.22	27.86	Scattered (Rockford Hills)	air
-D117	part	-2177.19	4290.12	52.44	Scattered (Raton Canyon)	air
-D118	part	-1155.43	-2298.88	14.18	Scattered (Airport)	air
-D119	part	804.15	-2495.57	25.17	Scattered (Port)	air
-D120	part	-722.93	-1063.40	13.49	Scattered (Vespucci)	air
-D121	part	4152.06	2546.46	-170.34	Scattered (Grand Senora Desert)	air
-D122	part	-295.38	-1092.63	28.45	Scattered (Downtown)	air
-D123	part	-3164.42	2183.29	-22.80	Scattered (Chumash)	air
-D124	part	-423.07	-1217.40	20.92	Scattered (Downtown)	air
-D125	part	13.43	132.81	91.46	Scattered (Vinewood)	air
-D126	part	2710.00	4898.52	32.62	Scattered (Mount Gordo)	air
-D127	part	2015.03	2930.11	53.32	Scattered (Grand Senora Desert)	air
-D128	part	-463.72	-600.24	29.73	Scattered (Rockford Hills)	air
-D129	part	1013.38	-46.92	82.09	Scattered (Vinewood)	air
-D130	part	425.01	40.77	93.86	Scattered (Vinewood)	air
-D131	part	560.62	-2174.80	10.31	Scattered (South Los Santos)	air
-D132	part	962.36	-1673.99	30.26	Scattered (East Los Santos)	air
-D133	part	-1405.96	-2301.38	14.14	Scattered (Airport)	air
-D134	part	752.66	-765.43	26.43	Scattered (East Los Santos)	air
-D135	part	-1787.81	5376.07	-9.10	Scattered (Raton Canyon)	air
-D136	part	-1265.22	-1306.99	6.78	Scattered (Vespucci)	air
-D137	part	-692.03	653.67	155.38	Scattered (Vinewood Hills)	air
-D138	part	-1639.39	-13.85	61.80	Scattered (Pacific Bluffs)	air
-D139	part	-1707.76	-472.54	41.84	Scattered (Del Perro)	air
-D140	part	530.71	7170.63	-33.95	Scattered (Paleto Bay)	air
-D141	part	1089.41	-2308.14	33.12	Scattered (Port)	air
-D142	part	187.84	-2891.25	7.99	Scattered (Port)	air
-D143	part	-3038.20	35.64	10.32	Scattered (Banham Canyon)	air
-D144	part	206.23	3506.95	34.01	Scattered (Harmony)	air
-D145	part	-144.39	4111.41	27.84	Scattered (Raton Canyon)	air
-D146	part	-249.48	-2444.51	6.20	Scattered (South Los Santos)	air
-D147	part	2347.75	4414.32	27.19	Scattered (Grapeseed)	air
-D148	part	3947.15	2822.35	-38.68	Scattered (Sandy Shores)	air
-D149	part	-457.87	4138.23	86.40	Scattered (Raton Canyon)	air
-D150	part	1148.94	3953.32	-11.86	Scattered (Sandy Shores)	air
-D151	part	837.59	-1995.13	31.72	Scattered (South Los Santos)	air
+D041	song	-529.83	5297.38	75.44	Scattered (Raton Canyon)	
+D042	song	-1113.24	328.66	67.02	Scattered (Rockford Hills)	
+D043	song	-738.99	-384.46	36.22	Scattered (Rockford Hills)	
+D044	song	244.75	1125.91	223.45	Scattered (Vinewood Hills)	
+D045	song	1548.36	-2167.09	78.10	Scattered (Port)	
+D046	song	-89.90	428.89	114.02	Scattered (Vinewood)	
+D047	song	-901.16	-2244.25	7.74	Scattered (Airport)	
+D048	song	-456.69	-1014.11	24.52	Scattered (Downtown)	
+D049	song	477.63	-1896.85	26.09	Scattered (South Los Santos)	
+D050	song	1289.25	289.73	82.99	Scattered (Vinewood)	
+D051	song	2856.21	4234.19	50.67	Scattered (Sandy Shores)	
+D052	song	817.53	-1786.54	22.07	Scattered (South Los Santos)	
+D053	song	1192.46	-3107.71	6.26	Scattered (Port)	
+D054	song	1662.10	4971.90	43.37	Scattered (Grapeseed)	
+D055	song	-209.90	2558.79	54.00	Scattered (Great Chaparral)	
+D056	song	-825.69	-25.73	40.06	Scattered (Rockford Hills)	
+D057	song	-1017.44	-1901.82	14.05	Scattered (Vespucci)	
+D058	song	221.96	512.97	141.28	Scattered (Vinewood)	
+D059	song	-1151.67	2651.44	18.22	Scattered (Great Chaparral)	
+D060	song	784.59	-2950.15	6.72	Scattered (Port)	
+D061	song	789.74	2161.99	53.00	Scattered (Harmony)	
+D062	song	2555.82	515.55	108.66	Scattered (Tataviam Mountains)	
+D063	song	112.79	3889.98	27.13	Scattered (Raton Canyon)	
+D064	song	1416.48	6333.34	25.03	Scattered (Mount Chiliad)	
+D065	song	2281.57	4535.65	27.26	Scattered (Grapeseed)	
+D066	song	-1062.96	738.56	166.13	Scattered (Rockford Hills)	
+D067	song	898.08	-3290.76	6.68	Scattered (Port)	
+D068	song	775.26	4188.47	41.68	Scattered (Grapeseed)	
+D069	song	356.92	6466.63	30.82	Scattered (Paleto Bay)	
+D070	song	-1828.53	804.26	139.99	Scattered (Tongva Hills)	
+D071	song	1453.97	3759.23	33.11	Scattered (Sandy Shores)	
+D072	song	2609.56	2787.53	34.86	Scattered (Grand Senora Desert)	
+D073	song	-1745.21	-703.11	11.04	Scattered (Del Perro)	
+D074	song	563.98	-2708.67	6.63	Scattered (Port)	
+D075	song	-189.01	6077.20	32.28	Scattered (Paleto Bay)	
+D076	song	1536.49	3356.47	38.82	Scattered (Sandy Shores)	
+D077	song	2535.22	-391.34	93.48	Scattered (Tataviam Mountains)	
+D078	song	-1057.72	-1356.72	6.48	Scattered (Vespucci)	
+D079	song	450.50	5575.88	782.14	Scattered (Mount Chiliad)	
+D080	song	537.61	3106.86	40.97	Scattered (Harmony)	
+D081	song	2933.61	4603.31	49.40	Scattered (Mount Gordo)	
+D082	part	2542.42	2147.15	19.92	Scattered (Grand Senora Desert)	
+D083	part	-2970.28	3432.46	10.36	Scattered (Tongva Hills)	
+D084	part	2090.38	4782.60	41.71	Scattered (Grapeseed)	
+D085	part	-1854.30	-980.85	-1.79	Scattered (Del Perro)	
+D086	part	-1452.90	866.90	184.09	Scattered (Tongva Hills)	
+D087	part	393.80	2579.20	44.02	Scattered (Harmony)	
+D088	part	860.67	-545.26	57.80	Scattered (East Los Santos)	
+D089	part	160.91	3101.94	42.73	Scattered (Harmony)	
+D090	part	-1284.19	836.04	190.63	Scattered (Tongva Hills)	
+D091	part	1011.38	-2969.01	6.40	Scattered (Port)	
+D092	part	1196.37	3043.17	41.03	Scattered (Harmony)	
+D093	part	-674.24	-2201.07	6.58	Scattered (Airport)	
+D094	part	-768.26	-1993.68	9.39	Scattered (Airport)	
+D095	part	1050.63	-2460.51	29.03	Scattered (Port)	
+D096	part	2525.18	5535.03	45.17	Scattered (Mount Gordo)	
+D097	part	2049.91	1472.51	76.16	Scattered (Grand Senora Desert)	
+D098	part	-1381.35	2423.46	28.24	Scattered (Tongva Hills)	
+D099	part	-995.76	-1123.59	2.67	Scattered (Vespucci)	
+D100	part	3009.81	3509.87	71.97	Scattered (Sandy Shores)	
+D101	part	2140.15	1950.88	94.31	Scattered (Grand Senora Desert)	
+D102	part	-1037.01	-2077.00	14.09	Scattered (Airport)	
+D103	part	2160.41	3845.22	30.89	Scattered (Sandy Shores)	
+D104	part	-536.20	6198.98	7.73	Scattered (Paleto Bay)	
+D105	part	2705.06	4188.70	44.28	Scattered (Sandy Shores)	
+D106	part	-375.40	-520.93	25.77	Scattered (Rockford Hills)	
+D107	part	2272.74	4996.83	43.13	Scattered (Grapeseed)	
+D108	part	131.51	-3087.68	6.39	Scattered (Port)	
+D109	part	689.73	-1540.20	10.21	Scattered (East Los Santos)	
+D110	part	2153.44	3507.66	45.70	Scattered (Sandy Shores)	
+D111	part	-508.31	5819.58	35.05	Scattered (Paleto Bay)	
+D112	part	1782.47	2928.71	46.25	Scattered (Grand Senora Desert)	
+D113	part	1669.13	3706.22	34.53	Scattered (Sandy Shores)	
+D114	part	-309.05	6197.13	32.00	Scattered (Paleto Bay)	
+D115	part	107.87	-1367.90	29.84	Scattered (South Los Santos)	
+D116	part	2175.77	2863.91	47.38	Scattered (Grand Senora Desert)	
+D117	part	1009.36	-1183.52	27.29	Scattered (East Los Santos)	air
+D118	part	125.17	-348.54	44.72	Scattered (Downtown)	air
+D119	part	-61.79	-1481.95	32.38	Scattered (South Los Santos)	air
+D120	part	572.60	-1771.72	30.05	Scattered (South Los Santos)	air
+D121	part	-2019.17	455.25	104.77	Scattered (Pacific Bluffs)	air
+D122	part	-449.78	4109.87	85.52	Scattered (Raton Canyon)	air
+D123	part	884.02	-894.08	26.32	Scattered (East Los Santos)	air
+D124	part	-249.48	-2444.51	6.20	Scattered (South Los Santos)	air
+D125	part	1909.67	2399.15	54.80	Scattered (Grand Senora Desert)	air
+D126	part	864.56	-1113.61	25.57	Scattered (East Los Santos)	air
+D127	part	-1692.24	-160.82	57.81	Scattered (Pacific Bluffs)	air
+D128	part	-35.92	-2178.75	9.93	Scattered (South Los Santos)	air
+D129	part	162.21	-574.36	21.55	Scattered (Downtown)	air
+D130	part	1216.88	6591.97	3.15	Scattered (Mount Chiliad)	air
+D131	part	-1391.10	339.31	64.34	Scattered (Rockford Hills)	air
+D132	part	-750.05	-1051.50	13.28	Scattered (Vespucci)	air
+D133	part	3899.33	2250.72	-154.43	Scattered (Grand Senora Desert)	air
+D134	part	368.25	-2522.32	8.55	Scattered (Port)	air
+D135	part	-1160.96	-2326.53	14.18	Scattered (Airport)	air
+D136	part	-296.61	-315.27	12.51	Scattered (Rockford Hills)	air
+D137	part	-2684.63	2422.39	3.91	Scattered (Tongva Hills)	air
+D138	part	-122.56	-2605.68	8.26	Scattered (South Los Santos)	air
+D139	part	2357.00	6649.51	1.91	Scattered (Mount Gordo)	air
+D140	part	919.43	3195.10	39.26	Scattered (Harmony)	air
+D141	part	-489.59	449.20	96.98	Scattered (Vinewood Hills)	air
+D142	part	-1256.41	-1145.66	9.32	Scattered (Vespucci)	air
+D143	part	29.40	333.50	113.99	Scattered (Vinewood)	air
+D144	part	4152.06	2546.46	-170.34	Scattered (Grand Senora Desert)	air
+D145	part	-725.30	-888.15	21.28	Scattered (Vespucci)	air
+D146	part	6.67	-1214.33	28.71	Scattered (Downtown)	air
+D147	part	981.81	-1797.68	33.25	Scattered (East Los Santos)	air
+D148	part	1100.98	-1643.57	30.62	Scattered (East Los Santos)	air
+D149	part	195.86	-2503.86	8.05	Scattered (Port)	air
+D150	part	-1024.38	514.22	84.22	Scattered (Rockford Hills)	air
+D151	part	70.75	840.85	190.34	Scattered (Vinewood Hills)	air
+L01-1	line	-1369.71	-1392.98	5.56	Vespucci Beach Skatepark trick line	
+L01-2	line	-1371.65	-1404.48	4.63	Vespucci Beach Skatepark trick line	air
+L01-3	line	-1362.71	-1415.20	5.28	Vespucci Beach Skatepark trick line	
+L02-1	line	-1362.71	-1415.20	5.28	Vespucci Beach Skatepark trick line	
+L02-2	line	-1367.66	-1430.92	4.70	Vespucci Beach Skatepark trick line	
+L02-3	line	-1377.14	-1440.54	4.66	Vespucci Beach Skatepark trick line	
+L03-1	line	296.03	-207.58	62.53	Hawick Skate Spot trick line	
+L03-2	line	297.24	-217.09	62.47	Hawick Skate Spot trick line	
+L03-3	line	286.34	-220.86	62.47	Hawick Skate Spot trick line	
+L04-1	line	286.34	-220.86	62.47	Hawick Skate Spot trick line	
+L04-2	line	267.67	-213.69	62.47	Hawick Skate Spot trick line	
+L04-3	line	272.38	-197.16	62.27	Hawick Skate Spot trick line	
+L05-1	line	-950.52	-796.27	21.53	Little Seoul Skate Spot trick line	
+L05-2	line	-939.79	-782.27	21.53	Little Seoul Skate Spot trick line	
+L05-3	line	-932.49	-787.87	21.53	Little Seoul Skate Spot trick line	
+L06-1	line	-244.80	-1581.56	34.58	Strawberry Halfpipe trick line	
+L06-2	line	-244.62	-1573.17	33.92	Strawberry Halfpipe trick line	air
+L06-3	line	-239.19	-1572.12	34.58	Strawberry Halfpipe trick line	
