@@ -73,6 +73,8 @@ public:
     bool ShopCharacter(const std::string& who);
     // Collectibles' secret shop items: still locked (-1 without the export), and the next unlock ("key\ttitle", empty: none).
     int ShopSecrets(int count);
+    // As ShopSecrets, `boards` secret decks first (collectibles v3); falls back to ShopSecrets.
+    int ShopSecretsBoards(int count, int boards);
     std::string ShopUnlockNext();
     // Collectibles v2: the secret list ("" without it), unlock by key and
     // relock all; -1 when the runtime lacks the export.
@@ -156,6 +158,8 @@ private:
     SvShopStartFn shopStart_ = nullptr;
     SvShopCharacterFn shopCharacter_ = nullptr;
     SvShopSecretsFn shopSecrets_ = nullptr;
+    using SvShopSecretsBoardsFn = uint32_t (*)(void*, uint32_t, uint32_t);
+    SvShopSecretsBoardsFn shopSecretsBoards_ = nullptr;
     SvShopUnlockNextFn shopUnlockNext_ = nullptr;
     SvShopSecretListFn shopSecretList_ = nullptr;
     SvShopUnlockFn shopUnlock_ = nullptr;

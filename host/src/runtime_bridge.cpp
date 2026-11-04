@@ -73,6 +73,7 @@ bool RuntimeBridge::Load(const wchar_t* dllPath, const std::string& dataRoot, co
     optional(shopStart_, "sv_shop_start");
     optional(shopCharacter_, "sv_shop_character");
     optional(shopSecrets_, "sv_shop_secrets");
+    optional(shopSecretsBoards_, "sv_shop_secrets_boards");
     optional(shopUnlockNext_, "sv_shop_unlock_next");
     optional(shopSecretList_, "sv_shop_secret_list");
     optional(shopUnlock_, "sv_shop_unlock");
@@ -330,6 +331,11 @@ bool RuntimeBridge::ShopStart(const std::string& assets, const std::string& gara
 
 bool RuntimeBridge::ShopCharacter(const std::string& who) {
     return runtime_ && shopCharacter_ && shopCharacter_(runtime_, who.c_str()) != 0;
+}
+
+int RuntimeBridge::ShopSecretsBoards(int count, int boards) {
+    if (!runtime_ || !shopSecretsBoards_) return ShopSecrets(count);
+    return static_cast<int>(shopSecretsBoards_(runtime_, static_cast<std::uint32_t>(count < 0 ? 0 : count), static_cast<std::uint32_t>(boards < 0 ? 0 : boards)));
 }
 
 int RuntimeBridge::ShopSecrets(int count) {

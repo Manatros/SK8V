@@ -423,9 +423,10 @@ void SyncShop() {
     // No places file: nothing to earn, so nothing is locked either.
     if (g_faulty || g_items.empty()) return;
     int parts = 0, earned = 0;
-    for (const Item& it : g_items) parts += GivesParts(it.kind);
+    int boards = 0;
+    for (const Item& it : g_items) parts += GivesParts(it.kind), boards += it.kind == Kind::Board;
     earned = static_cast<int>(EarnedKeys(g_progress).size());
-    int locked = boardshop::SetSecrets(parts);
+    int locked = boardshop::SetSecrets(parts, boards);
     const std::string list = boardshop::SecretList();
     g_partsAssigned = !list.empty();
     g_unlockedKeys.clear();

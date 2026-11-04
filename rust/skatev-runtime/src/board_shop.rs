@@ -260,6 +260,11 @@ impl BoardShop {
     /// `SkateVSecrets.txt`, or `count` chosen now from what can be sold and
     /// kept. Returns how many are still locked.
     pub fn set_secrets(&mut self, count: usize) -> usize {
+        self.set_secrets_with_boards(count, 0)
+    }
+
+    /// As `set_secrets`, with `boards` decks chosen first (collectibles v3).
+    pub fn set_secrets_with_boards(&mut self, count: usize, boards: usize) -> usize {
         let path = self.garages.join(crate::secrets::FILE);
         self.secrets = match std::fs::read_to_string(&path) {
             Ok(text) => crate::secrets::Secrets::from_text(&text),
@@ -284,10 +289,10 @@ impl BoardShop {
                     .filter_map(|offer| crate::secrets::key(&offer.goods))
                     .filter(|k| !on_boards.contains(k))
                     .collect();
-                let chosen = crate::secrets::Secrets::choose(keys, count);
+                let chosen = crate::secrets::Secrets::choose_with_decks(keys, count, boards);
                 for kind in ["deck", "grip", "trucks", "wheels"] {
                     let n = chosen.order().iter().filter(|k| k.split(':').next() == Some(kind)).count();
-                    eprintln!("secrets: {n} {kind} secret");
+                    if let Some(log) = crate::RUNTIME_LOG.get() { log(&format!("board shop secrets: {n} {kind} secret")); }
                 }
                 let _ = std::fs::write(&path, chosen.to_text());
                 chosen
@@ -356,6 +361,8 @@ impl BoardShop {
     /// Gives the complete board for the deck `key` (a board collectible,
     /// collectibles v3): into the garage and kept. Its title, None without a deck.
     pub fn give_board(&mut self, key: &str) -> Option<String> {
+        // No character yet: the garage would not be kept (re-review); the host retries.
+        if self.who.is_empty() { return None; }
         let board = self.board_for(key);
         board.get(Part::Deck)?;
         self.garage.add(&Goods::Complete(board));
@@ -993,6 +1000,13 @@ pub unsafe extern "C" fn sv_shop_character(_rt: *mut c_void, who: *const c_char)
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sv_shop_secrets(_rt: *mut c_void, count: u32) -> u32 {
     crate::guard(0, || with(0, |s| s.set_secrets(count as usize) as u32))
+}
+
+/// As `sv_shop_secrets`, with `boards` secret decks first (collectibles v3:
+/// one per board collectible).
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sv_shop_secrets_boards(_rt: *mut c_void, count: u32, boards: u32) -> u32 {
+    crate::guard(0, || with(0, |s| s.set_secrets_with_boards(count as usize, boards as usize) as u32))
 }
 
 /// Unlocks the next secret item (a collectible was earned) and writes

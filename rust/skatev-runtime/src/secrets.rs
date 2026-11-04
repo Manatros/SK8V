@@ -54,6 +54,12 @@ impl Secrets {
     /// most one in `KIND_SHARE` of the kind, taken in turn deck, grip,
     /// trucks, wheels so each kind gets its share of the collectibles.
     pub fn choose(keys: impl IntoIterator<Item = String>, count: usize) -> Self {
+        Self::choose_with_decks(keys, count, 0)
+    }
+
+    /// As `choose`, with the first `decks` secrets decks (one per board
+    /// collectible, collectibles v3 re-review), then the kinds in turn.
+    pub fn choose_with_decks(keys: impl IntoIterator<Item = String>, count: usize, decks: usize) -> Self {
         let all: BTreeSet<String> = keys.into_iter().collect();
         let mut kinds: Vec<Vec<String>> = KINDS.iter().map(|kind| {
             let mut of: Vec<String> = all.iter().filter(|k| k.split(':').next() == Some(*kind)).cloned().collect();
@@ -63,6 +69,10 @@ impl Secrets {
             of
         }).collect();
         let mut order = Vec::new();
+        while order.len() < decks.min(count) {
+            let Some(k) = kinds[0].pop() else { break };
+            order.push(k);
+        }
         while order.len() < count && kinds.iter().any(|k| !k.is_empty()) {
             for kind in &mut kinds {
                 if order.len() < count {
@@ -216,6 +226,20 @@ mod tests {
         assert_eq!(key(&Goods::Part(Part::Trucks, PartRef::new("truckmodel", "t1"))).as_deref(), Some("trucks:truckmodel:t1"));
         assert_eq!(key(&Goods::Part(Part::Wheels, PartRef::new(skate_boards::paints::ASSET, "paint_red"))), None);
         assert_eq!(key(&Goods::Sticker("s1".into())), None);
+    }
+
+    #[test]
+    fn boards_get_their_decks_first() {
+        // 41 boards and 70 parts against a shop of 300 decks, 21 grips, 30 trucks, 90 wheels.
+        let keys = (0..300).map(|i| format!("deck:m:{i}"))
+            .chain((0..21).map(|i| format!("grip:{i}")))
+            .chain((0..30).map(|i| format!("trucks:t:{i}")))
+            .chain((0..90).map(|i| format!("wheels:w:{i}")));
+        let s = Secrets::choose_with_decks(keys, 111, 41);
+        assert!(s.order[..41].iter().all(|k| k.starts_with("deck:")));
+        let of = |kind: &str| s.order[41..].iter().filter(|k| k.starts_with(kind)).count();
+        assert_eq!(s.order.len(), 111);
+        assert!(of("grip:") == 7 && of("trucks:") >= 10 && of("wheels:") >= 10, "parts get the scarce kinds");
     }
 
     #[test]

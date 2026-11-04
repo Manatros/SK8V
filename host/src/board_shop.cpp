@@ -627,9 +627,9 @@ bool IsOpen() {
     return g_open;
 }
 
-int SetSecrets(int count) {
+int SetSecrets(int count, int boards) {
     if (!g_ready || !g_rt) return -1;
-    const int locked = g_rt->ShopSecrets(count);
+    const int locked = g_rt->ShopSecretsBoards(count, boards);
     if (locked < 0) Log("board shop: the runtime has no secret items (collectibles unlock nothing there)");
     else Log("board shop: " + std::to_string(locked) + " secret item(s) still to find");
     return locked;
