@@ -179,7 +179,7 @@ void Unblip(const std::string& id) {
 
 void Draw(const Item& it, float distance, bool found, bool mark) {
     const float s = MarkerScale(distance);
-    const bool givesParts = GivesParts(it.kind);
+    const bool givesParts = GivesParts(it.kind) || it.kind == Kind::Line;  // line waypoints in part yellow
     const int r = givesParts ? 255 : 170, g = givesParts ? 200 : 70, b = givesParts ? 0 : 255;
     // Type 32: the question mark, bobbing and turning (not where the item itself shows).
     if (mark)
@@ -514,7 +514,10 @@ void Tick(bool enabled, bool skating, bool popups, const float (&skater)[3], int
             const float dx = it.x - me.x, dy = it.y - me.y, dz = it.z - me.z;
             const float d = std::sqrt(dx * dx + dy * dy + dz * dz);
             if (d <= kDrawRange) Draw(it, d, true, true);
-            if (skating && g_hadSkater && (!it.air || inAir)) {
+            // A rail waypoint counts only while grinding, a jump waypoint only in
+            // the air (rev 4 review: riding past is no trick).
+            const bool grinding = stateName.rfind("Grind", 0) == 0;
+            if (skating && g_hadSkater && (it.air ? inAir : grinding)) {
                 const float c[3] = {it.x, it.y, it.z - kRootBelow};
                 if (SegmentHits(g_prev, skater, c, it.air ? kAirReach : kReach)) hitLine = line, hitStep = step;
             }
