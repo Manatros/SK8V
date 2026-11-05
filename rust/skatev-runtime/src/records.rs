@@ -226,6 +226,9 @@ impl Records {
 
     /// Places a finished score; returns where it landed.
     pub fn add(&mut self, c: Category, score: u32, time: u64, log: &crate::worker::Log) -> Placement {
+        if score == 0 {
+            return Placement::default();
+        }
         let entry = Entry {
             score,
             character: self.context.character.clone(),
@@ -234,13 +237,13 @@ impl Records {
             time,
         };
         let placement = self.book.add(c, entry);
+        self.last = Event {
+            sequence: self.last.sequence.wrapping_add(1).max(1),
+            category: c as u32,
+            score,
+            placement,
+        };
         if placement.rank > 0 || placement.spot_rank > 0 {
-            self.last = Event {
-                sequence: self.last.sequence.wrapping_add(1).max(1),
-                category: c as u32,
-                score,
-                placement,
-            };
             log(&format!(
                 "records: {c:?} {score} by {} at {} -> rank {} overall, {} at the spot",
                 self.context.character, self.context.spot, placement.rank, placement.spot_rank

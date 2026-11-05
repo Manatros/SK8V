@@ -34,9 +34,12 @@ std::string Summary();
 const char* RouteToNearestFound();
 
 // Developer travel: the selected collectible, stepping and its place.
+struct TravelGuard;
 std::string SelectedLabel();
 void Step(int direction);
 bool SelectedPlace(float (&xyz)[3]);
+std::string RequestTravel(const TravelGuard& guard);
+void TickTravel(const TravelGuard& guard);
 
 // Removes blips and the items shown (script shutdown, Collectibles off).
 void Clear();

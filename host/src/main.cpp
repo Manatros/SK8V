@@ -3761,6 +3761,31 @@ void NormalizeTestWorldConfig(Config& c, bool enabled) {
 }
 std::string WorldLabel() { return "World collision: " + WorldState(g_config); }
 
+collectibles::TravelGuard CurrentTravelGuard(const Session& s, const Config& cfg) {
+    collectibles::TravelGuard g{};
+    const Ped ped = Call<Ped>(gta::PLAYER_PED_ID);
+    g.ped = ped;
+    if (ped) {
+        const Vector3 p = Call<Vector3>(gta::GET_ENTITY_COORDS, ped, 1);
+        g.pos[0] = p.x, g.pos[1] = p.y, g.pos[2] = p.z;
+    }
+    const DWORD now = GetTickCount();
+    g.ready = (s.state == LifeState::Ready);
+    g.poseFadingOut = s.poseFadingOut;
+    g.fadingCam = (static_cast<int>(now - s.fadingCamUntil) < 0);
+    g.lifecycleBlocked = (lifecycle::Blocked(ped, true, cfg.life) != nullptr);
+    g.replayActive = replay::Active();
+    g.dropperOpen = objectdropper::IsOpen();
+    g.shopOpen = boardshop::IsOpen();
+    g.frontendActive = gta::FrontendActive();
+    g.onFoot = ped && Call<BOOL>(gta::IS_PED_ON_FOOT, ped) != 0;
+    g.inVehicle = ped && Call<BOOL>(gta::IS_PED_IN_ANY_VEHICLE, ped, 0) != 0;
+    g.ragdoll = ped && Call<BOOL>(gta::IS_PED_RAGDOLL, ped) != 0;
+    g.falling = ped && Call<BOOL>(gta::IS_PED_FALLING, ped) != 0;
+    g.inAir = ped && Call<BOOL>(gta::IS_ENTITY_IN_AIR, ped) != 0;
+    return g;
+}
+
 // Test marks: travel to the spots Manatros reported and set them fixed
 // (design 2026-10-31-mark-travel). GTAxSkate\marks.tsv is read lazily and
 // again only when its time stamp changed; never on every menu draw.
@@ -4260,15 +4285,9 @@ std::vector<menu::Page> MenuPages(Session& s) {
             return item;
         }(),
         Action("Go to this collectible", [&s] {
-            float p[3];
-            if (!collectibles::SelectedPlace(p)) { Notify(s, "Collectibles: none selected"); return; }
-            const Ped ped = Call<Ped>(gta::PLAYER_PED_ID);
-            Call<void>(gta::REQUEST_COLLISION_AT_COORD, p[0], p[1], p[2]);
-            const Entity who = Call<BOOL>(gta::IS_PED_IN_ANY_VEHICLE, ped, 0)
-                ? static_cast<Entity>(Call<Vehicle>(gta::GET_VEHICLE_PED_IS_IN, ped, 0)) : static_cast<Entity>(ped);
-            // 4 m beside it, on the rail's level, so arriving does not collect it.
-            Call<void>(gta::SET_ENTITY_COORDS_NO_OFFSET, who, p[0] + 4.0f, p[1], p[2] + 0.5f, 0, 0, 0);
-            Notify(s, collectibles::SelectedLabel(), 6000);
+            const std::string msg = collectibles::RequestTravel(CurrentTravelGuard(s, g_config));
+            if (!msg.empty()) Notify(s, msg, 5000);
+            else Notify(s, "Checking safe floor for collectible...", 2000);
         }),
         Helped(Action("Reset collectibles and unlocks (press twice)", [&s] {
                    // Two presses within 5 s (design 2026-11-02-collectibles-v2).
@@ -4888,6 +4907,7 @@ void ScriptMain() {
             const bool popups = g_config.skateHud && s.state == LifeState::Skating && s.action == 0 && !replay::Active();  // not filming
             if (!replay::Active()) collectibles::Tick(g_config.collectibles, riding, popups, root, Call<int>(gta::PLAYER_PED_ID),
                                                        s.last.state_utf8);
+            collectibles::TickTravel(CurrentTravelGuard(s, g_config));
             if (const char* notice = collectibles::TakeNotice()) Notify(s, notice, 6000);
         }
         // M while skating: GTA's own interaction menu. It did not open because

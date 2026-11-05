@@ -266,34 +266,47 @@ impl BoardShop {
     /// As `set_secrets`, with `boards` decks chosen first (collectibles v3).
     pub fn set_secrets_with_boards(&mut self, count: usize, boards: usize) -> usize {
         let path = self.garages.join(crate::secrets::FILE);
+        let choose = || {
+            let offers: Vec<crate::shop::Offer> = crate::shop::stock(&self.library, Tier::Skate)
+                .into_iter()
+                .flat_map(|section| section.offers)
+                .filter(|offer| self.sells(&offer.goods))
+                .collect();
+            // Trucks and wheels on the shop's complete boards never become
+            // secret: a locked one would hide every board using it
+            // (collectibles v3 peer review).
+            let on_boards: std::collections::HashSet<String> = offers.iter()
+                .filter_map(|o| match &o.goods { Goods::Complete(b) => Some(b.clone()), _ => None })
+                .flat_map(|b| [Part::Trucks, Part::Wheels].into_iter()
+                    .filter_map(move |p| b.get(p).and_then(|r| crate::secrets::key(&Goods::Part(p, r.clone())))))
+                .collect();
+            let keys: Vec<String> = offers.iter()
+                .filter_map(|offer| crate::secrets::key(&offer.goods))
+                .filter(|k| !on_boards.contains(k))
+                .collect();
+            crate::secrets::Secrets::choose_with_decks(keys, count, boards)
+        };
+        let log_counts = |s: &crate::secrets::Secrets| {
+            for kind in ["deck", "grip", "trucks", "wheels"] {
+                let n = s.order().iter().filter(|k| k.split(':').next() == Some(kind)).count();
+                if let Some(log) = crate::RUNTIME_LOG.get() { log(&format!("board shop secrets: {n} {kind} secret")); }
+            }
+        };
         self.secrets = match std::fs::read_to_string(&path) {
-            Ok(text) => crate::secrets::Secrets::from_text(&text),
+            Ok(text) => {
+                let mut kept = crate::secrets::Secrets::from_text(&text);
+                if boards > 0 && kept.order().len() < count && kept.extend_from(&choose(), count) {
+                    log_counts(&kept);
+                    let _ = std::fs::write(&path, kept.to_text());
+                }
+                kept
+            }
             // Unreadable (locked, damaged): lock nothing and never write over it.
             Err(e) if e.kind() != std::io::ErrorKind::NotFound => Default::default(),
             Err(_) if count == 0 => Default::default(),
             Err(_) => {
-                let offers: Vec<crate::shop::Offer> = crate::shop::stock(&self.library, Tier::Skate)
-                    .into_iter()
-                    .flat_map(|section| section.offers)
-                    .filter(|offer| self.sells(&offer.goods))
-                    .collect();
-                // Trucks and wheels on the shop's complete boards never become
-                // secret: a locked one would hide every board using it
-                // (collectibles v3 peer review).
-                let on_boards: std::collections::HashSet<String> = offers.iter()
-                    .filter_map(|o| match &o.goods { Goods::Complete(b) => Some(b.clone()), _ => None })
-                    .flat_map(|b| [Part::Trucks, Part::Wheels].into_iter()
-                        .filter_map(move |p| b.get(p).and_then(|r| crate::secrets::key(&Goods::Part(p, r.clone())))))
-                    .collect();
-                let keys: Vec<String> = offers.iter()
-                    .filter_map(|offer| crate::secrets::key(&offer.goods))
-                    .filter(|k| !on_boards.contains(k))
-                    .collect();
-                let chosen = crate::secrets::Secrets::choose_with_decks(keys, count, boards);
-                for kind in ["deck", "grip", "trucks", "wheels"] {
-                    let n = chosen.order().iter().filter(|k| k.split(':').next() == Some(kind)).count();
-                    if let Some(log) = crate::RUNTIME_LOG.get() { log(&format!("board shop secrets: {n} {kind} secret")); }
-                }
+                let chosen = choose();
+                log_counts(&chosen);
                 let _ = std::fs::write(&path, chosen.to_text());
                 chosen
             }

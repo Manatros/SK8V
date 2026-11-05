@@ -59,28 +59,59 @@ impl Secrets {
 
     /// As `choose`, with the first `decks` secrets decks (one per board
     /// collectible, collectibles v3 re-review), then the kinds in turn.
+    /// When `decks > 0` and the first `1 / KIND_SHARE` share of each kind is
+    /// not enough to fill `count`, the remaining keys of each kind are taken
+    /// in turn so every collectible and score milestone gets a secret item.
     pub fn choose_with_decks(keys: impl IntoIterator<Item = String>, count: usize, decks: usize) -> Self {
         let all: BTreeSet<String> = keys.into_iter().collect();
-        let mut kinds: Vec<Vec<String>> = KINDS.iter().map(|kind| {
+        let mut primary: Vec<Vec<String>> = Vec::with_capacity(KINDS.len());
+        let mut extra: Vec<Vec<String>> = Vec::with_capacity(KINDS.len());
+        for kind in &KINDS {
             let mut of: Vec<String> = all.iter().filter(|k| k.split(':').next() == Some(*kind)).cloned().collect();
             of.sort_by(|a, b| fnv(a).cmp(&fnv(b)).then_with(|| a.cmp(b)));
-            of.truncate(of.len().div_ceil(KIND_SHARE));
+            let mut rest = of.split_off(of.len().div_ceil(KIND_SHARE));
             of.reverse();
-            of
-        }).collect();
+            rest.reverse();
+            primary.push(of);
+            extra.push(rest);
+        }
         let mut order = Vec::new();
         while order.len() < decks.min(count) {
-            let Some(k) = kinds[0].pop() else { break };
+            let Some(k) = primary[0].pop().or_else(|| (decks > 0).then(|| extra[0].pop()).flatten()) else { break };
             order.push(k);
         }
-        while order.len() < count && kinds.iter().any(|k| !k.is_empty()) {
-            for kind in &mut kinds {
+        while order.len() < count && primary.iter().any(|k| !k.is_empty()) {
+            for kind in &mut primary {
                 if order.len() < count {
                     if let Some(k) = kind.pop() { order.push(k); }
                 }
             }
         }
+        if decks > 0 {
+            while order.len() < count && extra.iter().any(|k| !k.is_empty()) {
+                for kind in &mut extra {
+                    if order.len() < count {
+                        if let Some(k) = kind.pop() { order.push(k); }
+                    }
+                }
+            }
+        }
         Self::from_parts(order, BTreeSet::new())
+    }
+
+    /// Appends unseen keys from `more` until `self.order.len()` reaches `count`,
+    /// preserving the existing prefix order and unlocked set. Returns true if extended.
+    pub fn extend_from(&mut self, more: &Self, count: usize) -> bool {
+        let before = self.order.len();
+        for k in &more.order {
+            if self.order.len() >= count {
+                break;
+            }
+            if self.secret.insert(k.clone()) {
+                self.order.push(k.clone());
+            }
+        }
+        self.order.len() > before
     }
 
     fn from_parts(order: Vec<String>, unlocked: BTreeSet<String>) -> Self {
@@ -311,5 +342,32 @@ mod tests {
         assert_eq!(wall(&[]), vec![1, 2, 3]);
         // Too few spares: a locked slot without one stays empty.
         assert_eq!(substitute(&order, 6, |_| true, |&t| t > 1), vec![1]);
+    }
+
+    #[test]
+    fn choose_with_decks_expands_past_one_third_and_preserves_prefix() {
+        // Real catalog proportions after complete-board truck/wheel filtering:
+        // 150 decks, 21 grips, 3 trucks, 9 wheels = 183 eligible keys.
+        let keys = || {
+            (0..150).map(|i| format!("deck:m:{i}"))
+                .chain((0..21).map(|i| format!("grip:{i}")))
+                .chain((0..3).map(|i| format!("trucks:t:{i}")))
+                .chain((0..9).map(|i| format!("wheels:w:{i}")))
+        };
+        let prefix61 = Secrets::choose_with_decks(keys(), 61, 46);
+        assert_eq!(prefix61.order().len(), 61);
+        let full136 = Secrets::choose_with_decks(keys(), 136, 46);
+        assert_eq!(full136.order().len(), 136);
+        assert_eq!(&full136.order()[..61], prefix61.order(), "first 61 secrets stay bit-for-bit identical");
+
+        // Topping up an existing 61-secret file with an unlocked deck preserves prefix and unlock.
+        let mut kept = prefix61.clone();
+        let unlocked_key = kept.order()[3].clone();
+        assert_eq!(kept.unlock(&unlocked_key), 1);
+        assert!(kept.extend_from(&full136, 136));
+        assert_eq!(kept.order(), full136.order());
+        assert!(kept.is_unlocked(&unlocked_key));
+        assert_eq!(kept.remaining(), 135);
+        assert!(!kept.extend_from(&full136, 136), "already at target count");
     }
 }

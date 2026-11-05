@@ -202,6 +202,21 @@ void NextPage() {
 
 bool Showing() { return g.page != 0; }
 
+ScoreSnapshot PollScores() {
+    ScoreSnapshot out{};
+    if (!g.ready || !g.getState || !g.rt) return out;
+    SvRecordState s{};
+    s.size = sizeof(s);
+    if (!g.getState(g.rt, &s)) return out;
+    out.ready = true;
+    out.sequence = s.sequence;
+    out.category = s.category;
+    out.score = s.score;
+    out.homBest = s.hom_best;
+    out.lineBest = s.line_best;
+    return out;
+}
+
 void Tick(bool skating, bool homBail, bool visible) {
     if (!g.ready) return;
     if (!visible) {

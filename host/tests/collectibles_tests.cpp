@@ -196,6 +196,277 @@ int main() {
     // A board earned unlocks only its deck (rev 4): the reward names the deck.
     assert(PopupEarned("board:deck:a:1", "Deck A") == "Board unlocked: Deck A");
 
+    // Safe developer collectible travel (design 2026-11-05-safe-collectible-travel).
+    {
+        float z1 = 0.0f, z2 = 0.0f;
+        TravelCapsuleSpheres(10.0f, z1, z2);
+        assert(std::abs(z1 - 10.45f) < 1e-5f);
+        assert(std::abs(z2 - 11.55f) < 1e-5f);
+
+        float foot = 0.0f;
+        TravelBounds goodBounds{true, {-0.30f, -0.30f, -1.00f}, {0.30f, 0.30f, 0.85f}};
+        assert(TravelCheckBounds(goodBounds, foot) && std::abs(foot - 1.00f) < 1e-5f);
+        TravelBounds wideBounds{true, {-0.50f, -0.30f, -1.00f}, {0.30f, 0.30f, 0.85f}};
+        assert(!TravelCheckBounds(wideBounds, foot));
+        TravelBounds tallBounds{true, {-0.30f, -0.30f, -1.20f}, {0.30f, 0.30f, 0.95f}};
+        assert(!TravelCheckBounds(tallBounds, foot));
+
+        const float marker[3] = {100.0f, 200.0f, 15.0f};
+        const float req[2] = {104.0f, 200.0f};
+        const float navOk[3] = {104.2f, 199.8f, 13.8f};
+        assert(TravelCheckSafeCoord(marker, req, navOk));
+        const float navTooClose[3] = {102.0f, 200.0f, 13.8f};  // 2.0 m < 2.5 m from marker
+        assert(!TravelCheckSafeCoord(marker, req, navTooClose));
+        const float navWrongLevel[3] = {104.0f, 200.0f, 11.5f};  // 3.5 m below marker
+        assert(!TravelCheckSafeCoord(marker, req, navWrongLevel));
+        const float navTooHigh[3] = {104.0f, 200.0f, 14.8f};  // only 0.2 m below marker
+        assert(!TravelCheckSafeCoord(marker, req, navTooHigh));
+
+        struct MockEnv {
+            bool hasSelection = true;
+            std::string id = "D001";
+            std::string label = "Collectible: D001 board [hidden] Vespucci";
+            float marker[3] = {100.0f, 200.0f, 15.0f};
+            bool sceneActive = false;
+            bool sceneLoaded = false;
+            bool startSceneOk = true;
+            int startCount = 0;
+            int stopCount = 0;
+            int reqCollisionCount = 0;
+            int teleportCount = 0;
+            int lastPed = 0;
+            float teleportPos[3] = {0, 0, 0};
+            int waypointCount = 0;
+            float waypointPos[2] = {0, 0};
+            TravelBounds bounds{true, {-0.30f, -0.30f, -0.98f}, {0.30f, 0.30f, 0.82f}};
+            bool safeCoordOk = true;
+            float navOffset[3] = {0.0f, 0.0f, -1.2f};  // relative to (req.x, req.y, marker.z)
+            int probeIdx = 0;
+            TravelLosSample floorSample{2, true, true, 13.82f, 0.99f};
+            float sampleSpread = 0.0f;
+            TravelCapsuleResult capsule{2, false};
+        };
+
+        auto makeAdapter = [](MockEnv& env) {
+            TravelAdapter api{};
+            api.ctx = &env;
+            api.selectedItem = [](std::string& id, std::string& label, float (&xyz)[3], void* ctx) {
+                auto& e = *static_cast<MockEnv*>(ctx);
+                if (!e.hasSelection) return false;
+                id = e.id;
+                label = e.label;
+                for (int i = 0; i < 3; ++i) xyz[i] = e.marker[i];
+                return true;
+            };
+            api.isLoadSceneActive = [](void* ctx) { return static_cast<MockEnv*>(ctx)->sceneActive; };
+            api.isLoadSceneLoaded = [](void* ctx) { return static_cast<MockEnv*>(ctx)->sceneLoaded; };
+            api.requestCollision = [](float, float, float, void* ctx) { ++static_cast<MockEnv*>(ctx)->reqCollisionCount; };
+            api.startLoadSceneSphere = [](float, float, float, float, void* ctx) {
+                auto& e = *static_cast<MockEnv*>(ctx);
+                ++e.startCount;
+                if (!e.startSceneOk) return false;
+                e.sceneActive = true;
+                return true;
+            };
+            api.stopLoadScene = [](void* ctx) {
+                auto& e = *static_cast<MockEnv*>(ctx);
+                ++e.stopCount;
+                e.sceneActive = false;
+            };
+            api.getPedBounds = [](int, void* ctx) { return static_cast<MockEnv*>(ctx)->bounds; };
+            api.getSafeCoord = [](float x, float y, float z, float (&out)[3], void* ctx) {
+                auto& e = *static_cast<MockEnv*>(ctx);
+                if (!e.safeCoordOk) return false;
+                out[0] = x + e.navOffset[0];
+                out[1] = y + e.navOffset[1];
+                out[2] = z + e.navOffset[2];
+                return true;
+            };
+            api.probeFloor = [](float, float, float, float, int, void* ctx) {
+                auto& e = *static_cast<MockEnv*>(ctx);
+                TravelLosSample s = e.floorSample;
+                if (e.sampleSpread != 0.0f && (e.probeIdx++ % 5) == 1) s.z += e.sampleSpread;
+                return s;
+            };
+            api.probeCapsule = [](float, float, float, float, float, int, void* ctx) {
+                return static_cast<MockEnv*>(ctx)->capsule;
+            };
+            api.teleportPed = [](int ped, float x, float y, float z, void* ctx) {
+                auto& e = *static_cast<MockEnv*>(ctx);
+                ++e.teleportCount;
+                e.lastPed = ped;
+                e.teleportPos[0] = x, e.teleportPos[1] = y, e.teleportPos[2] = z;
+            };
+            api.setWaypoint = [](float x, float y, void* ctx) {
+                auto& e = *static_cast<MockEnv*>(ctx);
+                ++e.waypointCount;
+                e.waypointPos[0] = x, e.waypointPos[1] = y;
+            };
+            return api;
+        };
+
+        auto readyGuard = [] {
+            TravelGuard g{};
+            g.ready = true;
+            g.onFoot = true;
+            g.ped = 42;
+            g.pos[0] = 10.0f, g.pos[1] = 20.0f, g.pos[2] = 5.0f;
+            return g;
+        };
+
+        // 1. Valid standing arrival: streams, verifies floor & capsule, teleports to supportZ + footOffset.
+        {
+            MockEnv env;
+            TravelAdapter api = makeAdapter(env);
+            TravelSession s;
+            const TravelGuard g = readyGuard();
+            assert(TravelRequest(s, g, 1000, api).empty());
+            assert(s.active && s.ownsScene && env.startCount == 1);
+            // Not loaded yet on frame 1: stays active, no teleport.
+            assert(TravelTick(s, g, 1050, api).empty());
+            assert(s.active && env.teleportCount == 0);
+            // Scene loaded on frame 2: teleports to first candidate (104, 200, 13.82 + 0.98 = 14.80).
+            env.sceneLoaded = true;
+            const std::string msg = TravelTick(s, g, 1100, api);
+            assert(msg == env.label);
+            assert(!s.active && env.stopCount == 1 && env.teleportCount == 1 && env.waypointCount == 0);
+            assert(env.lastPed == 42);
+            assert(std::abs(env.teleportPos[0] - 104.0f) < 1e-4f);
+            assert(std::abs(env.teleportPos[1] - 200.0f) < 1e-4f);
+            assert(std::abs(env.teleportPos[2] - (13.82f + 0.98f)) < 1e-4f);
+        }
+
+        // 2. Floor missing / steep slope / uneven spread / dynamic entity -> zero movement, GPS set.
+        for (int badCase = 0; badCase < 4; ++badCase) {
+            MockEnv env;
+            env.sceneLoaded = true;
+            if (badCase == 0) env.floorSample.hit = false;
+            if (badCase == 1) env.floorSample.normalZ = 0.85f;      // too steep (< 0.94)
+            if (badCase == 2) env.sampleSpread = 0.15f;             // uneven (> 0.10 m)
+            if (badCase == 3) env.floorSample.worldEntity = false;  // dynamic prop/vehicle
+            TravelAdapter api = makeAdapter(env);
+            TravelSession s;
+            const TravelGuard g = readyGuard();
+            assert(TravelRequest(s, g, 1000, api).empty());
+            const std::string msg = TravelTick(s, g, 1050, api);
+            assert(msg.find("no safe floor verified") != std::string::npos);
+            assert(!s.active && env.teleportCount == 0 && env.stopCount == 1 && env.waypointCount == 1);
+        }
+
+        // 3. Wall / headroom hit or incomplete capsule probe -> zero movement, GPS set.
+        for (int capCase = 0; capCase < 2; ++capCase) {
+            MockEnv env;
+            env.sceneLoaded = true;
+            if (capCase == 0) env.capsule = {2, true};   // blocked headroom/wall
+            if (capCase == 1) env.capsule = {1, false};  // incomplete shape test
+            TravelAdapter api = makeAdapter(env);
+            TravelSession s;
+            const TravelGuard g = readyGuard();
+            assert(TravelRequest(s, g, 1000, api).empty());
+            const std::string msg = TravelTick(s, g, 1050, api);
+            assert(msg.find("no safe floor verified") != std::string::npos);
+            assert(!s.active && env.teleportCount == 0 && env.stopCount == 1 && env.waypointCount == 1);
+        }
+
+        // 4. Preexisting load scene is never hijacked or stopped.
+        {
+            MockEnv env;
+            env.sceneActive = true;  // GTA already owns a load scene
+            TravelAdapter api = makeAdapter(env);
+            TravelSession s;
+            const std::string msg = TravelRequest(s, readyGuard(), 1000, api);
+            assert(msg.find("load scene already active") != std::string::npos);
+            assert(!s.active && env.startCount == 0 && env.stopCount == 0 && env.teleportCount == 0 && env.waypointCount == 1);
+        }
+
+        // 5. Mode & state refusals: in vehicle, skating, lingering pose/cam handoff, replay.
+        for (int modeCase = 0; modeCase < 5; ++modeCase) {
+            MockEnv env;
+            TravelAdapter api = makeAdapter(env);
+            TravelSession s;
+            TravelGuard g = readyGuard();
+            if (modeCase == 0) g.inVehicle = true;
+            if (modeCase == 1) g.ready = false;
+            if (modeCase == 2) g.poseFadingOut = true;
+            if (modeCase == 3) g.fadingCam = true;
+            if (modeCase == 4) g.replayActive = true;
+            const std::string msg = TravelRequest(s, g, 1000, api);
+            assert(msg.find("refused") != std::string::npos);
+            assert(!s.active && env.startCount == 0 && env.teleportCount == 0 && env.waypointCount == 1);
+        }
+
+        // 6. Cancellation during streaming when player moves, selection changes, ped changes, or timeout.
+        {
+            MockEnv env;
+            TravelAdapter api = makeAdapter(env);
+            TravelSession s;
+            TravelGuard g = readyGuard();
+            assert(TravelRequest(s, g, 1000, api).empty());
+            g.pos[0] += 0.50f;  // moved > 0.30 m
+            const std::string msg = TravelTick(s, g, 1100, api);
+            assert(msg.find("player moved") != std::string::npos);
+            assert(!s.active && env.stopCount == 1 && env.teleportCount == 0);
+        }
+        {
+            MockEnv env;
+            TravelAdapter api = makeAdapter(env);
+            TravelSession s;
+            const TravelGuard g = readyGuard();
+            assert(TravelRequest(s, g, 1000, api).empty());
+            const std::string msg = TravelTick(s, g, 1000 + kTravelTimeoutMs + 1, api);
+            assert(msg.find("timed out") != std::string::npos);
+            assert(!s.active && env.stopCount == 1 && env.teleportCount == 0 && env.waypointCount == 1);
+        }
+    }
+
+    // Hall of Meat and banked trick-line high-score milestones: 20 tiers (R01..R20),
+    // sorting after D151 and L06 so existing assignments never shift.
+    {
+        const auto milestones = ScoreMilestones();
+        assert(milestones.size() == 20);
+        assert(milestones.front().id == "R01" && milestones.back().id == "R20");
+        for (const Item& m : milestones) {
+            assert(m.kind == Kind::Part);
+            assert(m.id > "D151" && m.id > "L06");
+        }
+
+        // Assign stability: D001 (board), L01 (board), D082 (part) keep identical
+        // secrets when R01..R20 are appended.
+        const std::vector<Item> base = {
+            {"D001", Kind::Board, 0, 0, 0, "Park"},
+            {"L01", Kind::Board, 0, 0, 0, "Line"},
+            {"D082", Kind::Part, 0, 0, 0, "Scattered"},
+        };
+        std::string list;
+        for (int i = 1; i <= 25; ++i)
+            list += "deck:m:d" + std::to_string(i) + "\tDeck " + std::to_string(i) + "\tskatev_d_d" + std::to_string(i) +
+                    "\tskatev_d_d" + std::to_string(i) + ",skatev_t_default,skatev_w_default\n";
+        const auto a1 = Assign(base, list);
+        std::vector<Item> withScores = base;
+        withScores.insert(withScores.end(), milestones.begin(), milestones.end());
+        const auto a2 = Assign(withScores, list);
+        assert(a1.at("D001").key == a2.at("D001").key);
+        assert(a1.at("L01").key == a2.at("L01").key);
+        assert(a1.at("D082").key == a2.at("D082").key);
+        assert(a2.at("R01").key == "deck:m:d4");
+        assert(a2.at("R20").key == "deck:m:d23");
+
+        Progress p;
+        assert(ScoreEarned(milestones, p, 1, 0).empty());
+        assert(ScoreEarned(milestones, p, 1, 4999).empty());
+        // Hall of Meat 61,531 pts earns R01..R09 (5,000..60,000), leaving R10 (75,000).
+        const auto hom = ScoreEarned(milestones, p, 1, 61531);
+        assert(hom.size() == 9 && hom.front().id == "R01" && hom.back().id == "R09");
+        for (const Item& it : hom) assert(RecordReward(p, it.id, "part:" + a2.at(it.id).key));
+        assert(ScoreEarned(milestones, p, 1, 61531).empty());
+        const auto homTop = ScoreEarned(milestones, p, 1, 75000);
+        assert(homTop.size() == 1 && homTop[0].id == "R10");
+
+        // Trick line 8,605 pts earns R11..R18 (500..8,000), leaving R19 (10,000) and R20 (12,500).
+        const auto line = ScoreEarned(milestones, p, 2, 8605);
+        assert(line.size() == 8 && line.front().id == "R11" && line.back().id == "R18");
+    }
+
     std::cout << "collectibles tests passed\n";
     return 0;
 }

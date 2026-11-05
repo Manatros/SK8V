@@ -99,6 +99,23 @@ int LineStep(const std::string& id);
 // lines get their boards from Assign like any other board.
 std::vector<Item> LineBoards(const std::vector<Item>& items);
 
+// High-score milestones (design 2026-11-05-expanded-secret-and-score-unlocks):
+// 10 Hall of Meat tiers ("R01".."R10", category 1) and 10 banked trick-line
+// tiers ("R11".."R20", category 2), sorting after "D151" and "L06" so they
+// take secrets after all spatial and park-line collectibles without shifting
+// any existing assignment.
+struct ScoreMilestone {
+    const char* id;
+    unsigned category;   // 1 Hall of Meat, 2 banked trick line
+    unsigned threshold;  // points required
+    const char* place;
+};
+const std::vector<ScoreMilestone>& ScoreMilestoneTable();
+std::vector<Item> ScoreMilestones();
+// Uncollected milestone items in `milestones` reached by `score` in `category`.
+std::vector<Item> ScoreEarned(const std::vector<Item>& milestones, const Progress& progress,
+                              unsigned category, unsigned score);
+
 // A line being ridden: which line, the next step (1-based), when the leg began.
 struct LineRun {
     std::string line;
@@ -121,5 +138,89 @@ std::string PopupFound(Kind kind);
 // `reward`: "part:deck:...", "part:grip:...", "song:NN", "cash:N";
 // `name`: the shop's label of the part.
 std::string PopupEarned(const std::string& reward, const std::string& name);
+
+// Safe developer collectible travel (design 2026-11-05-safe-collectible-travel).
+inline constexpr int kTravelCandidateCount = 8;
+inline constexpr unsigned kTravelTimeoutMs = 5000;
+inline constexpr float kTravelSceneRadius = 25.0f;
+inline constexpr float kTravelMoveLimit = 0.30f;
+inline constexpr float kTravelCapsuleRadius = 0.40f;
+inline constexpr float kTravelCapsuleHeight = 1.90f;
+inline constexpr float kTravelCapsuleBaseClearance = 0.05f;
+
+struct TravelGuard {
+    bool ready = false;
+    bool poseFadingOut = false;
+    bool fadingCam = false;
+    bool lifecycleBlocked = false;
+    bool replayActive = false;
+    bool dropperOpen = false;
+    bool shopOpen = false;
+    bool frontendActive = false;
+    bool onFoot = false;
+    bool inVehicle = false;
+    bool ragdoll = false;
+    bool falling = false;
+    bool inAir = false;
+    int ped = 0;
+    float pos[3] = {0, 0, 0};
+};
+
+struct TravelBounds {
+    bool valid = false;
+    float min[3] = {0, 0, 0};
+    float max[3] = {0, 0, 0};
+};
+
+struct TravelLosSample {
+    int status = 0;  // 0 invalid, 1 pending, 2 complete
+    bool hit = false;
+    bool worldEntity = false;
+    float z = 0.0f;
+    float normalZ = 0.0f;
+};
+
+struct TravelCapsuleResult {
+    int status = 0;  // 0 invalid, 1 pending, 2 complete
+    bool hit = false;
+};
+
+struct TravelAdapter {
+    bool (*selectedItem)(std::string& id, std::string& label, float (&xyz)[3], void* ctx) = nullptr;
+    bool (*isLoadSceneActive)(void* ctx) = nullptr;
+    bool (*isLoadSceneLoaded)(void* ctx) = nullptr;
+    void (*requestCollision)(float x, float y, float z, void* ctx) = nullptr;
+    bool (*startLoadSceneSphere)(float x, float y, float z, float radius, void* ctx) = nullptr;
+    void (*stopLoadScene)(void* ctx) = nullptr;
+    TravelBounds (*getPedBounds)(int ped, void* ctx) = nullptr;
+    bool (*getSafeCoord)(float x, float y, float z, float (&out)[3], void* ctx) = nullptr;
+    TravelLosSample (*probeFloor)(float x, float y, float zTop, float zBottom, int ignorePed, void* ctx) = nullptr;
+    TravelCapsuleResult (*probeCapsule)(float x, float y, float z1, float z2, float radius, int ignorePed, void* ctx) = nullptr;
+    void (*teleportPed)(int ped, float x, float y, float z, void* ctx) = nullptr;
+    void (*setWaypoint)(float x, float y, void* ctx) = nullptr;
+    void* ctx = nullptr;
+};
+
+struct TravelSession {
+    bool active = false;
+    bool ownsScene = false;
+    int startPed = 0;
+    std::string targetId;
+    std::string targetLabel;
+    float targetPos[3] = {0, 0, 0};
+    float startPos[3] = {0, 0, 0};
+    float footOffset = 1.0f;
+    unsigned deadlineMs = 0;
+};
+
+void TravelCandidateOffset(int index, float (&dxDy)[2]);
+bool TravelCheckBounds(const TravelBounds& b, float& outFootOffset);
+bool TravelCheckSafeCoord(const float (&marker)[3], const float (&req)[2], const float (&nav)[3]);
+bool TravelCheckFloorSupport(float navZ, const TravelLosSample (&samples)[5], float& outSupportZ);
+void TravelCapsuleSpheres(float supportZ, float& outZ1, float& outZ2);
+const char* TravelGuardReason(const TravelGuard& g);
+std::string TravelRequest(TravelSession& session, const TravelGuard& guard, unsigned nowMs, const TravelAdapter& api);
+std::string TravelTick(TravelSession& session, const TravelGuard& guard, unsigned nowMs, const TravelAdapter& api);
+void TravelCancel(TravelSession& session, const TravelAdapter& api);
 
 }  // namespace collectibles

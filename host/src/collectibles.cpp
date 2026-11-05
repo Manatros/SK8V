@@ -19,6 +19,7 @@
 #include "collectibles_logic.h"
 #include "hud_overlay.h"
 #include "natives.h"
+#include "records_ui.h"
 
 namespace collectibles {
 namespace {
@@ -53,6 +54,7 @@ util::LogFn g_log = nullptr;
 std::wstring g_placesPath, g_progressPath, g_songsDir;
 std::vector<Item> g_items;
 std::vector<Item> g_lineBoards;  // one board per trick line (rev 4)
+std::vector<Item> g_scoreItems;  // Hall of Meat and banked trick-line milestones
 LineRun g_line;                  // the line being ridden
 Progress g_progress;
 std::map<std::string, int> g_blips;
@@ -77,6 +79,8 @@ int g_musicObj[kItemSlots] = {};
 std::map<std::string, DWORD> g_itemWaiting;  // a deck not shown yet: since when (logged once after 15 s)
 std::set<std::string> g_itemFailLogged;
 std::set<int> g_tracksOnDisk;  // song files present (either form), from the last reconcile
+TravelSession g_travel;
+std::uint32_t g_lastScoreSeq = 0;
 
 void Log(const std::string& text) {
     if (g_log) g_log(("collectibles: " + text).c_str());
@@ -247,7 +251,8 @@ void Earn(const Item& it) {
         if (g_partsAssigned && mine != g_assigned.end() && !mine->second.key.empty()) result = boardshop::Unlock(mine->second.key);
         if (result == 1 || result == 2) {
             reward = "part:" + mine->second.key;
-            text = "Unlocked in the skate shop: " + mine->second.title;
+            text = (it.id.rfind("R", 0) == 0 ? "Unlocked in the skate shop (" + it.place + "): " : "Unlocked in the skate shop: ") +
+                   mine->second.title;
             g_unlockedKeys.insert(mine->second.key);
         }
     } else {
@@ -274,6 +279,8 @@ void Earn(const Item& it) {
         // Songs still need GTA's quick scan, which the popup cannot say.
         if (it.kind == Kind::Song && reward.rfind("song:", 0) == 0)
             Notice(Summary() + ": Settings > Audio > Perform Quick Scan to hear it.");
+        else if (it.id.rfind("R", 0) == 0)
+            Notice(Summary() + ": " + text);
     } else {
         Call<void>(PLAY_SOUND_FRONTEND, -1, "PICK_UP", "HUD_FRONTEND_DEFAULT_SOUNDSET", 1);
         Notice(Summary() + ": " + text);
@@ -387,10 +394,74 @@ void Find(const Item& it) {
     Log(it.id + " found");
 }
 
+TravelAdapter GtaTravelAdapter() {
+    TravelAdapter api{};
+    api.selectedItem = [](std::string& id, std::string& label, float (&xyz)[3], void*) {
+        label = SelectedLabel();
+        if (!SelectedPlace(xyz)) return false;
+        id = g_items[g_sel].id;
+        return true;
+    };
+    api.isLoadSceneActive = [](void*) { return Call<BOOL>(IS_NEW_LOAD_SCENE_ACTIVE) != 0; };
+    api.isLoadSceneLoaded = [](void*) { return Call<BOOL>(IS_NEW_LOAD_SCENE_LOADED) != 0; };
+    api.requestCollision = [](float x, float y, float z, void*) { Call<void>(REQUEST_COLLISION_AT_COORD, x, y, z); };
+    api.startLoadSceneSphere = [](float x, float y, float z, float radius, void*) {
+        return Call<BOOL>(NEW_LOAD_SCENE_START_SPHERE, x, y, z, radius, 0) != 0;
+    };
+    api.stopLoadScene = [](void*) { Call<void>(NEW_LOAD_SCENE_STOP); };
+    api.getPedBounds = [](int ped, void*) {
+        TravelBounds b{};
+        if (!ped || !Call<BOOL>(DOES_ENTITY_EXIST, ped)) return b;
+        const Hash model = Call<Hash>(GET_ENTITY_MODEL, ped);
+        if (!Call<BOOL>(IS_MODEL_VALID, model)) return b;
+        Vector3 lo{}, hi{};
+        Call<void>(GET_MODEL_DIMENSIONS, model, &lo, &hi);
+        b.valid = true;
+        b.min[0] = lo.x, b.min[1] = lo.y, b.min[2] = lo.z;
+        b.max[0] = hi.x, b.max[1] = hi.y, b.max[2] = hi.z;
+        return b;
+    };
+    api.getSafeCoord = [](float x, float y, float z, float (&out)[3], void*) {
+        Vector3 nav{};
+        if (!Call<BOOL>(GET_SAFE_COORD_FOR_PED, x, y, z, FALSE, &nav, 10)) return false;
+        out[0] = nav.x, out[1] = nav.y, out[2] = nav.z;
+        return true;
+    };
+    api.probeFloor = [](float x, float y, float zTop, float zBottom, int ignorePed, void*) {
+        TravelLosSample s{};
+        const int h = Call<int>(START_EXPENSIVE_SYNCHRONOUS_SHAPE_TEST_LOS_PROBE, x, y, zTop, x, y, zBottom, 1, ignorePed, 7);
+        BOOL hit = 0;
+        Vector3 end{}, normal{};
+        Entity entity = 0;
+        s.status = Call<int>(GET_SHAPE_TEST_RESULT, h, &hit, &end, &normal, &entity);
+        s.hit = (hit != 0);
+        s.worldEntity = (entity == 0);
+        s.z = end.z;
+        s.normalZ = normal.z;
+        return s;
+    };
+    api.probeCapsule = [](float x, float y, float z1, float z2, float radius, int ignorePed, void*) {
+        TravelCapsuleResult r{};
+        const int h = Call<int>(START_SHAPE_TEST_CAPSULE, x, y, z1, x, y, z2, radius, 511, ignorePed, 7);
+        BOOL hit = 0;
+        Vector3 end{}, normal{};
+        Entity entity = 0;
+        r.status = Call<int>(GET_SHAPE_TEST_RESULT, h, &hit, &end, &normal, &entity);
+        r.hit = (hit != 0);
+        return r;
+    };
+    api.teleportPed = [](int ped, float x, float y, float z, void*) {
+        Call<void>(SET_ENTITY_COORDS_NO_OFFSET, ped, x, y, z, 0, 0, 0);
+    };
+    api.setWaypoint = [](float x, float y, void*) { Call<void>(SET_NEW_WAYPOINT, x, y); };
+    return api;
+}
+
 }  // namespace
 
 void Start(const std::wstring& gameDir, bool enabled, util::LogFn log) {
     g_log = log;
+    TravelCancel(g_travel, GtaTravelAdapter());
     g_placesPath = gameDir + L"GTAxSkate\\collectibles.tsv";
     // Collectibles v3 starts fresh (design 2026-11-03-collectibles-v3); v2's
     // collectibles.txt stays for a rollback.
@@ -413,8 +484,10 @@ void SyncShop() {
     int parts = 0, earned = 0;
     int boards = 0;
     g_lineBoards = LineBoards(g_items);
+    g_scoreItems = ScoreMilestones();
     for (const Item& it : g_items) parts += GivesParts(it.kind), boards += it.kind == Kind::Board;
     parts += static_cast<int>(g_lineBoards.size()), boards += static_cast<int>(g_lineBoards.size());
+    parts += static_cast<int>(g_scoreItems.size());
     earned = static_cast<int>(EarnedKeys(g_progress).size());
     int locked = boardshop::SetSecrets(parts, boards);
     const std::string list = boardshop::SecretList();
@@ -431,7 +504,36 @@ void SyncShop() {
     }
     std::vector<Item> withLines = g_items;
     withLines.insert(withLines.end(), g_lineBoards.begin(), g_lineBoards.end());
+    withLines.insert(withLines.end(), g_scoreItems.begin(), g_scoreItems.end());
     g_assigned = Assign(withLines, list);
+    const recordsui::ScoreSnapshot scores = recordsui::PollScores();
+    g_lastScoreSeq = scores.sequence;
+    int fromRecords = 0;
+    if (g_partsAssigned && scores.ready) {
+        for (unsigned cat : {1u, 2u}) {
+            const unsigned best = cat == 1u ? scores.homBest : scores.lineBest;
+            for (const Item& it : ScoreEarned(g_scoreItems, g_progress, cat, best)) {
+                const auto mine = g_assigned.find(it.id);
+                if (mine == g_assigned.end() || mine->second.key.empty()) continue;
+                const int res = boardshop::Unlock(mine->second.key);
+                if (res == 1 || res == 2) {
+                    const std::string reward = "part:" + mine->second.key;
+                    if (RecordReward(g_progress, it.id, reward)) {
+                        g_unlockedKeys.insert(mine->second.key);
+                        ++fromRecords;
+                        Log(it.id + " (" + it.place + ") unlocked from records: " + reward);
+                    }
+                }
+            }
+        }
+        if (fromRecords > 0) {
+            Save();
+            if (g_wasEnabled) {
+                Notice(Summary() + ": " + std::to_string(fromRecords) +
+                       " unlocked in the skate shop from your Hall of Meat and Trick Line records");
+            }
+        }
+    }
     Log(std::string("each collectible holds its item") + (g_partsAssigned ? "" : " (songs only: the runtime lists no secrets)") + "; " + Summary());
 }
 
@@ -479,6 +581,13 @@ void Tick(bool enabled, bool skating, bool popups, const float (&skater)[3], int
     if (g_songsPending && GetTickCount() >= g_nextSongRetry) Reconcile(true);
     ChooseMusicModel();
     const Vector3 me = Call<Vector3>(GET_ENTITY_COORDS, ped, 0);
+    if (const recordsui::ScoreSnapshot scores = recordsui::PollScores(); scores.ready && scores.sequence != g_lastScoreSeq) {
+        g_lastScoreSeq = scores.sequence;
+        for (Item it : ScoreEarned(g_scoreItems, g_progress, scores.category, scores.score)) {
+            it.x = me.x, it.y = me.y, it.z = me.z;
+            Earn(it);
+        }
+    }
     const std::set<std::string> items = ShowItems(me);
     // A teleport (travel, respawn) is no ride through everything between.
     const float jx = skater[0] - g_prev[0], jy = skater[1] - g_prev[1], jz = skater[2] - g_prev[2];
@@ -575,6 +684,11 @@ std::string Summary() {
         const bool done = StateOf(g_progress, line.id) == State::Collected;
         ++all, got += done, ++parts, partsGot += done;
     }
+    for (const Item& score : g_scoreItems) {
+        if (!HasReward(score, g_assigned, g_tracksOnDisk)) continue;
+        const bool done = StateOf(g_progress, score.id) == State::Collected;
+        ++all, got += done, ++parts, partsGot += done;
+    }
     char text[128];
     std::snprintf(text, sizeof(text), "Collectibles: %d/%d (parts %d/%d, songs %d/%d)", got, all, partsGot, parts, songsGot, songs);
     return text;
@@ -600,8 +714,9 @@ std::string SelectedLabel() {
     if (!HasReward(g_items[g_sel], g_assigned, g_tracksOnDisk)) Step(+1);
     if (!HasReward(g_items[g_sel], g_assigned, g_tracksOnDisk)) return "Collectible: none with an available unlock";
     const Item& it = g_items[g_sel];
-    const State st = StateOf(g_progress, it.id);
-    return "Collectible: " + it.id + (it.kind == Kind::Board ? " board " : it.kind == Kind::Part ? " part " : " song ") +
+    const State st = StateOf(g_progress, it.kind == Kind::Line ? LineGroup(it.id) : it.id);
+    const char* kind = it.kind == Kind::Board ? " board " : it.kind == Kind::Part ? " part " : it.kind == Kind::Line ? " line " : " song ";
+    return "Collectible: " + it.id + kind +
            (st == State::Collected ? "[collected] " : st == State::Found ? "[found] " : "[hidden] ") + it.place;
 }
 
@@ -615,11 +730,30 @@ void Step(int direction) {
 }
 
 bool SelectedPlace(float (&xyz)[3]) {
+    if (g_items.empty()) return false;
+    if (g_sel < 0 || g_sel >= static_cast<int>(g_items.size())) g_sel = 0;
+    if (!HasReward(g_items[g_sel], g_assigned, g_tracksOnDisk)) Step(+1);
     if (g_sel < 0 || g_sel >= static_cast<int>(g_items.size())) return false;
     const Item& it = g_items[g_sel];
     if (!HasReward(it, g_assigned, g_tracksOnDisk)) return false;
     xyz[0] = it.x, xyz[1] = it.y, xyz[2] = it.z;
     return true;
+}
+
+std::string RequestTravel(const TravelGuard& guard) {
+    const std::string msg = TravelRequest(g_travel, guard, GetTickCount(), GtaTravelAdapter());
+    if (!msg.empty()) Log("travel: " + msg);
+    else Log("travel: streaming " + g_travel.targetId);
+    return msg;
+}
+
+void TickTravel(const TravelGuard& guard) {
+    if (!g_travel.active) return;
+    const std::string msg = TravelTick(g_travel, guard, GetTickCount(), GtaTravelAdapter());
+    if (!msg.empty()) {
+        Log("travel: " + msg);
+        Notice(msg);
+    }
 }
 
 std::vector<int> Entities() {
@@ -630,6 +764,7 @@ std::vector<int> Entities() {
 }
 
 void Clear() {
+    TravelCancel(g_travel, GtaTravelAdapter());
     ClearItems();
     for (auto& [id, b] : g_blips) {
         int handle = b;
