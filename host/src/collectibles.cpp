@@ -33,7 +33,6 @@ constexpr DWORD kSightEvery = 1000;    // ms between sight-line probes
 constexpr int kBlipSprite = 66;        // question mark
 constexpr int kPartColour = 5;         // yellow
 constexpr int kSongColour = 27;        // purple
-constexpr int kNoPartsLeftCash = 500;
 // The burst where a collectible is earned (GTA's own effect, requested
 // again whenever it is not loaded).
 constexpr const char* kBurstAsset = "scr_rcbarry2";
@@ -230,34 +229,26 @@ void Burst(const Item& it) {
 }
 
 void Earn(const Item& it) {
-    Unblip(it.id);
-    g_progress.state[it.id] = State::Collected;
+    if (!HasReward(it, g_assigned, g_tracksOnDisk) || StateOf(g_progress, it.id) == State::Collected) return;
     std::string reward, text;
     const auto mine = g_assigned.find(it.id);
     if (it.kind == Kind::Board) {
         // A complete board (collectibles v3 rev 4): its deck unlocked, so the
         // shop's complete boards with it can be bought; nothing is given.
-        if (g_partsAssigned && mine != g_assigned.end() && !mine->second.key.empty() && boardshop::Unlock(mine->second.key) == 1) {
+        if (g_partsAssigned && mine != g_assigned.end() && !mine->second.key.empty() && boardshop::Unlock(mine->second.key) >= 1) {
             reward = "board:" + mine->second.key;
             text = "Complete board unlocked in the skate shop: " + mine->second.title;
             g_unlockedKeys.insert(mine->second.key);
         }
     } else if (it.kind == Kind::Part) {
-        // Its own deck or griptape (design 2026-11-02-collectibles-v2); one
-        // already unlocked pays the cash below, never another's item.
+        // Unlock only its assigned part. Already unlocked can recover a save
+        // interrupted after the shop persisted its unlock.
         int result = -1;
         if (g_partsAssigned && mine != g_assigned.end() && !mine->second.key.empty()) result = boardshop::Unlock(mine->second.key);
-        if (result == 1) {
+        if (result == 1 || result == 2) {
             reward = "part:" + mine->second.key;
             text = "Unlocked in the skate shop: " + mine->second.title;
             g_unlockedKeys.insert(mine->second.key);
-        } else if (result < 0 && !g_partsAssigned) {  // an older runtime: the next secret
-            const std::string unlocked = boardshop::UnlockNext();
-            if (!unlocked.empty()) {
-                const size_t tab = unlocked.find('\t');
-                reward = "part:" + unlocked.substr(0, tab);
-                text = "Unlocked in the skate shop: " + (tab == std::string::npos ? unlocked : unlocked.substr(tab + 1));
-            }
         }
     } else {
         std::vector<int> tracks;
@@ -273,12 +264,8 @@ void Earn(const Item& it) {
     std::string name;  // the part's shop label, for the popup
     if (const size_t colon = text.find(": "); (reward.rfind("part:", 0) == 0 || reward.rfind("board:", 0) == 0) && colon != std::string::npos)
         name = text.substr(colon + 2);
-    if (reward.empty()) {
-        boardshop::Pay(kNoPartsLeftCash);
-        reward = "cash:" + std::to_string(kNoPartsLeftCash);
-        text = "Nothing left to unlock here: $" + std::to_string(kNoPartsLeftCash);
-    }
-    g_progress.reward[it.id] = reward;
+    if (!RecordReward(g_progress, it.id, reward)) return;
+    Unblip(it.id);
     Save();
     if (it.kind == Kind::Song) Reconcile(true);
     Burst(it);
@@ -297,6 +284,7 @@ void Earn(const Item& it) {
 // Whether `it` shows its item: its key or track is still to earn (a song
 // only when its file exists, so it never shows what it cannot give).
 bool ShowsItem(const Item& it, const std::vector<int>& earnedSongs) {
+    if (!HasReward(it, g_assigned, g_tracksOnDisk)) return false;
     if (it.kind == Kind::Line) return false;  // waypoints show a marker only
     const auto a = g_assigned.find(it.id);
     if (a == g_assigned.end()) return false;
@@ -414,7 +402,7 @@ void Start(const std::wstring& gameDir, bool enabled, util::LogFn log) {
     g_progress = ParseProgress(text);
     if (g_faulty) Log("GTAxSkate\\collectibles3.txt exists but cannot be read: progress, songs and the shop stay as they are this session");
     g_wasEnabled = enabled;
-    Log(std::to_string(g_items.size()) + " places, " + Summary());
+    Log(std::to_string(g_items.size()) + " places loaded; reward totals follow shop sync");
     if (g_items.empty()) return;  // no places file: songs stay as they are
     Reconcile(enabled);
 }
@@ -444,7 +432,7 @@ void SyncShop() {
     std::vector<Item> withLines = g_items;
     withLines.insert(withLines.end(), g_lineBoards.begin(), g_lineBoards.end());
     g_assigned = Assign(withLines, list);
-    Log(std::string("each collectible holds its item") + (g_partsAssigned ? "" : " (songs only: the runtime lists no secrets)"));
+    Log(std::string("each collectible holds its item") + (g_partsAssigned ? "" : " (songs only: the runtime lists no secrets)") + "; " + Summary());
 }
 
 std::string Reset() {
@@ -505,7 +493,7 @@ void Tick(bool enabled, bool skating, bool popups, const float (&skater)[3], int
         std::string hitLine;
         int hitStep = 0, steps = 0;
         for (const Item& it : g_items) {
-            if (it.kind != Kind::Line) continue;
+            if (it.kind != Kind::Line || !HasReward(it, g_assigned, g_tracksOnDisk)) continue;
             const std::string line = LineGroup(it.id);
             if (StateOf(g_progress, line) == State::Collected) continue;
             const int step = LineStep(it.id);
@@ -541,6 +529,7 @@ void Tick(bool enabled, bool skating, bool popups, const float (&skater)[3], int
     }
     for (const Item& it : g_items) {
         if (it.kind == Kind::Line) continue;
+        if (!HasReward(it, g_assigned, g_tracksOnDisk)) { Unblip(it.id); continue; }
         const State st = StateOf(g_progress, it.id);
         if (st == State::Collected) continue;
         const float dx = it.x - me.x, dy = it.y - me.y, dz = it.z - me.z;
@@ -575,13 +564,14 @@ const char* TakeNotice() {
 std::string Summary() {
     int all = 0, got = 0, parts = 0, partsGot = 0, songs = 0, songsGot = 0;
     for (const Item& it : g_items) {
-        if (it.kind == Kind::Line) continue;  // counted once per line below
+        if (it.kind == Kind::Line || !HasReward(it, g_assigned, g_tracksOnDisk)) continue;  // counted once per line below
         const bool done = StateOf(g_progress, it.id) == State::Collected;
         ++all, got += done;
         if (GivesParts(it.kind)) ++parts, partsGot += done;
         else ++songs, songsGot += done;
     }
     for (const Item& line : g_lineBoards) {
+        if (!HasReward(line, g_assigned, g_tracksOnDisk)) continue;
         const bool done = StateOf(g_progress, line.id) == State::Collected;
         ++all, got += done, ++parts, partsGot += done;
     }
@@ -595,7 +585,7 @@ const char* RouteToNearestFound() {
     const Item* best = nullptr;
     float bestD = 1e30f;
     for (const Item& it : g_items) {
-        if (StateOf(g_progress, it.id) != State::Found) continue;
+        if (!HasReward(it, g_assigned, g_tracksOnDisk) || StateOf(g_progress, it.id) != State::Found) continue;
         const float d = (it.x - me.x) * (it.x - me.x) + (it.y - me.y) * (it.y - me.y);
         if (d < bestD) best = &it, bestD = d;
     }
@@ -607,6 +597,8 @@ const char* RouteToNearestFound() {
 std::string SelectedLabel() {
     if (g_items.empty()) return "Collectible: none (GTAxSkate\\collectibles.tsv missing)";
     if (g_sel < 0 || g_sel >= static_cast<int>(g_items.size())) g_sel = 0;
+    if (!HasReward(g_items[g_sel], g_assigned, g_tracksOnDisk)) Step(+1);
+    if (!HasReward(g_items[g_sel], g_assigned, g_tracksOnDisk)) return "Collectible: none with an available unlock";
     const Item& it = g_items[g_sel];
     const State st = StateOf(g_progress, it.id);
     return "Collectible: " + it.id + (it.kind == Kind::Board ? " board " : it.kind == Kind::Part ? " part " : " song ") +
@@ -616,12 +608,16 @@ std::string SelectedLabel() {
 void Step(int direction) {
     if (g_items.empty()) return;
     const int n = static_cast<int>(g_items.size());
-    g_sel = ((g_sel < 0 ? 0 : g_sel) + (direction < 0 ? -1 : 1) + n) % n;
+    for (int i = 0; i < n; ++i) {
+        g_sel = ((g_sel < 0 ? 0 : g_sel) + (direction < 0 ? -1 : 1) + n) % n;
+        if (HasReward(g_items[g_sel], g_assigned, g_tracksOnDisk)) break;
+    }
 }
 
 bool SelectedPlace(float (&xyz)[3]) {
     if (g_sel < 0 || g_sel >= static_cast<int>(g_items.size())) return false;
     const Item& it = g_items[g_sel];
+    if (!HasReward(it, g_assigned, g_tracksOnDisk)) return false;
     xyz[0] = it.x, xyz[1] = it.y, xyz[2] = it.z;
     return true;
 }

@@ -63,6 +63,16 @@ hid large nearby walls while they still collided; drawing remains capped.
 
 ## Build, validation and remaining limits
 
+Collectible rewards are finite. The host keeps the full places list and persisted
+secret order when assigning rewards, then hides entries without an assigned part
+or an available song. Trick-line waypoints share their line's board assignment.
+Missing music does not shift another collectible's reward. Collection records a
+real unlock once; there is no cash fallback. Historical cash progress remains
+readable. An already-unlocked assigned key can recover an interrupted progress
+save without awarding money or substituting another part. These rules live in
+`host/src/collectibles_logic.cpp` and `collectibles.cpp`; the focused fixture is
+`host/tests/collectibles_tests.cpp`. Gameplay validation remains pending.
+
 Follow [BUILDING.md](BUILDING.md) for the paired build, pinned dependencies and
 overlay preparation. Focused checks from the repository root:
 

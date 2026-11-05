@@ -4,6 +4,7 @@
 // player's progress (GTAxSkate\collectibles.txt) and the Self Radio songs
 // they unlock. No GTA calls here, so it can be unit-tested.
 #include <map>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -83,6 +84,12 @@ struct Assigned {
 std::map<std::string, Assigned> Assign(const std::vector<Item>& items, const std::string& secretList);
 // The shop keys earned so far: rewards "part:<key>" and "board:<k1>,<k2>,...".
 std::vector<std::string> EarnedKeys(const Progress& p);
+// A finite reward assigned to this id (line waypoints share their board id).
+// Missing music files suppress that song only; assignments never shift.
+bool HasReward(const Item& item, const std::map<std::string, Assigned>& assigned, const std::set<int>& tracks);
+// Commit a real unlock once; old cash records remain readable, never created.
+bool RecordReward(Progress& progress, const std::string& id, const std::string& reward);
+
 
 // Trick lines (collectibles v3 rev 4). The line of a waypoint id ("L01-2" ->
 // "L01") and its step (2); 0 when the id has no step.

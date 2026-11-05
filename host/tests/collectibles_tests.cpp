@@ -31,8 +31,48 @@ static void AssignTests() {
     assert(keys.size() == 1 && keys[0] == "deck:a:1");
 }
 
+static void FiniteRewardTests() {
+    auto items = ParsePlaces("D001\tboard\t0\t0\t0\tpark\nD002\tpart\t0\t0\t0\tground\nD003\tpart\t0\t0\t0\tsurplus\nD004\tsong\t0\t0\t0\tsong6\nD005\tsong\t0\t0\t0\tsong7\nL01-1\tline\t0\t0\t0\tline\nL01-2\tline\t1\t0\t0\tline\n");
+    auto all = items;
+    const auto boards = LineBoards(items);
+    all.insert(all.end(), boards.begin(), boards.end());
+    const std::string secrets = "deck:a\tDeck\tmodel\ngrip:b\tGrip\tmodel\n";
+    const auto assigned = Assign(all, secrets);
+    const std::set<int> tracks = {1, 2, 7}; // actual sparse music inventory
+    assert(HasReward(items[0], assigned, tracks));
+    assert(HasReward(items[1], assigned, tracks));
+    assert(!HasReward(items[2], assigned, tracks)); // surplus part
+    assert(!HasReward(items[3], assigned, tracks)); // absent fixed song6
+    assert(HasReward(items[4], assigned, tracks)); // song7 never shifts to song6's id
+    assert(!HasReward(items[5], assigned, tracks)); // surplus line board
+    Progress p;
+    p.state["old"] = State::Collected;
+    p.reward["old"] = "cash:500";
+    const auto before = FormatProgress(p);
+    for (const auto& bad : {"", "cash:500", "part:", "board:", "song:0", "song:6junk"})
+        assert(!RecordReward(p, "D002", bad));
+    assert(FormatProgress(p) == before); // no empty reward consumes progress
+    assert(RecordReward(p, "D001", "board:deck:a"));
+    assert(!RecordReward(p, "D001", "board:deck:other"));
+    p = ParseProgress(FormatProgress(p)); // restart preserves old cash and earned key
+    assert(p.reward.at("old") == "cash:500");
+    assert(EarnedKeys(p) == std::vector<std::string>{"deck:a"});
+    const auto again = Assign(all, secrets);
+    for (const Item& it : all) {
+        assert(HasReward(it, assigned, tracks) == HasReward(it, again, tracks));
+        assert(assigned.at(it.kind == Kind::Line ? LineGroup(it.id) : it.id).key ==
+               again.at(it.kind == Kind::Line ? LineGroup(it.id) : it.id).key);
+    }
+    assert(!HasReward(items[2], again, tracks) && !HasReward(items[5], again, tracks));
+    assert(!HasReward(items[3], again, tracks));
+    assert(HasReward(items[3], again, {6, 7})); // restoring its file restores only that pickup
+    assert(!HasReward(items[0], Assign(all, ""), tracks));
+    assert(HasReward(items[4], Assign(all, ""), tracks)); // songs work with no secret list
+}
+
 int main() {
     AssignTests();
+    FiniteRewardTests();
     // Places: comments, the header and malformed lines are skipped.
     const auto places = ParsePlaces(
         "# seed 1\r\nid\tkind\tx\ty\tz\tplace\r\n"

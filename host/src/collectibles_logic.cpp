@@ -202,6 +202,26 @@ std::map<std::string, Assigned> Assign(const std::vector<Item>& items, const std
     return out;
 }
 
+bool HasReward(const Item& item, const std::map<std::string, Assigned>& assigned, const std::set<int>& tracks) {
+    const auto a = assigned.find(item.kind == Kind::Line ? LineGroup(item.id) : item.id);
+    if (a == assigned.end()) return false;
+    if (item.kind == Kind::Song) return a->second.track > kStarterSongs && tracks.count(a->second.track) != 0;
+    return !a->second.key.empty();
+}
+
+bool RecordReward(Progress& progress, const std::string& id, const std::string& reward) {
+    if (id.empty() || StateOf(progress, id) == State::Collected) return false;
+    const bool part = reward.rfind("part:", 0) == 0 && reward.size() > 5;
+    const bool board = reward.rfind("board:", 0) == 0 && reward.size() > 6;
+    const bool song = reward.rfind("song:", 0) == 0 && reward.size() > 5 &&
+        std::all_of(reward.begin() + 5, reward.end(), [](unsigned char c) { return std::isdigit(c) != 0; }) &&
+        std::strtol(reward.c_str() + 5, nullptr, 10) > kStarterSongs;
+    if (!part && !board && !song) return false;
+    progress.state[id] = State::Collected;
+    progress.reward[id] = reward;
+    return true;
+}
+
 std::vector<std::string> EarnedKeys(const Progress& p) {
     std::vector<std::string> out;
     for (const auto& [id, r] : p.reward)
