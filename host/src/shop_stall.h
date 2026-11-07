@@ -50,15 +50,15 @@ inline bool ParseSpot(const std::string& text, float (&spot)[4]) {
     return true;
 }
 
-// Whether the seller should be there: open hours and near, or the player in
-// the stall (never removed in front of the player at closing time).
-inline bool SellerWanted(bool openNow, float anchorDistance, bool inStall) {
-    return inStall || (openNow && anchorDistance <= kSellerNear);
+// Whether a seller should be made: open hours and near. Being in the stall
+// never makes one (none appears at night), it only keeps one (SellerGoes).
+inline bool SellerWanted(bool openNow, float anchorDistance, bool /*inStall*/) {
+    return openNow && anchorDistance <= kSellerNear;
 }
 // Whether an existing seller goes: not wanted, and either far away or closed
 // with the player outside the stall.
 inline bool SellerGoes(bool openNow, float anchorDistance, bool inStall) {
-    if (SellerWanted(openNow, anchorDistance, inStall)) return false;
+    if (inStall || SellerWanted(openNow, anchorDistance, inStall)) return false;
     return anchorDistance > kSellerFar || (!openNow && !inStall);
 }
 
@@ -120,6 +120,19 @@ inline void Flight(const float (&a)[16], const float (&b)[16], float t, float (&
     FromQuat(q, out);
     for (int i = 12; i < 15; ++i) out[i] = a[i] + (b[i] - a[i]) * t;
     out[15] = 1.0f;
+}
+
+// Index of the rack board the highlighted offer is, -1 for none: first one
+// whose models all appear in the offer with the same deck first, else the
+// first with the same deck (the offer wears the player's own griptape and
+// truck paint, peer review 2026-11-07).
+inline bool SameBoard(const std::vector<std::string>& rack, const std::vector<std::string>& offer);
+inline int RackFor(const std::vector<std::vector<std::string>>& racks, const std::vector<std::string>& offer) {
+    for (std::size_t i = 0; i < racks.size(); ++i)
+        if (SameBoard(racks[i], offer)) return static_cast<int>(i);
+    for (std::size_t i = 0; i < racks.size(); ++i)
+        if (!racks[i].empty() && !offer.empty() && racks[i].front() == offer.front()) return static_cast<int>(i);
+    return -1;
 }
 
 // Whether the highlighted offer (its models, as the menu lists them) is the

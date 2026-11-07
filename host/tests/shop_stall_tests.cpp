@@ -36,7 +36,7 @@ int main() {
     // Seller: open and near -> there; closed with the player inside -> stays.
     assert(SellerWanted(true, 10.0f, false));
     assert(!SellerWanted(true, 70.0f, false));
-    assert(SellerWanted(false, 6.0f, true));
+    assert(!SellerWanted(false, 6.0f, true));           // closed: none made, even inside
     assert(!SellerGoes(false, 6.0f, true));             // closing while inside: stays
     assert(SellerGoes(false, 20.0f, false));            // closed, outside: goes
     assert(!SellerGoes(true, 70.0f, false));            // open, 60-80 m: kept (hysteresis)
@@ -65,6 +65,11 @@ int main() {
     assert(!SameBoard(rack, {"deck_a", "grip_x", "truck_c", "wheel_d"}));
     assert(!SameBoard(rack, {"deck_z", "grip_b", "truck_c", "wheel_d"}));
     assert(!SameBoard({}, {"deck_a"}));
+    // Offers wear the player's own grip/paint: fall back to the deck.
+    const std::vector<std::vector<std::string>> racks = {{"deck_q", "grip_b"}, rack};
+    assert(RackFor(racks, {"deck_a", "grip_b", "truck_c", "wheel_d"}) == 1);
+    assert(RackFor(racks, {"deck_a", "grip_own", "tb_paint", "th_paint", "wheel_d"}) == 1);
+    assert(RackFor(racks, {"deck_none", "grip_b"}) == -1);
 
     std::cout << "shop stall tests passed\n";
     return 0;
