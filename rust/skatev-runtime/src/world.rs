@@ -561,7 +561,13 @@ fn build_area_rules(center: Vec3, tris: impl Iterator<Item = ([[f32; 3]; 3], u32
     let (indexed_tris, rail_grid) = cache.rail_index.take().filter(|(old, _)| *old == gta)
         .unwrap_or_else(|| (gta.clone(), crate::grid::XyGrid::triangles(1.0, &gta)));
     let raw_tracks = if static_rails { crate::tracks::rails_in([center.x, center.y], RADIUS + 3.0) } else { Vec::new() };
-    let tracks = cache.tracks.apply(&raw_tracks, &dirty, 1.0, |r| onto_rail_boxes_indexed(vec![r.to_vec()], &gta, &rail_grid));
+    let mut tracks = cache.tracks.apply(&raw_tracks, &dirty, 1.0, |r| onto_rail_boxes_indexed(vec![r.to_vec()], &gta, &rail_grid));
+    // GTA's steel without train nodes (the straight legs of switches,
+    // sidings): design 2026-11-07-track-steel rule 2.
+    if static_rails && crate::tracks::ENABLED.load(std::sync::atomic::Ordering::Relaxed) {
+        let orphans = orphan_steel(&gta, &rail_grid, &tracks, [center.x, center.y], RADIUS + 3.0);
+        tracks.extend(onto_rail_boxes_indexed(orphans, &gta, &rail_grid));
+    }
     // A track's rail sits in a slot of GTA's collision whose edges the
     // finder takes for lips: 3-5 lines per rail, the board took a slot edge
     // and sank in or slipped under (2026-10-20 metro video). Only the
@@ -912,6 +918,10 @@ const RAIL_HEAD_MAX: f32 = 0.15;
 const RAIL_DROP: f32 = 0.02;
 /// ... and at most this far across from the previous point's head (m).
 const RAIL_STEP: f32 = 0.05;
+/// Design 2026-11-07-track-steel: a line already on its steel follows it this
+/// far from the node line (m; the La Mesa switch curves lie up to 0.47 m off
+/// their node polyline); a line starts only within RAIL_REACH.
+const RAIL_WIDE: f32 = 0.6;
 
 /// Rail heads in a row of floor heights across the track (`RAIL_SAMPLE`
 /// apart, index 0 at -RAIL_REACH): a run is neighbouring samples that step
@@ -921,7 +931,13 @@ const RAIL_STEP: f32 = 0.05;
 /// (neighbouring head samples) of a run that does not touch either end of the
 /// row, has nothing or something lower beside it (a groove beside a rail or a
 /// curb is no rail) and is at most `RAIL_HEAD_MAX` wide.
+#[cfg(test)]
 fn rail_heads(row: &[Option<f32>]) -> Vec<(f32, f32, f32)> {
+    rail_heads_within(row, RAIL_REACH)
+}
+
+/// `rail_heads` of a row reaching `reach` either side.
+fn rail_heads_within(row: &[Option<f32>], reach: f32) -> Vec<(f32, f32, f32)> {
     let mut out = Vec::new();
     let mut i = 0;
     while i < row.len() {
@@ -944,7 +960,7 @@ fn rail_heads(row: &[Option<f32>]) -> Vec<(f32, f32, f32)> {
             while k + 1 <= end && row[k + 1].is_some_and(|z| z >= top - 0.01) { k += 1; }
             let width = (k - lo) as f32 * RAIL_SAMPLE;
             if width <= RAIL_HEAD_MAX {
-                out.push(((lo + k) as f32 * 0.5 * RAIL_SAMPLE - RAIL_REACH, width, top));
+                out.push(((lo + k) as f32 * 0.5 * RAIL_SAMPLE - reach, width, top));
             }
             k += 1;
         }
@@ -985,41 +1001,74 @@ fn onto_rail_boxes_indexed(lines: Vec<Vec<Vec3>>, gta: &[[Vec3; 3]], grid: &crat
         .into_iter()
         .flat_map(|line| {
             if line.len() < 2 { return Vec::new(); }
-            let widths = std::cell::RefCell::new(Vec::new());
-            // Head widths alone: a line on a rail takes its edges from the
-            // heads, not from fallback slabs (peer review 2026-11-03).
-            let head_widths = std::cell::RefCell::new(Vec::new());
-            // The last point that found a rail head, and the head's offset.
-            let mut previous: Option<(Vec3, f32)> = None;
-            let snapped: Vec<Option<Vec3>> = (0..line.len())
-                .map(|i| {
+            // Design 2026-11-07-track-steel: each point is snapped in a pass
+            // along the line and in a pass back, so a line that starts (or
+            // restarts after a gap) beside its steel still finds it from the
+            // other side; heads win over the 8 cm rule, and a drifted pass's
+            // "interpolate" wins over the other pass's fallback.
+            // (point, kind: 2 head, 1 fallback, 0 interpolate, width, locked:
+            // the pass was following steel there)
+            let pass = |order: &mut dyn Iterator<Item = usize>| -> Vec<(Option<Vec3>, u8, f32, bool)> {
+                let mut out = vec![(None, 0u8, 0.0f32, false); line.len()];
+                // The last two points that found a rail head, and their offsets.
+                // (node-line point, offset, steel point) of the last head, and
+                // the steel point of the one before.
+                let mut previous: Option<(Vec3, f32, bevy_math::Vec2)> = None;
+                let mut before: Option<bevy_math::Vec2> = None;
+                for i in order {
                     let p = line[i];
                     let (a, b) = (line[i.saturating_sub(1)], line[(i + 1).min(line.len() - 1)]);
                     let along = (b - a).truncate().normalize_or_zero();
                     let side = bevy_math::Vec2::new(-along.y, along.x);
                     let bed = p.z - crate::tracks::RAIL_TOP;
-                    // GTA's rail head within RAIL_REACH, keeping to the steel
-                    // the line was on (design 2026-11-03-metro-rail-snap).
-                    let steps = (RAIL_REACH / RAIL_SAMPLE).round() as i32;
+                    // GTA's rail head, keeping to the steel the line was on
+                    // (design 2026-11-03-metro-rail-snap); the row reaches
+                    // RAIL_WIDE so a line follows its steel where the node
+                    // polyline cuts a curve; it starts only within RAIL_REACH.
+                    let steps = (RAIL_WIDE / RAIL_SAMPLE).round() as i32;
                     let row: Vec<Option<f32>> = (-steps..=steps).map(|k| {
                         let q = p.truncate() + side * (k as f32 * RAIL_SAMPLE);
                         floor(q.x, q.y, bed + 0.03, bed + RAIL_SEARCH_UP)
                     }).collect();
-                    let want = previous.filter(|(q, _)| q.distance(p) < 2.0).map(|(_, o)| o);
-                    let aim = want.unwrap_or(0.0);
-                    let heads = rail_heads(&row);
+                    let want = previous.filter(|(q, _, _)| q.distance(p) < 2.0).map(|(q, w, s)| (q, w, s));
+                    // The steel goes on along its own heading over the last two
+                    // heads, not the node polyline's: across a node vertex the
+                    // offset from the polyline turns by c/R (13 m chord, 50 m
+                    // radius: 6.5 cm per 0.5 m; Goldfish 2026-11-07).
+                    let aim = want.map(|(q, w, steel)| {
+                        match before.filter(|r| { let d = r.distance(steel); d > 0.1 && d < 2.5 }) {
+                            Some(r) => {
+                                let heading = (steel - r).normalize_or_zero();
+                                let ahead = steel + heading * q.truncate().distance(p.truncate());
+                                (ahead - p.truncate()).dot(side).clamp(-RAIL_WIDE, RAIL_WIDE)
+                            }
+                            None => w,
+                        }
+                    });
+                    let heads = rail_heads_within(&row, RAIL_WIDE);
+                    // Heads the old 25 cm window saw whole (it rejected runs
+                    // touching its ends): only they send a point to
+                    // interpolation instead of the 8 cm rule (freight trial t6:
+                    // switch blades lost their lines).
+                    let near = heads.iter().any(|h| h.0.abs() + h.1 * 0.5 + RAIL_SAMPLE < RAIL_REACH);
+                    let centre = aim.unwrap_or(0.0);
                     let head = heads.iter().copied()
-                        .filter(|h| want.is_none_or(|w| (h.0 - w).abs() <= RAIL_STEP))
-                        .min_by(|x, y| (x.0 - aim).abs().total_cmp(&(y.0 - aim).abs()).then(x.0.abs().total_cmp(&y.0.abs())));
+                        .filter(|h| match aim { Some(w) => (h.0 - w).abs() <= RAIL_STEP, None => h.0.abs() <= RAIL_REACH })
+                        .min_by(|x, y| (x.0 - centre).abs().total_cmp(&(y.0 - centre).abs()).then(x.0.abs().total_cmp(&y.0.abs())));
+                    if let Some((middle, width, top)) = head {
+                        let q = p.truncate() + side * middle;
+                        before = previous.filter(|(r, _, _)| r.distance(p) < 2.5).map(|(_, _, s)| s);
+                        previous = Some((p, middle, q));
+                        out[i] = (Some(Vec3::new(q.x, q.y, top + RAIL_CLEAR)), 2, width, true);
+                        continue;
+                    }
+                    out[i].3 = want.is_some();
                     // Heads, but none on this line's steel (a frog, a joint):
                     // interpolated, not the +-8 cm rule that may take the other one.
-                    if head.is_none() && want.is_some() && !heads.is_empty() { return None; }
-                    if let Some((middle, width, top)) = head {
-                        previous = Some((p, middle));
-                        head_widths.borrow_mut().push(width);
-                        let q = p.truncate() + side * middle;
-                        return Some(Vec3::new(q.x, q.y, top + RAIL_CLEAR));
-                    }
+                    if want.is_some() && near { continue; }
+                    // A line that drifted with its steel is never pulled back
+                    // onto the node line by the 8 cm rule.
+                    if want.is_some_and(|(_, w, _)| w.abs() > RAIL_REACH) { continue; }
                     // No rail head: today's rule.
                     // Highest surface across the rail, and where it is.
                     let samples: Vec<(f32, f32)> = (-8..=8)
@@ -1029,29 +1078,31 @@ fn onto_rail_boxes_indexed(lines: Vec<Vec<Vec3>>, gta: &[[Vec3; 3]], grid: &crat
                             floor(q.x, q.y, bed + 0.03, bed + RAIL_SEARCH_UP).map(|z| (off, z))
                         })
                         .collect();
-                    let top = samples.iter().map(|s| s.1).fold(None, |m: Option<f32>, z| Some(m.map_or(z, |m| m.max(z))))?;
+                    let Some(top) = samples.iter().map(|s| s.1).fold(None, |m: Option<f32>, z| Some(m.map_or(z, |m| m.max(z)))) else { continue };
                     let on_top: Vec<f32> = samples.iter().filter(|s| s.1 >= top - 0.01).map(|s| s.0).collect();
                     let middle = on_top.iter().sum::<f32>() / on_top.len() as f32;
                     let (lo, hi) = on_top.iter().fold((f32::MAX, f32::MIN), |(a, b), &o| (a.min(o), b.max(o)));
-                    widths.borrow_mut().push(hi - lo);
                     let q = p.truncate() + side * middle;
-                    Some(Vec3::new(q.x, q.y, top + RAIL_CLEAR))
-                })
-                .collect();
-            let (Some(first), Some(last)) = (snapped.iter().position(|s| s.is_some()), snapped.iter().rposition(|s| s.is_some())) else { return Vec::new() };
-            if first >= last { return Vec::new(); }
-            let mut result = Vec::with_capacity(last - first + 1);
-            for i in first..=last {
-                if let Some(p) = snapped[i] {
-                    result.push(p);
-                } else {
-                    let prev = (first..i).rev().find(|&k| snapped[k].is_some()).unwrap();
-                    let next = (i + 1..=last).find(|&k| snapped[k].is_some()).unwrap();
-                    let t = (i - prev) as f32 / (next - prev) as f32;
-                    result.push(snapped[prev].unwrap().lerp(snapped[next].unwrap(), t));
+                    out[i] = (Some(Vec3::new(q.x, q.y, top + RAIL_CLEAR)), 1, hi - lo, want.is_some());
                 }
-            }
-            if result.len() < 2 { return Vec::new(); }
+                out
+            };
+            let forward = pass(&mut (0..line.len()));
+            let back = pass(&mut (0..line.len()).rev());
+            let mut widths = Vec::new();
+            // Head widths alone: a line on a rail takes its edges from the
+            // heads, not from fallback slabs (peer review 2026-11-03).
+            let mut head_widths = Vec::new();
+            let snapped: Vec<Option<Vec3>> = forward.iter().zip(&back).map(|(f, b)| {
+                // The pass back only fills where the pass along had not yet
+                // found its steel (a line start beside it): at a switch the
+                // two passes may follow different legs (freight junction trial).
+                let pick = if f.1 == 2 { f } else if b.1 == 2 && !f.3 { b } else if f.1 == 0 || b.1 == 0 { return None } else { f };
+                if pick.1 == 2 { head_widths.push(pick.2) } else { widths.push(pick.2) }
+                pick.0
+            }).collect();
+            let widths = std::cell::RefCell::new(widths);
+            let head_widths = std::cell::RefCell::new(head_widths);
             // Both edges of the rail head grindable (Manatros 2026-10-24/25:
             // "the track rails should have 2 separate grindable edges"); a
             // head narrower than EDGE_MIN keeps one line on its middle.
@@ -1059,15 +1110,57 @@ fn onto_rail_boxes_indexed(lines: Vec<Vec<Vec3>>, gta: &[[Vec3; 3]], grid: &crat
             if w.is_empty() { w = widths.into_inner(); }
             w.sort_by(f32::total_cmp);
             let half = w.get(w.len() / 2).copied().unwrap_or(0.0) * 0.5;
-            if half * 2.0 < EDGE_MIN { return vec![result]; }
-            let side = |i: usize| {
-                let (a, b) = (result[i.saturating_sub(1)], result[(i + 1).min(result.len() - 1)]);
-                let along = (b - a).truncate().normalize_or_zero();
-                Vec3::new(-along.y, along.x, 0.0)
+            let finish = |snapped: &[Option<Vec3>]| -> Vec<Vec<Vec3>> {
+                let (Some(first), Some(last)) = (snapped.iter().position(|s| s.is_some()), snapped.iter().rposition(|s| s.is_some())) else { return Vec::new() };
+                if first >= last { return Vec::new(); }
+                let mut result = Vec::with_capacity(last - first + 1);
+                for i in first..=last {
+                    if let Some(p) = snapped[i] {
+                        result.push(p);
+                    } else {
+                        let prev = (first..i).rev().find(|&k| snapped[k].is_some()).unwrap();
+                        let next = (i + 1..=last).find(|&k| snapped[k].is_some()).unwrap();
+                        let t = (i - prev) as f32 / (next - prev) as f32;
+                        result.push(snapped[prev].unwrap().lerp(snapped[next].unwrap(), t));
+                    }
+                }
+                if result.len() < 2 { return Vec::new(); }
+                if half * 2.0 < EDGE_MIN { return vec![result]; }
+                let side = |i: usize| {
+                    let (a, b) = (result[i.saturating_sub(1)], result[(i + 1).min(result.len() - 1)]);
+                    let along = (b - a).truncate().normalize_or_zero();
+                    Vec3::new(-along.y, along.x, 0.0)
+                };
+                let left = (0..result.len()).map(|i| result[i] + side(i) * half).collect();
+                let right = (0..result.len()).map(|i| result[i] - side(i) * half).collect();
+                vec![left, right]
             };
-            let left = (0..result.len()).map(|i| result[i] + side(i) * half).collect();
-            let right = (0..result.len()).map(|i| result[i] - side(i) * half).collect();
-            vec![left, right]
+            // Design 2026-11-07-track-steel: where neighbouring points lie on
+            // different steel (the passes there and back took the two legs
+            // of a switch), the line ends instead of crossing the ballast:
+            // a jump over RAIL_REACH (and 2 RAIL_STEP per sample between);
+            // smaller steps at a frog stay one line (freight junction trial).
+            let offset = |i: usize, q: Vec3| {
+                let (a, b) = (line[i.saturating_sub(1)], line[(i + 1).min(line.len() - 1)]);
+                let along = (b - a).truncate().normalize_or_zero();
+                (q - line[i]).truncate().dot(bevy_math::Vec2::new(-along.y, along.x))
+            };
+            let mut out = Vec::new();
+            let mut start = 0;
+            let mut last: Option<(usize, f32)> = None;
+            for i in 0..snapped.len() {
+                let Some(q) = snapped[i] else { continue };
+                let o = offset(i, q);
+                if let Some((j, oj)) = last {
+                    if (o - oj).abs() > RAIL_REACH.max(2.0 * RAIL_STEP * (i - j) as f32) {
+                        out.extend(finish(&snapped[start..=j]));
+                        start = i;
+                    }
+                }
+                last = Some((i, o));
+            }
+            out.extend(finish(&snapped[start..]));
+            out
         })
         .collect()
 }
@@ -1579,6 +1672,167 @@ fn track_gap_boxes(tracks: &[Vec<Vec3>], gta: &[[Vec3; 3]], grid: &crate::grid::
     // Fewer, longer boxes: the lines are sampled every 0.5 m (12 faces each).
     crate::rails::straighten(&mut gaps, TRACK_STRAIGHT);
     crate::visrails::boxes_deep(&gaps, Some(TRACK_BOX_DEPTH))
+}
+
+/// Rule 2 of design 2026-11-07-track-steel: a GTA rail head is an upward
+/// face at most RAIL_HEAD_MAX wide and ORPHAN_MIN_LEN long ...
+const ORPHAN_MIN_LEN: f32 = 0.4;
+/// ... standing 3.5-30 cm over a floor on both sides (sampled this far
+/// across, m) with nothing within 2 cm of its top there ...
+const ORPHAN_BESIDE: [f32; 2] = [0.12, 0.20];
+/// ... with a partner head this far across (centre to centre, m) ...
+const ORPHAN_GAUGE: (f32, f32) = (1.40, 1.70);
+/// ... parallel within 15 degrees (cosine) ...
+const ORPHAN_PARALLEL: f32 = 0.966;
+/// ... and chains shorter than this (m) give no line.
+const ORPHAN_CHAIN_MIN: f32 = 2.0;
+/// Head faces this near a snapped track line (m, 2D) are its steel already
+/// (a line on a head lies within 5 cm of its middle).
+const ORPHAN_COVERED: f32 = 0.10;
+
+/// Raw track lines (node-line form, for `onto_rail_boxes_indexed`) along
+/// GTA rail heads that no snapped track line covers.
+fn orphan_steel(gta: &[[Vec3; 3]], grid: &crate::grid::XyGrid, tracks: &[Vec<Vec3>], centre: [f32; 2], half: f32) -> Vec<Vec<Vec3>> {
+    use bevy_math::Vec2;
+    let floors = |x: f32, y: f32| grid.at(x, y).iter().filter_map(|&i| {
+        let t = gta[i as usize];
+        let n = (t[1] - t[0]).cross(t[2] - t[0]);
+        if n.normalize_or_zero().z < 0.7 { return None; }
+        let tri = svwc::Tri { v: t.map(|q| q.to_array()), material: 0 };
+        svwc::clean::floor_at(&tri, [x, y])
+    }).collect::<Vec<f32>>();
+    // (start, end, top) of each head face's long edge, moved through its centroid.
+    let mut heads: Vec<(Vec2, Vec2, f32)> = Vec::new();
+    for t in gta {
+        let n = (t[1] - t[0]).cross(t[2] - t[0]);
+        if n.normalize_or_zero().z <= 0.7 { continue; }
+        let c = (t[0] + t[1] + t[2]) / 3.0;
+        if (c.x - centre[0]).abs() > half || (c.y - centre[1]).abs() > half { continue; }
+        let (a, b) = [(0, 1), (1, 2), (2, 0)].iter().map(|&(i, j)| (t[i].truncate(), t[j].truncate()))
+            .max_by(|x, y| x.0.distance(x.1).total_cmp(&y.0.distance(y.1))).unwrap();
+        let len = a.distance(b);
+        if len < ORPHAN_MIN_LEN { continue; }
+        let width = n.z.abs() / len;
+        if width > RAIL_HEAD_MAX { continue; }
+        let dir = (b - a) / len;
+        let perp = Vec2::new(-dir.y, dir.x);
+        let top = t.iter().map(|q| q.z).fold(f32::MIN, f32::max);
+        // The ground beside the head (the bed the snap measures from).
+        let mut bed = f32::MIN;
+        let proud = [1.0f32, -1.0].iter().all(|s| {
+            let mut ground = false;
+            for d in ORPHAN_BESIDE {
+                let q = c.truncate() + perp * (s * d);
+                let f = floors(q.x, q.y);
+                if f.iter().any(|&z| z >= top - 0.02 && z <= top + 0.05) { return false; }
+                for &z in f.iter().filter(|&&z| z >= top - 0.30 && z <= top - 0.035) { ground = true; bed = bed.max(z); }
+            }
+            ground
+        });
+        if !proud { continue; }
+        let off = perp * (c.truncate() - a).dot(perp);
+        // Stored as bed + 0.10: the line point is bed + RAIL_TOP below.
+        heads.push((a + off, b + off, bed + 0.10));
+    }
+    // A track, not a ledge: a parallel partner head at the gauge.
+    let paired: Vec<bool> = heads.iter().map(|&(a, b, top)| {
+        let dir = (b - a).normalize_or_zero();
+        let perp = Vec2::new(-dir.y, dir.x);
+        let mid = (a + b) * 0.5;
+        let half_len = a.distance(b) * 0.5;
+        heads.iter().any(|&(c, d, top2)| {
+            let dir2 = (d - c).normalize_or_zero();
+            let mid2 = (c + d) * 0.5;
+            let across = (mid2 - mid).dot(perp).abs();
+            dir.dot(dir2).abs() >= ORPHAN_PARALLEL && (top - top2).abs() <= 0.10
+                && across >= ORPHAN_GAUGE.0 && across <= ORPHAN_GAUGE.1
+                && (mid2 - mid).dot(dir).abs() <= half_len + c.distance(d) * 0.5
+        })
+    }).collect();
+    // Not already a track.
+    let covered = |p: Vec2| tracks.iter().any(|l| l.windows(2).any(|w| {
+        let (a, b) = (w[0].truncate(), w[1].truncate());
+        let d = b - a;
+        let t = if d.length_squared() > 1e-12 { ((p - a).dot(d) / d.length_squared()).clamp(0.0, 1.0) } else { 0.0 };
+        (a + d * t).distance(p) < ORPHAN_COVERED
+    }));
+    let mut segs: Vec<(Vec2, Vec2, f32)> = heads.into_iter().zip(paired)
+        .filter(|((a, b, _), ok)| *ok && !covered((*a + *b) * 0.5)).map(|(h, _)| h).collect();
+    // Longest first: a chain grows from its best piece.
+    segs.sort_by(|x, y| y.0.distance(y.1).total_cmp(&x.0.distance(x.1)));
+    // Chains along the heads: the next piece starts at most 1 m ahead of the
+    // chain's end, within 5 cm across and 15 degrees, and reaches beyond it.
+    let mut used = vec![false; segs.len()];
+    let mut out = Vec::new();
+    for s in 0..segs.len() {
+        if used[s] { continue; }
+        used[s] = true;
+        let mut chain: Vec<(Vec2, f32)> = vec![(segs[s].0, segs[s].2), (segs[s].1, segs[s].2)];
+        for _ in 0..2 {
+            loop {
+                let n = chain.len();
+                let (end, prev) = (chain[n - 1].0, chain[n - 2].0);
+                let dir = (end - prev).normalize_or_zero();
+                let perp = Vec2::new(-dir.y, dir.x);
+                let mut best: Option<(usize, Vec2, f32, f32)> = None;
+                for (k, &(a, b, top)) in segs.iter().enumerate() {
+                    if used[k] { continue; }
+                    let d2 = (b - a).normalize_or_zero();
+                    if dir.dot(d2).abs() < ORPHAN_PARALLEL { continue; }
+                    let (near, far) = if (a - end).dot(dir) <= (b - end).dot(dir) { (a, b) } else { (b, a) };
+                    let along_near = (near - end).dot(dir);
+                    let along_far = (far - end).dot(dir);
+                    if along_near > 1.0 || along_far <= 0.1 { continue; }
+                    // Across measured where the piece is nearest the end.
+                    let at_end = if along_near >= 0.0 { near } else { near + (far - near) * (-along_near / (along_far - along_near)) };
+                    if (at_end - end).dot(perp).abs() > 0.05 { continue; }
+                    if best.is_none_or(|x| along_far > x.3) { best = Some((k, far, top, along_far)); }
+                }
+                let Some((k, far, top, _)) = best else { break };
+                used[k] = true;
+                chain.push((far, top));
+                // Pieces along the new stretch (the head quad's other
+                // triangle) are this chain's; another chain never re-walks it.
+                for (j, &(a, b, _)) in segs.iter().enumerate() {
+                    if used[j] { continue; }
+                    let m = (a + b) * 0.5;
+                    let d = far - end;
+                    let t = if d.length_squared() > 1e-12 { ((m - end).dot(d) / d.length_squared()).clamp(0.0, 1.0) } else { 0.0 };
+                    if (end + d * t).distance(m) <= 0.06 { used[j] = true; }
+                }
+            }
+            chain.reverse();
+        }
+        // Pieces along the chain (the other triangle of each head quad) are part of it.
+        for (j, &(a, b, _)) in segs.iter().enumerate() {
+            if used[j] { continue; }
+            let m = (a + b) * 0.5;
+            if chain.windows(2).any(|w| {
+                let (p, q) = (w[0].0, w[1].0);
+                let d = q - p;
+                let t = if d.length_squared() > 1e-12 { ((m - p).dot(d) / d.length_squared()).clamp(0.0, 1.0) } else { 0.0 };
+                (p + d * t).distance(m) <= 0.06
+            }) { used[j] = true; }
+        }
+        let mut line = Vec::new();
+        for w in chain.windows(2) {
+            let steps = (w[0].0.distance(w[1].0) / 0.5).ceil().max(1.0) as usize;
+            for k in 0..steps {
+                let t = k as f32 / steps as f32;
+                let p = w[0].0.lerp(w[1].0, t);
+                let top = w[0].1 + (w[1].1 - w[0].1) * t;
+                line.push(Vec3::new(p.x, p.y, top - 0.10 + crate::tracks::RAIL_TOP));
+            }
+        }
+        let (last, top) = chain[chain.len() - 1];
+        line.push(Vec3::new(last.x, last.y, top - 0.10 + crate::tracks::RAIL_TOP));
+        out.push(line);
+    }
+    // Chains that met end to end (grown from different pieces) are one.
+    crate::rails::trim_overlaps(&mut out);
+    crate::rails::join_ends(&mut out);
+    out.retain(|l| l.windows(2).map(|w| w[0].truncate().distance(w[1].truncate())).sum::<f32>() >= ORPHAN_CHAIN_MIN);
+    out
 }
 
 fn authoritative_tracks(rails: Vec<Vec<Vec3>>, tracks: Vec<Vec<Vec3>>) -> Vec<Vec<Vec3>> {
@@ -3050,6 +3304,124 @@ mod top_tests {
         let snapped = onto_rail_boxes(line(), &gta);
         let mids: Vec<f32> = (0..snapped[0].len()).map(|i| (snapped[0][i].y + snapped[1][i].y) * 0.5).collect();
         assert!(mids.iter().all(|m| (m - 0.12).abs() < 0.011), "kept to its rail: {mids:?}");
+    }
+
+    /// Steel 8 cm wide, top 0.17, whose middle lies `off(x)` across, in 0.25 m
+    /// pieces from x 0 to 20 (design 2026-11-07-track-steel).
+    fn steel(off: impl Fn(f32) -> f32) -> Vec<[Vec3; 3]> {
+        let v = |x: f32, y: f32| Vec3::new(x, y, 0.17);
+        let mut out = Vec::new();
+        for k in 0..80 {
+            let (x0, x1) = (k as f32 * 0.25, (k + 1) as f32 * 0.25);
+            let (c0, c1) = (off(x0), off(x1));
+            out.push([v(x0, c0 - 0.04), v(x1, c1 - 0.04), v(x1, c1 + 0.04)]);
+            out.push([v(x0, c0 - 0.04), v(x1, c1 + 0.04), v(x0, c0 + 0.04)]);
+        }
+        out
+    }
+
+    fn half_metre_line() -> Vec<Vec<Vec3>> {
+        vec![(0..=32).map(|k| Vec3::new(2. + k as f32 * 0.5, 0., crate::tracks::RAIL_TOP)).collect()]
+    }
+
+    fn middle_at(snapped: &[Vec<Vec3>], x: f32) -> f32 {
+        let at = |l: &Vec<Vec3>| l.iter().min_by(|a, b| (a.x - x).abs().total_cmp(&(b.x - x).abs())).unwrap().y;
+        snapped.iter().map(at).sum::<f32>() / snapped.len() as f32
+    }
+
+    #[test]
+    fn a_track_line_follows_its_steel_away_from_the_node_line() {
+        // The west La Mesa switch curve: the steel leaves the node line and
+        // lies 0.45 m off it 11 m later (fails with the 25 cm window).
+        let mut gta = bed();
+        gta.extend(steel(|x| if x < 5. { 0. } else { (0.04 * (x - 5.)).min(0.45) }));
+        let snapped = onto_rail_boxes(half_metre_line(), &gta);
+        assert_eq!(snapped.len(), 2);
+        for x in [4., 10., 15., 17.] {
+            let want: f32 = if x < 5. { 0. } else { (0.04f32 * (x - 5.)).min(0.45) };
+            assert!((middle_at(&snapped, x) - want).abs() < 0.015, "x {x}: {} want {want}", middle_at(&snapped, x));
+        }
+    }
+
+    #[test]
+    fn a_track_line_follows_a_curve_its_node_polyline_cuts() {
+        // An arc of radius 50 m leaving the straight node line at x 8: the
+        // offset grows as (x-8)^2/100, 0.49 m at x 15.
+        let off = |x: f32| if x < 8. { 0. } else { (x - 8.) * (x - 8.) / 100. };
+        let mut gta = bed();
+        gta.extend(steel(off));
+        let snapped = onto_rail_boxes(half_metre_line(), &gta);
+        for x in [6., 10., 13., 15.] {
+            assert!((middle_at(&snapped, x) - off(x)).abs() < 0.015, "x {x}: {} want {}", middle_at(&snapped, x), off(x));
+        }
+    }
+
+    #[test]
+    fn a_track_line_starts_only_on_steel_within_the_reach() {
+        // A head 0.40 m off from the start (a platform edge, another rail):
+        // nothing within 25 cm, nothing at rail height within 8 cm: no line.
+        let mut gta = bed();
+        gta.extend(steel(|_| 0.40));
+        assert!(onto_rail_boxes(half_metre_line(), &gta).is_empty());
+    }
+
+    #[test]
+    fn a_head_at_the_end_of_the_old_window_is_found() {
+        // 1105-14: a 9 cm head 23 cm off reached 27.5 cm and touched the 25 cm window's end.
+        let mut gta = bed();
+        gta.extend(strip(0.185, 0.275, 0.17));
+        assert!((centre(&onto_rail_boxes(line(), &gta)) - 0.23).abs() < 0.011);
+    }
+
+    /// Two plates (rail heads 8 cm wide, 10 cm over the bed) `gauge` apart
+    /// along x 0..20 around y 0.
+    fn plates(gauge: f32) -> Vec<[Vec3; 3]> {
+        let mut out = strip(gauge * 0.5 - 0.04, gauge * 0.5 + 0.04, 0.10);
+        out.extend(strip(-gauge * 0.5 - 0.04, -gauge * 0.5 + 0.04, 0.10));
+        out
+    }
+
+    #[test]
+    fn steel_without_train_nodes_gets_two_lines_per_rail() {
+        let mut gta = bed();
+        gta.extend(plates(1.5));
+        let grid = crate::grid::XyGrid::triangles(1.0, &gta);
+        let raw = orphan_steel(&gta, &grid, &[], [10., 0.], 50.);
+        assert_eq!(raw.len(), 2, "{raw:?}");
+        let lines = onto_rail_boxes_indexed(raw, &gta, &grid);
+        assert_eq!(lines.len(), 4, "two head edges per rail (A49)");
+        for l in &lines {
+            assert!(l.iter().all(|p| (p.z - (0.10 + RAIL_CLEAR)).abs() < 1e-3 && (p.y.abs() - 0.75).abs() <= 0.045), "{l:?}");
+            assert!(l.iter().map(|p| p.x).fold(f32::MAX, f32::min) < 1.0 && l.iter().map(|p| p.x).fold(f32::MIN, f32::max) > 19.0, "whole length: {l:?}");
+        }
+    }
+
+    #[test]
+    fn a_lone_plate_a_curb_or_covered_steel_gets_no_orphan_line() {
+        // One plate: no gauge partner.
+        let mut gta = bed();
+        gta.extend(strip(0.71, 0.79, 0.10));
+        let grid = crate::grid::XyGrid::triangles(1.0, &gta);
+        assert!(orphan_steel(&gta, &grid, &[], [10., 0.], 50.).is_empty());
+        // Plates at 3 m: no track.
+        let mut gta = bed();
+        gta.extend(plates(3.0));
+        let grid = crate::grid::XyGrid::triangles(1.0, &gta);
+        assert!(orphan_steel(&gta, &grid, &[], [10., 0.], 50.).is_empty());
+        // Two curbs: the pavement is at their height on the outer side.
+        let mut gta = bed();
+        gta.extend(plates(1.5));
+        gta.extend(strip(0.79, 1.9, 0.10));
+        gta.extend(strip(-1.9, -0.79, 0.10));
+        let grid = crate::grid::XyGrid::triangles(1.0, &gta);
+        assert!(orphan_steel(&gta, &grid, &[], [10., 0.], 50.).is_empty());
+        // Steel a track line already covers.
+        let mut gta = bed();
+        gta.extend(plates(1.5));
+        let grid = crate::grid::XyGrid::triangles(1.0, &gta);
+        let v = |x: f32, y: f32| Vec3::new(x, y, 0.11);
+        let tracks = vec![vec![v(0., 0.75), v(20., 0.75)], vec![v(0., -0.75), v(20., -0.75)]];
+        assert!(orphan_steel(&gta, &grid, &tracks, [10., 0.], 50.).is_empty());
     }
 
     #[test]
