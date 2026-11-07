@@ -132,7 +132,7 @@ struct Config {
     bool trackRails = true;        // TrackRails: a grind rail on top of each train track's steel rail
     bool railTops = true;          // RailTops: grind lines lifted onto the top of what they run along
     bool objectRails = true;       // ObjectRails: standing objects (electrical boxes, benches) get grind rails
-    bool stepRails = false;        // StepRails: every stair step's nose is a grind rail (Manatros 2026-10-24: some prefer it)
+    bool stepRails = true;         // StepRails: every stair nose grindable by default (requested 2026-11-05)
     bool highResParks = true;      // HighResParks: skateparks' coarse collision replaced by the visible model (off: GTA's)
     bool visibleRailings = true;   // VisibleRailings: GTA's solid railing boxes replaced by the visible bars (off: GTA's)
     bool devOptions = false;       // DevOptions: show developer and diagnostic options in the menu (off: a cleaner menu)
@@ -3714,7 +3714,7 @@ constexpr unsigned kHostOnlyWorldSwitch = ~0u;
 struct WorldSwitch { const char* key; const char* name; bool Config::*value; unsigned id; bool best; };
 const WorldSwitch kWorldSwitches[] = {
     {"DetailedStairs", "Stairs as steps", &Config::detailedStairs, 0, true},
-    {"StepRails", "Grind every stair step", &Config::stepRails, 10, false},
+    {"StepRails", "Grind every stair step", &Config::stepRails, 10, true},
     {"TrackRails", "Grind train tracks", &Config::trackRails, 2, true},
     {"ObjectRails", "Grind standing objects", &Config::objectRails, 4, true},
     {"TubeRails", "Grind tubes", &Config::tubeRails, 5, true},

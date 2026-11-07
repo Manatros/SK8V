@@ -720,7 +720,10 @@ pub const VISBAR_TAG: u32 = 1 << 21;
 /// A GTA railing box the visible mesh replaces (shown with VisibleRailings off).
 pub const SLAB_TAG: u32 = 1 << 20;
 pub const PROVENANCE_TAGS: u32 = VISBAR_TAG | SLAB_TAG | PARKMESH_TAG | PARKGTA_TAG | PARKCUT_TAG | URAMP_TAG | USTEP_TAG | FALLBACK_TAG | STEP_TAG | RAMP_TAG | LIVE_TAG;
-/// GTAxSkate StepRails (World page, default off): every stair nose grindable.
+/// GTAxSkate StepRails: every stair nose grindable. Stays false here: the
+/// baker links this crate and must keep noses apart (`tile.noses`) so the
+/// switch works in game. The player's default (on, requested 2026-11-05)
+/// lives in the host, which sends it at startup (peer review 2026-11-07).
 pub static STEP_RAILS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 /// Whether a static triangle with these provenance bits belongs to the world

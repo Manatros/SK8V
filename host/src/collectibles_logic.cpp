@@ -432,6 +432,11 @@ void TravelCandidateOffset(int index, float (&dxDy)[2]) {
 }
 
 bool TravelCheckBounds(const TravelBounds& b, float& outFootOffset) {
+    TravelClearance unused{};
+    return TravelCheckBounds(b, outFootOffset, unused);
+}
+
+bool TravelCheckBounds(const TravelBounds& b, float& outFootOffset, TravelClearance& outClearance) {
     if (!b.valid) return false;
     for (int i = 0; i < 3; ++i)
         if (!std::isfinite(b.min[i]) || !std::isfinite(b.max[i]) || b.max[i] <= b.min[i]) return false;
@@ -441,6 +446,11 @@ bool TravelCheckBounds(const TravelBounds& b, float& outFootOffset) {
     const float foot = -b.min[2];
     if (halfX > 0.45f || halfY > 0.45f || height > 2.10f || foot < 0.50f || foot > 1.25f) return false;
     outFootOffset = foot;
+    // GTA's ped collision is an upright capsule inside the model box: its
+    // radius is bounded by the larger horizontal half extent, its height by
+    // the box height. Test at least the default volume, never less than the model.
+    outClearance.radius = std::max(kTravelCapsuleRadius, std::max(halfX, halfY));
+    outClearance.height = std::max(kTravelCapsuleHeight, height);
     return true;
 }
 
@@ -471,10 +481,14 @@ bool TravelCheckFloorSupport(float navZ, const TravelLosSample (&samples)[5], fl
 }
 
 void TravelCapsuleSpheres(float supportZ, float& outZ1, float& outZ2) {
+    TravelCapsuleSpheres(supportZ, TravelClearance{}, outZ1, outZ2);
+}
+
+void TravelCapsuleSpheres(float supportZ, const TravelClearance& c, float& outZ1, float& outZ2) {
     const float zBase = supportZ + kTravelCapsuleBaseClearance;
-    const float zTop = zBase + kTravelCapsuleHeight;
-    outZ1 = zBase + kTravelCapsuleRadius;
-    outZ2 = zTop - kTravelCapsuleRadius;
+    const float zTop = zBase + c.height;
+    outZ1 = zBase + c.radius;
+    outZ2 = zTop - c.radius;
 }
 
 const char* TravelGuardReason(const TravelGuard& g) {
@@ -493,7 +507,16 @@ const char* TravelGuardReason(const TravelGuard& g) {
 
 void TravelCancel(TravelSession& session, const TravelAdapter& api) {
     if (session.ownsScene && api.stopLoadScene) api.stopLoadScene(api.ctx);
+    // Keep an unread capsule (this session's or an older one still draining).
+    const int drain = session.capsuleHandle ? session.capsuleHandle : session.drainHandle;
     session = TravelSession{};
+    session.drainHandle = drain;
+}
+
+bool TravelDrain(TravelSession& session, const TravelAdapter& api) {
+    if (!session.drainHandle) return false;
+    if (!api.pollCapsule || api.pollCapsule(session.drainHandle, api.ctx).status != 1) session.drainHandle = 0;
+    return session.drainHandle != 0;
 }
 
 std::string TravelRequest(TravelSession& session, const TravelGuard& guard, unsigned nowMs, const TravelAdapter& api) {
@@ -508,7 +531,8 @@ std::string TravelRequest(TravelSession& session, const TravelGuard& guard, unsi
         return std::string("Collectibles travel refused (") + reason + "); GPS set instead";
     }
     float footOffset = 1.0f;
-    if (!api.getPedBounds || !TravelCheckBounds(api.getPedBounds(guard.ped, api.ctx), footOffset)) {
+    TravelClearance clearance{};
+    if (!api.getPedBounds || !TravelCheckBounds(api.getPedBounds(guard.ped, api.ctx), footOffset, clearance)) {
         if (api.setWaypoint) api.setWaypoint(targetPos[0], targetPos[1], api.ctx);
         return "Collectibles travel refused (unsupported ped bounds); GPS set instead";
     }
@@ -531,12 +555,18 @@ std::string TravelRequest(TravelSession& session, const TravelGuard& guard, unsi
         session.startPos[i] = guard.pos[i];
     }
     session.footOffset = footOffset;
+    session.clearance = clearance;
     session.deadlineMs = nowMs + kTravelTimeoutMs;
+    session.nextCandidate = 0;
+    session.capsuleHandle = 0;
     return "";
 }
 
 std::string TravelTick(TravelSession& session, const TravelGuard& guard, unsigned nowMs, const TravelAdapter& api) {
-    if (!session.active) return "";
+    if (!session.active) {
+        TravelDrain(session, api);
+        return "";
+    }
     if (const char* reason = TravelGuardReason(guard)) {
         TravelCancel(session, api);
         return std::string("Collectibles travel cancelled (") + reason + ")";
@@ -573,10 +603,31 @@ std::string TravelTick(TravelSession& session, const TravelGuard& guard, unsigne
         return "Collectibles travel failed (load scene interrupted); GPS set instead";
     }
     if (!api.isLoadSceneLoaded || !api.isLoadSceneLoaded(api.ctx)) return "";
+    // An older session's capsule is still in flight: read it out first, so at
+    // most one shape test is ever pending and none is left unread.
+    if (TravelDrain(session, api)) return "";
+
+    // A capsule started on an earlier frame: wait for it, then arrive or try
+    // the next candidate. Guards, ped, selection and movement were rechecked above.
+    if (session.capsuleHandle) {
+        const TravelCapsuleResult cap = api.pollCapsule ? api.pollCapsule(session.capsuleHandle, api.ctx) : TravelCapsuleResult{};
+        if (cap.status == 1) return "";
+        session.capsuleHandle = 0;
+        const float originZ = session.pendingSupportZ + session.footOffset;
+        if (cap.status == 2 && !cap.hit && std::isfinite(originZ)) {
+            const std::string arrived = session.targetLabel;
+            const int ped = session.startPed;
+            const float x = session.pendingNav[0], y = session.pendingNav[1];
+            if (api.teleportPed) api.teleportPed(ped, x, y, originZ, api.ctx);
+            TravelCancel(session, api);
+            return arrived;
+        }
+    }
 
     static constexpr float kSampleOffsets[5][2] = {
         {0.0f, 0.0f}, {0.4f, 0.0f}, {-0.4f, 0.0f}, {0.0f, 0.4f}, {0.0f, -0.4f}};
-    for (int i = 0; i < kTravelCandidateCount; ++i) {
+    while (session.nextCandidate < kTravelCandidateCount) {
+        const int i = session.nextCandidate++;
         float off[2] = {0, 0};
         TravelCandidateOffset(i, off);
         const float req[2] = {session.targetPos[0] + off[0], session.targetPos[1] + off[1]};
@@ -592,18 +643,14 @@ std::string TravelTick(TravelSession& session, const TravelGuard& guard, unsigne
         float supportZ = 0.0f;
         if (!TravelCheckFloorSupport(nav[2], samples, supportZ)) continue;
         float z1 = 0.0f, z2 = 0.0f;
-        TravelCapsuleSpheres(supportZ, z1, z2);
-        if (!api.probeCapsule) continue;
-        const TravelCapsuleResult cap = api.probeCapsule(nav[0], nav[1], z1, z2, kTravelCapsuleRadius, guard.ped, api.ctx);
-        if (cap.status != 2 || cap.hit) continue;
-        if (TravelGuardReason(guard) != nullptr || guard.ped != session.startPed) break;
-        const float originZ = supportZ + session.footOffset;
-        if (!std::isfinite(originZ)) continue;
-        const std::string arrived = session.targetLabel;
-        const int ped = session.startPed;
-        if (api.teleportPed) api.teleportPed(ped, nav[0], nav[1], originZ, api.ctx);
-        TravelCancel(session, api);
-        return arrived;
+        TravelCapsuleSpheres(supportZ, session.clearance, z1, z2);
+        if (!api.startCapsule || !api.pollCapsule) continue;
+        const int handle = api.startCapsule(nav[0], nav[1], z1, z2, session.clearance.radius, guard.ped, api.ctx);
+        if (!handle) continue;
+        session.capsuleHandle = handle;
+        for (int k = 0; k < 3; ++k) session.pendingNav[k] = nav[k];
+        session.pendingSupportZ = supportZ;
+        return "";  // the result is read on a later frame
     }
     const float tx = session.targetPos[0], ty = session.targetPos[1];
     const std::string id = session.targetId;

@@ -16,6 +16,10 @@ int wmain(int argc, wchar_t** argv) {
     for (const auto* key : {L"BakedWorld", L"Fallbacks", L"RailBoxes", L"PlainGtaCompare"})
         WritePrivateProfileStringW(L"SkateV", key, L"1", ini.c_str());
     assert(WorldAtBest(LoadConfig()));
+    assert(LoadConfig().stepRails); // missing setting uses the requested default
+    WritePrivateProfileStringW(L"SkateV", L"StepRails", L"0", ini.c_str());
+    assert(!LoadConfig().stepRails); // preserve an explicit saved preference
+    WritePrivateProfileStringW(L"SkateV", L"StepRails", nullptr, ini.c_str());
 
     // Saved diagnostic switches must not leak into an enforced local test.
     // Normalization is pure: it preserves both personal fields and the file.
@@ -67,16 +71,16 @@ int wmain(int argc, wchar_t** argv) {
     Config saved{};
     assert(WorldAtBest(saved));
     assert(WorldState(saved) == "best");
-    saved.stepRails = true;
+    saved.stepRails = false;
     saved.highResParks = false;
     assert(!WorldAtBest(saved));
     assert(WorldState(saved) == "custom: Grind every stair step, High-res skateparks");
-    assert(WorldState(saved, true) == "custom: Grind every stair step=1, High-res skateparks=0");
+    assert(WorldState(saved, true) == "custom: Grind every stair step=0, High-res skateparks=0");
     std::map<unsigned, bool> options;
     auto capture = [&](unsigned id, bool on) { options[id] = on; };
     SendWorldOptions(saved, capture);
     const auto original = options;
-    assert(options.size() == 12 && options.at(13) && options.at(8) && options.at(10) && !options.at(14));
+    assert(options.size() == 12 && options.at(13) && options.at(8) && !options.at(10) && !options.at(14));
     assert(!options.count(kHostOnlyWorldSwitch));
     std::set<unsigned> ids;
     for (const auto& [id, on] : options) ids.insert(id);
@@ -89,7 +93,7 @@ int wmain(int argc, wchar_t** argv) {
     g_plainGtaCompare = false;
     SendWorldOptions(saved, capture);
     assert(options == original);
-    assert(saved.stepRails && !saved.highResParks);
+    assert(!saved.stepRails && !saved.highResParks);
     assert(WorldState(saved).find("custom:") == 0);
     for (const auto& setting : BestWorldSettings()) {
         assert(setting.first != "BakedWorld" && setting.first != "Fallbacks" && setting.first != "RailBoxes");
@@ -125,10 +129,10 @@ int wmain(int argc, wchar_t** argv) {
     assert(nearbyRows == 1);
     g_config = saved;
     compare.apply("1");
-    assert(g_plainGtaCompare && g_config.stepRails && !g_config.highResParks);
+    assert(g_plainGtaCompare && !g_config.stepRails && !g_config.highResParks);
     assert(menu::Label(dev->items[1]) == "World collision: COMPARE (plain GTA)");
     compare.apply("0");
-    assert(!g_plainGtaCompare && g_config.stepRails && !g_config.highResParks);
+    assert(!g_plainGtaCompare && !g_config.stepRails && !g_config.highResParks);
     HideUnavailable(pages);
     assert(!dev->items[8].visible()); // TubeRails is technical.
     g_config.devOptions = true;

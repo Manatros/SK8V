@@ -1390,7 +1390,7 @@ fn bake(
                 if tag & SkateVRuntime::live::PARKCUT_TAG != 0 {
                     format!("cut:{}", cleaned.surface_from.get(&key).and_then(|&k| file(k)).unwrap_or("?"))
                 } else {
-                    format!("visible:{}", SkateVRuntime::parks::park_at(v[0][0], v[0][1]).unwrap_or("park"))
+                    format!("visible:{}", visible_park(v).unwrap_or("park"))
                 }
             } else {
                 file(key).map_or_else(|| "rebuilt".to_string(), str::to_string)
@@ -1852,8 +1852,26 @@ Railing top lines from replaced boxes, on the visible bars: {}
     }
 }
 
+// Origin labels follow centroid-based park admission; vertices cover boundary
+// triangles whose centroid falls just outside. This does not change ownership.
+fn visible_park(v: &[[f32; 3]; 3]) -> Option<&'static str> {
+    let x = (v[0][0] + v[1][0] + v[2][0]) / 3.0;
+    let y = (v[0][1] + v[1][1] + v[2][1]) / 3.0;
+    SkateVRuntime::parks::park_at(x, y)
+        .or_else(|| v.iter().find_map(|p| SkateVRuntime::parks::park_at(p[0], p[1])))
+}
+
 #[cfg(test)]
 mod batch_tests {
+    #[test]
+    fn visible_park_labels_boundary_faces_independent_of_first_vertex() {
+        let v = [[749., -1231., 25.], [747., -1232., 25.], [747., -1230., 25.]];
+        assert_eq!(super::visible_park(&v), Some("lamesa"));
+        assert_eq!(super::visible_park(&[v[1], v[2], v[0]]), Some("lamesa"));
+        // Centroid outside, but a vertex still belongs to the admitted park.
+        assert_eq!(super::visible_park(&[[747., -1231., 25.], [751., -1232., 25.], [751., -1230., 25.]]), Some("lamesa"));
+        assert_eq!(super::visible_park(&[[800., -1231., 25.], [801., -1232., 25.], [801., -1230., 25.]]), None);
+    }
     use super::*;
 
     #[test]

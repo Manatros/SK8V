@@ -29,6 +29,10 @@ const SUPPORT_WIDTH: f32 = 0.30;
 const CURVE_FACING: f32 = 0.766;
 /// A visible triangle covers a GTA triangle only when their normals agree this much.
 const FACING: f32 = 0.5;
+/// A visible face this small (m2) is trim, never curve evidence (as `turn`).
+const SLIVER_AREA: f32 = 0.01;
+/// A flat visible face at least this far (m) off a flat GTA deck is a ledge top, not the deck.
+const LEDGE_RISE: f32 = 0.15;
 /// A chord sharing a corner with a curve chord (same facing) is part of that
 /// curve when its visible faces leave it by this much (m; design
 /// 2026-11-02-bowl-wall-owner: at 1102-6 a chord deviating 2.97 cm beside an
@@ -508,9 +512,30 @@ fn replace_park(tris: &mut Vec<Tri>, stairs: &[Tri], visible: &[[[f32; 3]; 3]], 
     // visible one leaves by 3 cm or more somewhere. Flat decks, ledges and
     // railings stay GTA's (their visible copies cut GTA's into dense
     // fragments, marks 5, 7, 8).
+    // A visible sliver (handrail bracket, trim; under 0.01 m2) or a flat
+    // visible face over a flat GTA deck never makes its chord deviate: the
+    // bracket facets 9-21 cm in front of the flat wall at 1105-11 and the
+    // raised ledge top over the deck at 1105-10 cut both into shards
+    // (design 2026-11-07-park-narrow-fixes; decision 2026-10-26: flat decks
+    // stay GTA's; `turn` below already skips slivers).
     let mut deviates: HashMap<usize, f32> = HashMap::default();
     for &(ref u, chord) in &candidates {
         let e = deviates.entry(chord).or_insert(0.0);
+        let p = u.v.map(v3);
+        let sliver = (p[1] - p[0]).cross(p[2] - p[0]).length() / 2.0 < SLIVER_AREA;
+        // A flat face a ledge's height off a flat deck is another surface
+        // (the 23-26 cm ledge top at 1105-10), not the deck bending.
+        let flat_deck = normal(&u.v).z >= CURVE_NEIGHBOUR_MAX_Z && normal(&tris[u.partner].v).z >= CURVE_NEIGHBOUR_MAX_Z
+            && normal(&tris[chord].v).z >= CURVE_NEIGHBOUR_MAX_Z && {
+                // Every corner that far off (a parallel ledge top), not only the
+                // highest one: a 10 deg transition facet rising from the floor
+                // reaches 15 cm at its far corner and is curve evidence
+                // (Goldfish 2026-11-07, item D).
+                let a = v3(tris[chord].v[0]);
+                let n = normal(&tris[chord].v);
+                p.iter().map(|&q| (q - a).dot(n).abs()).fold(f32::MAX, f32::min) >= LEDGE_RISE
+            };
+        if sliver || flat_deck { continue; }
         *e = e.max(u.limit - PARTNER_SLACK);
     }
     // Rescue upward bowl facets only. Admitting small sidewall details
@@ -560,10 +585,14 @@ fn replace_park(tris: &mut Vec<Tri>, stairs: &[Tri], visible: &[[[f32; 3]; 3]], 
         && normal(&tris[k].v).z < CURVE_NEIGHBOUR_MAX_Z
         && tris[k].v.iter().any(|&p| curve_corners.get(&quant(p))
             .is_some_and(|ks| ks.iter().any(|&j| normal(&tris[j].v).dot(normal(&tris[k].v)) >= CURVE_FACING)));
+    // GTA faces a used visible face stands on (its nearest chord and its
+    // partner): those are always cut by it, whatever their facing.
+    let mut owned: std::collections::HashSet<usize> = std::collections::HashSet::new();
     let used: Vec<Used> = candidates.into_iter().filter_map(|(u, chord)| {
         let d = deviation(&u, chord);
         let curve = d >= CURVE || (d >= CURVE_NEIGHBOUR && (beside_curve(chord) || beside_curve(u.partner)));
         if !curve || !small_ok(&u, chord, &mut support) { return None; }
+        owned.insert(chord);
         // The whole face's deviation is the limit: the parts of the chord
         // close to the curve go with it.
         Some(Used { limit: (d + PARTNER_SLACK).min(MATCH), ..u })
@@ -598,7 +627,15 @@ fn replace_park(tris: &mut Vec<Tri>, stairs: &[Tri], visible: &[[[f32; 3]; 3]], 
             let u = &used[k as usize];
             // A replaced chord's covers reach POCKET_REACH (peer review 2026-11-03).
             let (vlo, vhi) = bounds(&u.v, if replaced_chord { u.limit.max(POCKET_REACH) } else { u.limit });
-            vlo.cmple(thi).all() && vhi.cmpge(tlo).all() && normal(&u.v).dot(n) > FACING
+            // A neighbour no used face stands on is cut only by faces of its
+            // own surface (within 40 deg): a wall grazing a lip row's seam by
+            // millimetres sliced it into dozens of shards (1104-5; design
+            // 2026-11-07-park-narrow-fixes).
+            let own = replaced_chord || owned.contains(&i);
+            // (Goldfish item I, "trim cuts only the faces it stands on", was
+            // measured and dropped: it left 2-5 cm floor layers at Hawick,
+            // box bakes exp4/N3 2026-11-07.)
+            vlo.cmple(thi).all() && vhi.cmpge(tlo).all() && normal(&u.v).dot(n) >= if own { FACING } else { CURVE_FACING }
         });
         if cover.is_empty() { continue; }
         // A chord the curve replaces goes whole: where the flat chord lies
@@ -614,7 +651,29 @@ fn replace_park(tris: &mut Vec<Tri>, stairs: &[Tri], visible: &[[[f32; 3]; 3]], 
                     Used { v: u.v, partner: u.partner, limit: if along >= CURVE_FACING { u.limit.max(POCKET_REACH) } else { u.limit / along.max(FACING) } }
                 })
                 .collect();
-            cut_along(&t, wide.iter(), true)
+            // Whole when the unfiltered subtraction leaves nothing. A partly
+            // covered chord keeps the wide cut unless one of its remnants
+            // would fold when snapped: those trenched remnants stood off the
+            // curve as detached shards (1105-1..4, 1104-5..11; the
+            // BOWL_DIAG_ATOMIC bake). Only then the ordinary reach, still
+            // projected along the chord's own normal (`square`, the M21 crease
+            // wedge; Goldfish 2026-11-07, item E). Everywhere else the wide
+            // cut stays: the ordinary one left floor remnants 2-5 cm over the
+            // visible floor at Hawick (box bakes N2/N3, 2026-11-07).
+            // Coverage is judged in double precision on the unfiltered
+            // residual; the cut itself stays the single-precision one the
+            // installed world was baked with.
+            if subtract_along(&t, wide.iter(), true, false).raw_covered {
+                Vec::new()
+            } else {
+                let pieces = cut_along(&t, wide.iter(), true);
+                // A piece snapping collapses to nothing is dropped later, no fold.
+                let folds = pieces.iter().any(|p| {
+                    let s = normal(&p.map(|q| snap(q, &used, &vis_grid)));
+                    s != Vec3::ZERO && s.dot(n) < SNAP_FOLD
+                });
+                if folds { cut_along(&t, cover.iter().map(|&k| &used[k as usize]), true) } else { pieces }
+            }
         } else {
             cut(&t, cover.iter().map(|&k| &used[k as usize]))
         };
@@ -811,6 +870,117 @@ fn cut_along<'a>(t: &[[f32; 3]; 3], cover: impl Iterator<Item = &'a Used>, squar
     out
 }
 
+struct Subtraction { pieces: Vec<[[f32; 3]; 3]>, raw_covered: bool }
+
+fn subtract_along<'a>(t: &[[f32; 3]; 3], cover: impl Iterator<Item = &'a Used>, square: bool, preserve: bool) -> Subtraction {
+    let [a, b, c] = t.map(|p| bevy_math::DVec3::from_array(p.map(f64::from)));
+    let n = (b - a).cross(c - a).normalize();
+    let eu = (b - a).normalize();
+    let ew = n.cross(eu);
+    let to2 = |p: bevy_math::DVec3| bevy_math::DVec2::new((p - a).dot(eu), (p - a).dot(ew));
+    let to3 = |q: bevy_math::DVec2| a + eu * q.x + ew * q.y;
+    let corners = [to2(a), to2(b), to2(c)];
+    let face_area = polygon_area64(&corners);
+    let mut pieces: Vec<Vec<bevy_math::DVec2>> = vec![corners.to_vec()];
+    let mut was_cut = false;
+    for u in cover {
+        let (v, limit) = (&u.v, f64::from(u.limit));
+        let v = v.map(|p| bevy_math::DVec3::from_array(p.map(f64::from)));
+        let nv = (v[1]-v[0]).cross(v[2]-v[0]).normalize_or_zero();
+        let along = nv.dot(n);
+        if along <= f64::from(FACING) { continue; }
+        // Visible corners projected along nv (or n) onto t's plane.
+        let dir = if square { n } else { nv };
+        let x: Vec<bevy_math::DVec2> = v.iter().map(|&p| { to2(p - dir * ((p - a).dot(n) / dir.dot(n))) }).collect();
+        // Along n, the visible plane's height over t is s/along: the same
+        // limit along n is limit*along along nv.
+        let limit = if square { limit * along } else { limit };
+        // Half-planes (point, inward normal) of the region: the projected
+        // triangle's edges, then |signed distance along nv| <= MATCH.
+        let ccw = (x[1] - x[0]).perp_dot(x[2] - x[0]);
+        if ccw.abs() < 1e-9 { continue; }
+        let mut planes: Vec<(bevy_math::DVec2, bevy_math::DVec2, f64)> = (0..3).map(|k| {
+            let (p, q) = (x[k], x[(k + 1) % 3]);
+            let e = q - p;
+            let inward = if ccw > 0.0 { bevy_math::DVec2::new(-e.y, e.x) } else { bevy_math::DVec2::new(e.y, -e.x) };
+            (inward, p, 0.0)
+        }).collect();
+        // s(X) = (v0 - X) . nv for X on t's plane: affine in the 2D point.
+        let v0 = v[0];
+        let s0 = (v0 - a).dot(nv);
+        let g = bevy_math::DVec2::new(-eu.dot(nv), -ew.dot(nv));
+        // s0 + g.X <= limit  and  -(s0 + g.X) <= limit, as inward form c + m.X >= 0.
+        planes.push((-g, bevy_math::DVec2::ZERO, limit - s0));
+        planes.push((g, bevy_math::DVec2::ZERO, limit + s0));
+        let mut next = Vec::new();
+        for poly in pieces {
+            // Untouched polygons stay whole (no needless split).
+            let mut probe = poly.clone();
+            for (k, &(m, p, c)) in planes.iter().enumerate() {
+                probe = clip64(&probe, |q| if k < 3 { m.dot(q - p) } else { c + m.dot(q) });
+                if probe.len() < 3 { break; }
+            }
+            if probe.len() < 3 || polygon_area64(&probe) < if square || preserve { 1e-8 } else { f64::from(PIECE_AREA) } { next.push(poly); continue; }
+            was_cut = true;
+            let mut rest = poly;
+            for (k, &(m, p, c)) in planes.iter().enumerate() {
+                let inside = |q: bevy_math::DVec2| if k < 3 { m.dot(q - p) } else { c + m.dot(q) };
+                let outside_piece = clip64(&rest, |q| -inside(q));
+                if outside_piece.len() >= 3 { next.push(outside_piece); }
+                rest = clip64(&rest, inside);
+                if rest.len() < 3 { break; }
+            }
+        }
+        pieces = next;
+        if pieces.is_empty() { break; }
+    }
+    // Raw residuals are inspected before simplification, share, width or area
+    // filters. Only clipping-tolerance degeneracies count as covered.
+    let raw_covered = pieces.iter().all(|p| polygon_area64(p) <= 1e-8);
+    let corners = corners.map(|p| p.as_vec2());
+    let mut out = Vec::new();
+    for poly in pieces {
+        let poly: Vec<Vec2> = poly.into_iter().map(|p| p.as_vec2()).collect();
+        // Cut remnants (design 2026-10-31 remnant cleanup): clipping leaves
+        // near-duplicate and collinear corners whose fan made 100-300 tiny
+        // triangles per railing mark (M23-M26) and the bowl connector (M21/22);
+        // the same surface with clean corners (GTA's own corners always stay).
+        // A remnant narrower than REMNANT_WIDTH that is only a small part of
+        // its face is a strip along the visible edge, not a surface; a long
+        // thin face the visible mesh barely touched keeps its remnant.
+        let poly = if was_cut && !preserve { simplify(&poly, &corners) } else { poly };
+        if poly.len() < 3 { continue; }
+        if !preserve && was_cut && convex_width(&poly) < REMNANT_WIDTH && f64::from(polygon_area(&poly)) <= f64::from(REMNANT_SHARE) * face_area { continue; }
+        for k in 1..poly.len() - 1 {
+            let tri = [to3(poly[0].as_dvec2()), to3(poly[k].as_dvec2()), to3(poly[k + 1].as_dvec2())];
+            let area = (tri[1] - tri[0]).cross(tri[2] - tri[0]).length() / 2.0;
+            let longest = tri[0].distance(tri[1]).max(tri[1].distance(tri[2])).max(tri[2].distance(tri[0]));
+            if !preserve && (area < f64::from(PIECE_AREA) || area / longest < f64::from(PIECE_WIDTH)) { continue; }
+            out.push(tri.map(|p| p.as_vec3().to_array()));
+        }
+    }
+    // An uncut triangle comes back exactly as it was.
+    if out.len() == 1 && pieces_equal(&out[0], t) { out = vec![*t]; }
+    Subtraction { pieces: out, raw_covered }
+}
+
+// Shared-edge subtraction uses double precision from the original world
+// positions, so thousands of small covers cannot leave float-rounding slits.
+fn polygon_area64(poly: &[bevy_math::DVec2]) -> f64 {
+    (1..poly.len().saturating_sub(1)).map(|k| (poly[k]-poly[0]).perp_dot(poly[k+1]-poly[0])).sum::<f64>().abs()*0.5
+}
+
+fn clip64(poly: &[bevy_math::DVec2], f: impl Fn(bevy_math::DVec2) -> f64) -> Vec<bevy_math::DVec2> {
+    let mut out = Vec::with_capacity(poly.len()+1);
+    for k in 0..poly.len() {
+        let (a,b) = (poly[k],poly[(k+1)%poly.len()]);
+        let (fa,fb) = (f(a),f(b));
+        if fa >= 0.0 { out.push(a); }
+        if (fa >= 0.0) != (fb >= 0.0) { out.push(a+(b-a)*(fa/(fa-fb))); }
+    }
+    out
+}
+
 /// Narrowest cut remnant kept (m): a strip below this beside the visible
 /// surface is a gap no wheel can catch, not a surface to ride.
 const REMNANT_WIDTH: f32 = 0.02;
@@ -879,8 +1049,13 @@ fn snap(p: [f32; 3], used: &[Used], grid: &Grid) -> [f32; 3] {
     for &k in grid.at(x) {
         let u = &used[k as usize];
         let v = u.v.map(v3);
-        let nv = (v[1] - v[0]).cross(v[2] - v[0]).normalize_or_zero();
+        let cross = (v[1] - v[0]).cross(v[2] - v[0]);
+        let nv = cross.normalize_or_zero();
         if nv == Vec3::ZERO { continue; }
+        // Never onto trim: a floor corner pulled 16 cm up onto a sliver of a
+        // raised slab tilted a whole floor piece (Strawberry -255,-1581, box
+        // bake 2026-11-07). Slivers still cut; they only hold no vertex.
+        if cross.length() / 2.0 < SLIVER_AREA { continue; }
         let s = (v[0] - x).dot(nv);
         if s.abs() > u.limit { continue; }
         let q = x + nv * s;
@@ -959,6 +1134,57 @@ mod tests {
             }
         }
         hits
+    }
+
+    #[test]
+    fn raw_coverage_keeps_a_thin_border_and_a_small_island() {
+        let t = [[0., 0., 0.], [2., 0., 0.], [0., 2., 0.]];
+        let shifted = Used { v: [[0.001, -1., 0.], [3., -1., 0.], [0.001, 3., 0.]], partner: 0, limit: MATCH };
+        let border = subtract_along(&t, [&shifted].into_iter(), true, false);
+        assert!(!border.raw_covered, "a filtered-out border is not coverage");
+        let narrow = subtract_along(&t, [&shifted].into_iter(), false, true);
+        assert!(narrow.pieces.iter().map(area).sum::<f32>() > 0.0005);
+        let covers: Vec<_> = [(-1., 0.5, -1., 3.), (0.51, 3., -1., 3.),
+            (0.5, 0.51, -1., 0.5), (0.5, 0.51, 0.51, 3.)].into_iter()
+            .flat_map(|(x0,x1,y0,y1)| square(x0,x1,y0,y1,0.))
+            .map(|v| Used { v, partner: 0, limit: MATCH }).collect();
+        let island = subtract_along(&t, covers.iter(), true, false);
+        assert!(!island.raw_covered, "small isolated residual is not coverage");
+        let narrow = subtract_along(&t, covers.iter(), false, true);
+        assert!(narrow.pieces.iter().map(area).sum::<f32>() > 0.00009);
+        let complete = Used { v: t, partner: 0, limit: MATCH };
+        assert!(subtract_along(&t, [&complete].into_iter(), true, false).raw_covered);
+    }
+    #[test]
+    fn tiny_disconnected_bracket_cannot_own_a_broad_flat_wall() {
+        let centre = Vec3::new(-1355., -1396., 2.);
+        let map = |[x,y,z]: [f32;3]| (centre + Vec3::new(z,y,-x)).to_array();
+        let mut gta: Vec<_> = square(0.,2.,0.,2.,0.).into_iter().map(|v| Tri { v: v.map(map), material: 1 }).collect();
+        let original = gta.iter().map(|t| t.v).collect::<Vec<_>>();
+        let mut visible: Vec<_> = square(0.,2.,0.,2.,0.).into_iter().map(|v| v.map(map)).collect();
+        // Small mounted bracket has offset and a real bend, but neither side
+        // carries 0.01 m2 / 5 cm breadth of its own connected support sheet.
+        visible.extend(square(0.9,0.94,0.9,0.94,0.20).into_iter().map(|v| v.map(map)));
+        visible.extend([
+            [[0.94,0.9,0.20],[0.98,0.9,0.22],[0.98,0.94,0.22]],
+            [[0.94,0.9,0.20],[0.98,0.94,0.22],[0.94,0.94,0.20]],
+        ].map(|v| v.map(map)));
+        let out = run(&mut gta, &[], &visible);
+        assert!(out.added.is_empty());
+        assert_eq!(gta.iter().map(|t| t.v).collect::<Vec<_>>(), original);
+    }
+    #[test]
+    fn a_transition_facet_rising_from_a_flat_floor_still_counts_as_curve() {
+        // Flat GTA floor chord; a visible facet tilted 10 deg rises 17 cm at its
+        // far edge (only the far corners are 15 cm off): not a ledge top.
+        let c = Vec3::new(-1355., -1396., 2.);
+        let at = |x: f32, y: f32, z: f32| (c + Vec3::new(x, y, z)).to_array();
+        let mut gta: Vec<_> = square(0., 1., 0., 2., 0.).into_iter().map(|v| Tri { v: v.map(|[x,y,z]| at(x,y,z)), material: 1 }).collect();
+        let rise = 10f32.to_radians().tan();
+        let visible: Vec<_> = square(0., 1., 0., 2., 0.).into_iter().map(|v| v.map(|[x,y,_]| at(x, y, x * rise))).collect();
+        assert!(visible.iter().all(|v| normal(v).z >= CURVE_NEIGHBOUR_MAX_Z));
+        let out = run(&mut gta, &[], &visible);
+        assert!(!out.added.is_empty(), "the transition facets replace the floor chord");
     }
 
     #[test]

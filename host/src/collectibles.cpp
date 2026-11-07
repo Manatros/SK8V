@@ -440,13 +440,15 @@ TravelAdapter GtaTravelAdapter() {
         s.normalZ = normal.z;
         return s;
     };
-    api.probeCapsule = [](float x, float y, float z1, float z2, float radius, int ignorePed, void*) {
+    api.startCapsule = [](float x, float y, float z1, float z2, float radius, int ignorePed, void*) {
+        return Call<int>(START_SHAPE_TEST_CAPSULE, x, y, z1, x, y, z2, radius, 511, ignorePed, 7);
+    };
+    api.pollCapsule = [](int handle, void*) {
         TravelCapsuleResult r{};
-        const int h = Call<int>(START_SHAPE_TEST_CAPSULE, x, y, z1, x, y, z2, radius, 511, ignorePed, 7);
         BOOL hit = 0;
         Vector3 end{}, normal{};
         Entity entity = 0;
-        r.status = Call<int>(GET_SHAPE_TEST_RESULT, h, &hit, &end, &normal, &entity);
+        r.status = Call<int>(GET_SHAPE_TEST_RESULT, handle, &hit, &end, &normal, &entity);
         r.hit = (hit != 0);
         return r;
     };
@@ -748,7 +750,8 @@ std::string RequestTravel(const TravelGuard& guard) {
 }
 
 void TickTravel(const TravelGuard& guard) {
-    if (!g_travel.active) return;
+    // A finished travel may still drain a pending capsule test.
+    if (!g_travel.active && !g_travel.drainHandle) return;
     const std::string msg = TravelTick(g_travel, guard, GetTickCount(), GtaTravelAdapter());
     if (!msg.empty()) {
         Log("travel: " + msg);

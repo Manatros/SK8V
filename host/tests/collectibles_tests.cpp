@@ -245,6 +245,11 @@ int main() {
             TravelLosSample floorSample{2, true, true, 13.82f, 0.99f};
             float sampleSpread = 0.0f;
             TravelCapsuleResult capsule{2, false};
+            int capsuleStarts = 0;
+            int capsulePolls = 0;
+            int pendingPolls = 1;  // GTA answers a capsule on a later frame
+            int liveHandle = 0;
+            float capsuleRadius = 0.0f, capsuleZ1 = 0.0f, capsuleZ2 = 0.0f;
         };
 
         auto makeAdapter = [](MockEnv& env) {
@@ -288,8 +293,21 @@ int main() {
                 if (e.sampleSpread != 0.0f && (e.probeIdx++ % 5) == 1) s.z += e.sampleSpread;
                 return s;
             };
-            api.probeCapsule = [](float, float, float, float, float, int, void* ctx) {
-                return static_cast<MockEnv*>(ctx)->capsule;
+            api.startCapsule = [](float, float, float z1, float z2, float radius, int, void* ctx) {
+                auto& e = *static_cast<MockEnv*>(ctx);
+                assert(e.liveHandle == 0);  // never two capsule tests in flight
+                ++e.capsuleStarts;
+                e.capsuleRadius = radius, e.capsuleZ1 = z1, e.capsuleZ2 = z2;
+                e.liveHandle = 100 + e.capsuleStarts;
+                e.capsulePolls = 0;
+                return e.liveHandle;
+            };
+            api.pollCapsule = [](int handle, void* ctx) {
+                auto& e = *static_cast<MockEnv*>(ctx);
+                assert(handle == e.liveHandle);
+                if (e.capsulePolls++ < e.pendingPolls) return TravelCapsuleResult{1, false};
+                e.liveHandle = 0;
+                return e.capsule;
             };
             api.teleportPed = [](int ped, float x, float y, float z, void* ctx) {
                 auto& e = *static_cast<MockEnv*>(ctx);
@@ -327,8 +345,18 @@ int main() {
             assert(s.active && env.teleportCount == 0);
             // Scene loaded on frame 2: teleports to first candidate (104, 200, 13.82 + 0.98 = 14.80).
             env.sceneLoaded = true;
-            const std::string msg = TravelTick(s, g, 1100, api);
+            // Frame 2 starts the capsule test; GTA answers it on later frames.
+            assert(TravelTick(s, g, 1100, api).empty());
+            assert(s.active && env.capsuleStarts == 1 && env.teleportCount == 0);
+            assert(TravelTick(s, g, 1150, api).empty());  // still pending
+            assert(s.active && env.teleportCount == 0);
+            const std::string msg = TravelTick(s, g, 1200, api);
             assert(msg == env.label);
+            assert(env.capsuleStarts == 1 && env.liveHandle == 0 && s.drainHandle == 0);
+            // The capsule covers the default standing volume for this model.
+            assert(std::abs(env.capsuleRadius - kTravelCapsuleRadius) < 1e-5f);
+            assert(std::abs(env.capsuleZ1 - (13.82f + 0.45f)) < 1e-4f);
+            assert(std::abs(env.capsuleZ2 - (13.82f + 1.55f)) < 1e-4f);
             assert(!s.active && env.stopCount == 1 && env.teleportCount == 1 && env.waypointCount == 0);
             assert(env.lastPed == 42);
             assert(std::abs(env.teleportPos[0] - 104.0f) < 1e-4f);
@@ -358,14 +386,87 @@ int main() {
             MockEnv env;
             env.sceneLoaded = true;
             if (capCase == 0) env.capsule = {2, true};   // blocked headroom/wall
-            if (capCase == 1) env.capsule = {1, false};  // incomplete shape test
+            if (capCase == 1) env.capsule = {0, false};  // failed / invalid shape test
             TravelAdapter api = makeAdapter(env);
             TravelSession s;
             const TravelGuard g = readyGuard();
             assert(TravelRequest(s, g, 1000, api).empty());
-            const std::string msg = TravelTick(s, g, 1050, api);
+            std::string msg;
+            for (int frame = 0; frame < 40 && s.active; ++frame) msg = TravelTick(s, g, 1050 + frame * 10, api);
             assert(msg.find("no safe floor verified") != std::string::npos);
+            assert(env.capsuleStarts == kTravelCandidateCount && env.liveHandle == 0);
             assert(!s.active && env.teleportCount == 0 && env.stopCount == 1 && env.waypointCount == 1);
+        }
+
+        // 3a. A capsule GTA never answers: the 5 s deadline cancels, GPS is set,
+        // and the unread handle is kept for draining.
+        {
+            MockEnv env;
+            env.sceneLoaded = true;
+            env.pendingPolls = 1 << 30;
+            TravelAdapter api = makeAdapter(env);
+            TravelSession s;
+            const TravelGuard g = readyGuard();
+            assert(TravelRequest(s, g, 1000, api).empty());
+            assert(TravelTick(s, g, 1050, api).empty());
+            assert(TravelTick(s, g, 1100, api).empty());
+            const std::string msg = TravelTick(s, g, 1000 + kTravelTimeoutMs + 1, api);
+            assert(msg.find("timed out") != std::string::npos);
+            assert(!s.active && s.drainHandle == env.liveHandle && env.teleportCount == 0 && env.waypointCount == 1);
+        }
+
+        // 3b. A larger accepted model gets a larger tested volume (no mismatch).
+        {
+            float foot = 0.0f;
+            TravelClearance c{};
+            TravelBounds big{true, {-0.44f, -0.30f, -1.20f}, {0.30f, 0.30f, 0.88f}};
+            assert(TravelCheckBounds(big, foot, c));
+            assert(std::abs(c.radius - 0.44f) < 1e-5f && std::abs(c.height - 2.08f) < 1e-5f);
+            float z1 = 0.0f, z2 = 0.0f;
+            TravelCapsuleSpheres(10.0f, c, z1, z2);
+            assert(std::abs((z1 - c.radius) - 10.05f) < 1e-5f);        // capsule bottom
+            assert(std::abs((z2 + c.radius) - (10.05f + 2.08f)) < 1e-4f);  // capsule top covers the model
+            MockEnv env;
+            env.sceneLoaded = true;
+            env.bounds = big;
+            TravelAdapter api = makeAdapter(env);
+            TravelSession s;
+            const TravelGuard g = readyGuard();
+            assert(TravelRequest(s, g, 1000, api).empty());
+            for (int frame = 0; frame < 10 && s.active; ++frame) TravelTick(s, g, 1050 + frame * 10, api);
+            assert(env.teleportCount == 1 && std::abs(env.capsuleRadius - 0.44f) < 1e-5f);
+            assert(std::abs(env.teleportPos[2] - (13.82f + 1.20f)) < 1e-4f);
+        }
+
+        // 3c. Cancel while a capsule is pending: the handle is drained, not dropped,
+        // and a new travel never starts a second test before it is read.
+        {
+            MockEnv env;
+            env.sceneLoaded = true;
+            env.pendingPolls = 3;
+            TravelAdapter api = makeAdapter(env);
+            TravelSession s;
+            TravelGuard g = readyGuard();
+            assert(TravelRequest(s, g, 1000, api).empty());
+            assert(TravelTick(s, g, 1050, api).empty());
+            assert(env.capsuleStarts == 1 && env.liveHandle != 0);
+            g.pos[0] += 0.5f;  // player moved: cancel
+            assert(TravelTick(s, g, 1100, api).find("player moved") != std::string::npos);
+            assert(!s.active && s.drainHandle == env.liveHandle && env.teleportCount == 0);
+            g = readyGuard();
+            assert(TravelRequest(s, g, 1150, api).empty());
+            assert(s.drainHandle != 0);
+            for (int frame = 0; frame < 20 && s.active; ++frame) TravelTick(s, g, 1200 + frame * 10, api);
+            assert(env.capsuleStarts == 2 && env.teleportCount == 1 && s.drainHandle == 0 && env.liveHandle == 0);
+            // Draining after an ended travel also reads the handle out.
+            TravelSession idle;
+            env.pendingPolls = 2;
+            assert(TravelRequest(idle, g, 2000, api).empty());
+            assert(TravelTick(idle, g, 2050, api).empty());
+            TravelCancel(idle, api);
+            assert(!idle.active && idle.drainHandle != 0);
+            for (int frame = 0; frame < 5 && idle.drainHandle; ++frame) TravelTick(idle, g, 2100 + frame * 10, api);
+            assert(idle.drainHandle == 0 && env.liveHandle == 0);
         }
 
         // 4. Preexisting load scene is never hijacked or stopped.

@@ -870,6 +870,28 @@ pub fn stairs_from_detail_keeping(tris: &mut Vec<Tri>, stairs: &[bool], candidat
             }
         }
     }
+    let mut members: HashMap<usize, Vec<usize>> = HashMap::default();
+    for (k, &i) in ramps.iter().enumerate() {
+        members.entry(root(&mut parent, k)).or_default().push(i);
+    }
+    let mut horizontal: HashMap<(i32, i32), Vec<usize>> = HashMap::default();
+    for (i, t) in tris.iter().enumerate().filter(|(_, t)| normal_z(t) > 0.995) {
+        for cell in cells(t) { horizontal.entry(cell).or_default().push(i); }
+    }
+    let mut original_groups: HashMap<usize, Vec<Tri>> = HashMap::default();
+    for &g in &flagged_groups {
+        if replaced_groups.contains(&g) { continue; }
+        let mut local: Vec<Tri> = members[&g].iter().map(|&i| tris[i]).collect();
+        // Query support once through its spatial index, without rescanning the
+        // whole live tile for every flagged group.
+        let mut nearby = std::collections::BTreeSet::new();
+        for t in &local {
+            for cell in cells(t) { nearby.extend(horizontal.get(&cell).into_iter().flatten().copied()); }
+        }
+        local.extend(nearby.into_iter().map(|i| tris[i]));
+        let (removed, kept) = ramps_over_steps_inner(&mut local, true);
+        if !removed.is_empty() { original_groups.insert(g, kept); }
+    }
     // Flagged flights the detailed copy has no steps for: steps built from the
     // ramp itself (`terrace`), so every flagged staircase rides as stairs, not
     // only where GTA happens to keep a stepped copy (Manatros 2026-10-20:
@@ -877,14 +899,15 @@ pub fn stairs_from_detail_keeping(tris: &mut Vec<Tri>, stairs: &[bool], candidat
     let mut built: HashMap<usize, Vec<usize>> = HashMap::default();
     for (k, &i) in ramps.iter().enumerate() {
         let g = root(&mut parent, k);
-        if flagged_groups.contains(&g) && !replaced_groups.contains(&g) {
+        if flagged_groups.contains(&g) && !replaced_groups.contains(&g) && !original_groups.contains_key(&g) {
             built.entry(g).or_default().push(i);
         }
     }
-    if replaced_groups.is_empty() && built.is_empty() {
+    if replaced_groups.is_empty() && built.is_empty() && original_groups.is_empty() {
         return (Vec::new(), Vec::new());
     }
-    let mut synthetic = Vec::new();
+    // Over real treads the flagged ramp only goes; its unsupported pieces stay.
+    let mut synthetic: Vec<Tri> = original_groups.values().flatten().copied().collect();
     for members in built.values() {
         let group: Vec<Tri> = members.iter().map(|&i| tris[i]).collect();
         synthetic.extend(terrace(&group));
@@ -892,7 +915,7 @@ pub fn stairs_from_detail_keeping(tris: &mut Vec<Tri>, stairs: &[bool], candidat
     let mut drop = vec![false; tris.len()];
     for (k, &i) in ramps.iter().enumerate() {
         let g = root(&mut parent, k);
-        if replaced_groups.contains(&g) || built.contains_key(&g) {
+        if replaced_groups.contains(&g) || built.contains_key(&g) || original_groups.contains_key(&g) {
             drop[i] = true;
         }
     }
@@ -939,6 +962,15 @@ pub fn surface_at(t: &Tri, p: [f32; 2], min_z: f32) -> Option<f32> {
 /// steps stay, so nothing opens; bowls, banks and quarter pipes have no
 /// treads under them and keep their surface. Returns the removed ramps.
 pub fn ramps_over_steps(tris: &mut Vec<Tri>) -> (Vec<Tri>, Vec<Tri>) {
+    ramps_over_steps_inner(tris, false)
+}
+
+// `flagged`: a STAIRS-flagged ramp may start on its first tread. Otherwise a
+// level surface counts as a tread only a riser above the ramp's foot: the
+// floor a slope stands on is no step (1105-3: a bowl floor and one buried box
+// under the bowl wall made a "flight" and tore the bowl; design
+// 2026-11-07-park-narrow-fixes).
+fn ramps_over_steps_inner(tris: &mut Vec<Tri>, flagged: bool) -> (Vec<Tri>, Vec<Tri>) {
     // Support: any flat surface (under 5.7 degrees). Stair levels: only
     // level treads (under 2.6 degrees), so a gently sloped underlay holds a
     // ramp up but never fakes steps (Codex peer review 2026-10-25).
@@ -978,6 +1010,36 @@ pub fn ramps_over_steps(tris: &mut Vec<Tri>) -> (Vec<Tri>, Vec<Tri>) {
             }
         }
     }
+    let mut foot: HashMap<usize, f32> = HashMap::default();
+    let mut top: HashMap<usize, f32> = HashMap::default();
+    let mut group_ramps: HashMap<usize, Vec<usize>> = HashMap::default();
+    for (k, &i) in ramps.iter().enumerate() {
+        let g = root(&mut parent, k);
+        let low = tris[i].v.iter().map(|p| p[2]).fold(f32::INFINITY, f32::min);
+        let high = tris[i].v.iter().map(|p| p[2]).fold(f32::NEG_INFINITY, f32::max);
+        foot.entry(g).and_modify(|z| *z = z.min(low)).or_insert(low);
+        top.entry(g).and_modify(|z| *z = z.max(high)).or_insert(high);
+        group_ramps.entry(g).or_default().push(i);
+    }
+    // A face lying wholly under the group's ramps (corners pulled 2 % in): a
+    // tread, not the floor that runs on beyond the foot (Goldfish
+    // 2026-11-07, item H: a ramp starting on the first nosing).
+    let under_ramps = |g: usize, t: &Tri| {
+        let c = centroid(t);
+        // ... and no deeper along the slope than a tread (0.65 m); a floor
+        // under a whole bowl transition is broader (1105-3).
+        let n = unit_normal(&tris[group_ramps[&g][0]]);
+        let len = n[0].hypot(n[1]);
+        if len < 1e-6 { return false; }
+        let run = t.v.map(|p| (p[0] * n[0] + p[1] * n[1]) / len);
+        if run.iter().copied().fold(f32::MIN, f32::max) - run.iter().copied().fold(f32::MAX, f32::min) > 0.65 {
+            return false;
+        }
+        t.v.iter().all(|p| {
+            let q = [p[0] + (c[0] - p[0]) * 0.02, p[1] + (c[1] - p[1]) * 0.02];
+            group_ramps[&g].iter().any(|&r| height(&tris[r], q).is_some())
+        })
+    };
     // A point of a ramp (at its height) has a surface under it.
     let held = |p: [f32; 3]| {
         let cell = ((p[0] / CELL).floor() as i32, (p[1] / CELL).floor() as i32);
@@ -999,6 +1061,7 @@ pub fn ramps_over_steps(tris: &mut Vec<Tri>) -> (Vec<Tri>, Vec<Tri>) {
     // are cut into pieces (Codex peer review: cutting every slope of the
     // map first could hold tens of millions of pieces).
     let mut levels: HashMap<usize, Vec<f32>> = HashMap::default();
+    let mut under_memo: HashMap<(usize, usize), bool> = HashMap::default();
     let mut held_count: HashMap<usize, (usize, usize)> = HashMap::default();
     for (k, &i) in ramps.iter().enumerate() {
         let g = root(&mut parent, k);
@@ -1022,7 +1085,16 @@ pub fn ramps_over_steps(tris: &mut Vec<Tri>) -> (Vec<Tri>, Vec<Tri>) {
                     continue;
                 }
                 let m = centroid(&tris[j]);
-                if height(&t, [m[0], m[1]]).is_some_and(|z| m[2] <= z + 0.02 && m[2] >= z - BELOW_RAMP) {
+                if !height(&t, [m[0], m[1]]).is_some_and(|z| m[2] <= z + 0.02 && m[2] >= z - BELOW_RAMP) {
+                    continue;
+                }
+                // Cheap test first, then once per (group, face): a hillside
+                // group can hold 10^4+ ramps (peer review 2026-11-07).
+                if !flagged && m[2] < foot[&g] + RISER_MIN
+                    && !*under_memo.entry((g, j)).or_insert_with(|| under_ramps(g, &tris[j])) {
+                    continue;
+                }
+                {
                     levels.entry(g).or_default().push(m[2]);
                 }
             }
@@ -1039,7 +1111,16 @@ pub fn ramps_over_steps(tris: &mut Vec<Tri>) -> (Vec<Tri>, Vec<Tri>) {
             }
         }
         let (ok, all) = held_count.get(&g).copied().unwrap_or((0, 1));
-        (distinct.len() >= 2 && distinct.windows(2).all(|w| w[1] - w[0] <= RISER_MAX) && ok * 2 >= all).then_some(g)
+        // A flagged ramp is a stair already: real treads anywhere under it
+        // (one riser pair is enough; a missing tread keeps its ramp piece)
+        // mean its steps exist and nothing is synthesized over them (1104-17).
+        let risers = |w: &[f32]| w[1] - w[0] <= RISER_MAX;
+        // Flagged: the treads found must also climb at least half the ramp,
+        // so a curb beside a road under a tall flight is no flight (Goldfish
+        // 2026-11-07, item F); the flight then gets its terrace as before.
+        let climbs = distinct.last().is_some_and(|&h| h - foot[&g] >= 0.5 * (top[&g] - foot[&g]) - 0.02);
+        let steps = if flagged { distinct.windows(2).any(risers) && climbs } else { distinct.windows(2).all(risers) };
+        (distinct.len() >= 2 && steps && ok * 2 >= all).then_some(g)
     }).collect();
     let mut drop = vec![false; tris.len()];
     let mut kept = Vec::new();
@@ -1133,19 +1214,33 @@ mod ramp_tests {
     }
 
     #[test]
-    fn a_ramp_over_a_gap_keeps_its_piece_over_the_gap() {
-        // Codex 2026-10-25: platforms y 0..0.8 at z 0 and y 1.2..2 at z 0.2.
+    fn the_floor_at_a_ramps_foot_is_no_step() {
+        // Codex 2026-10-25 platforms: y 0..0.8 at z 0 (the ramp's foot) and
+        // y 1.2..2 at z 0.2 are one raised level only, so no flight (1105-3).
         let mut t = Vec::new();
         quad(&mut t, [0., 0., 0.], [2., 0., 0.], [2., 0.8, 0.], [0., 0.8, 0.], 1);
         quad(&mut t, [0., 1.2, 0.2], [2., 1.2, 0.2], [2., 2., 0.2], [0., 2., 0.2], 1);
         quad(&mut t, [0., 0., 0.], [2., 0., 0.], [2., 2., 0.4], [0., 2., 0.4], 0);
         let (removed, kept) = ramps_over_steps(&mut t);
-        // The ramp goes over the platforms, its pieces stay over the gap.
+        assert!(removed.is_empty() && kept.is_empty());
+    }
+
+    #[test]
+    fn a_ramp_over_a_gap_keeps_its_piece_over_the_gap() {
+        // Foot floor y 0..0.6 at z 0, raised levels y 0.6..1.0 at 0.2 and
+        // y 1.4..2 at 0.4, nothing under y 1.0..1.4: a flight whose pieces
+        // stay over the gap.
+        let mut t = Vec::new();
+        quad(&mut t, [0., 0., 0.], [2., 0., 0.], [2., 0.6, 0.], [0., 0.6, 0.], 1);
+        quad(&mut t, [0., 0.6, 0.2], [2., 0.6, 0.2], [2., 1.0, 0.2], [0., 1.0, 0.2], 1);
+        quad(&mut t, [0., 1.4, 0.4], [2., 1.4, 0.4], [2., 2., 0.4], [0., 2., 0.4], 1);
+        quad(&mut t, [0., 0., 0.], [2., 0., 0.], [2., 2., 0.6], [0., 2., 0.6], 0);
+        let (removed, kept) = ramps_over_steps(&mut t);
         assert_eq!(removed.len(), 2);
         assert!(!kept.is_empty());
         for p in &kept {
             let c = centroid(p);
-            assert!(c[1] > 0.7 && c[1] < 1.3, "kept piece outside the gap: {c:?}");
+            assert!(c[1] > 0.9 && c[1] < 1.5, "kept piece outside the gap: {c:?}");
         }
     }
 
@@ -1173,6 +1268,89 @@ mod ramp_tests {
         quad(&mut t, [0., 0., 0.], [4., 0., 0.], [4., 4., 0.], [0., 4., 0.], 1);
         quad(&mut t, [0., 0., 0.85], [4., 0., 0.85], [4., 2., 1.6], [0., 2., 1.6], 1);
         assert!(ramps_over_steps(&mut t).0.is_empty());
+    }
+    fn short_flagged_flight(x: f32) -> Vec<Tri> {
+        let mut t = Vec::new();
+        for k in 0..2 {
+            let (y0, y1, z) = (k as f32 * 0.33, (k + 1) as f32 * 0.33, k as f32 * 0.22);
+            quad(&mut t, [x, y0, z], [x + 2., y0, z], [x + 2., y1, z], [x, y1, z], 1);
+        }
+        quad(&mut t, [x, 0., 0.], [x + 2., 0., 0.], [x + 2., 0.66, 0.44], [x, 0.66, 0.44], 0);
+        t
+    }
+    #[test]
+    fn flagged_two_tread_flight_at_ramp_minimum_is_not_terraced() {
+        let mut t = short_flagged_flight(0.);
+        let original: Vec<_> = t.iter().filter(|t| t.material == 1).copied().collect();
+        let flags: Vec<_> = t.iter().map(|t| t.material == 0).collect();
+        let (steps, removed) = stairs_from_detail_keeping(&mut t, &flags, &[], &mut Vec::new());
+        assert_eq!(removed.len(), 2);
+        assert_eq!(t.len(), original.len());
+        assert!(t.iter().zip(&original).all(|(a, b)| a.v == b.v));
+        assert!(steps.iter().all(|t| normal_z(t) < 0.995), "the foot may stay, but no synthetic tread may be added");
+    }
+    #[test]
+    fn many_separate_flagged_flights_use_local_support() {
+        for count in [128, 256] {
+            let mut t: Vec<_> = (0..count).flat_map(|i| short_flagged_flight(i as f32 * 12.)).collect();
+            let flags: Vec<_> = t.iter().map(|t| t.material == 0).collect();
+            let started = std::time::Instant::now();
+            let (steps, removed) = stairs_from_detail_keeping(&mut t, &flags, &[], &mut Vec::new());
+            eprintln!("separate flagged flights={count}, elapsed_us={}", started.elapsed().as_micros());
+            assert_eq!(removed.len(), count * 2);
+            assert_eq!(t.len(), count * 4);
+            assert!(steps.iter().all(|t| normal_z(t) < 0.995));
+        }
+    }
+    #[test]
+    fn a_bowl_floor_and_one_buried_box_do_not_make_steps() {
+        let mut t = Vec::new();
+        quad(&mut t, [0., 0., 0.02], [2., 0., 0.02], [2., 1., 0.02], [0., 1., 0.02], 1);
+        quad(&mut t, [0., 0.4, 0.24], [2., 0.4, 0.24], [2., 0.7, 0.24], [0., 0.7, 0.24], 1);
+        quad(&mut t, [0., 0., 0.], [2., 0., 0.], [2., 1., 0.52], [0., 1., 0.52], 0);
+        assert!(ramps_over_steps(&mut t).0.is_empty());
+    }
+    #[test]
+    fn flagged_ramp_over_original_treads_does_not_duplicate_them() {
+        for missing in [false, true] {
+            let mut t = flight(true);
+            if missing {
+                t.retain(|t| !(normal_z(t) > 0.999 && (centroid(t)[2] - 0.22).abs() < 0.001));
+            }
+            let original: Vec<_> = t.iter().filter(|t| t.material == 1).copied().collect();
+            let flags: Vec<_> = t.iter().map(|t| t.material == 0).collect();
+            let (steps, removed) = stairs_from_detail_keeping(&mut t, &flags, &[], &mut Vec::new());
+            assert_eq!(removed.len(), 2);
+            assert_eq!(t.len(), original.len());
+            assert!(t.iter().zip(&original).all(|(a,b)| a.v == b.v && a.material == b.material));
+            assert!(steps.iter().all(|t| normal_z(t) < 0.995), "no synthetic treads");
+            if missing { assert!(steps.iter().any(|p| (0.4..0.6).contains(&centroid(p)[1]))); }
+        }
+    }
+    #[test]
+    fn a_two_tread_flight_whose_ramp_starts_on_the_first_nosing_is_a_flight() {
+        // Floor y<0 at z 0; treads y 0..0.3 at 0.18 and y 0.3..0.6 at 0.36;
+        // the ramp starts on the first tread (z 0.18 at y 0) and reaches 0.54.
+        let mut t = Vec::new();
+        quad(&mut t, [0., -2., 0.], [2., -2., 0.], [2., 0., 0.], [0., 0., 0.], 1);
+        quad(&mut t, [0., 0., 0.18], [2., 0., 0.18], [2., 0.3, 0.18], [0., 0.3, 0.18], 1);
+        quad(&mut t, [0., 0.3, 0.36], [2., 0.3, 0.36], [2., 0.6, 0.36], [0., 0.6, 0.36], 1);
+        quad(&mut t, [0., 0., 0.18], [2., 0., 0.18], [2., 0.6, 0.54], [0., 0.6, 0.54], 0);
+        assert_eq!(ramps_over_steps(&mut t).0.len(), 2);
+    }
+
+    #[test]
+    fn a_curb_beside_a_road_under_a_tall_flagged_flight_still_gets_steps() {
+        // Road at z 0, a 0.15 m curb strip, a flagged ramp rising 0.9 m with no
+        // treads: the curb is no proof of real steps, so terraced steps come.
+        let mut t = Vec::new();
+        quad(&mut t, [0., -1., 0.], [2., -1., 0.], [2., 0.3, 0.], [0., 0.3, 0.], 1);
+        quad(&mut t, [0., 0.3, 0.15], [2., 0.3, 0.15], [2., 0.6, 0.15], [0., 0.6, 0.15], 1);
+        quad(&mut t, [0., 0., 0.], [2., 0., 0.], [2., 1.5, 0.9], [0., 1.5, 0.9], 0);
+        let flags: Vec<_> = t.iter().map(|t| t.material == 0).collect();
+        let (steps, removed) = stairs_from_detail_keeping(&mut t, &flags, &[], &mut Vec::new());
+        assert_eq!(removed.len(), 2);
+        assert!(steps.iter().any(|s| normal_z(s) > 0.995 && centroid(s)[2] > 0.4), "terraced treads up the flight");
     }
 }
 

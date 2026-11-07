@@ -195,10 +195,21 @@ struct TravelAdapter {
     TravelBounds (*getPedBounds)(int ped, void* ctx) = nullptr;
     bool (*getSafeCoord)(float x, float y, float z, float (&out)[3], void* ctx) = nullptr;
     TravelLosSample (*probeFloor)(float x, float y, float zTop, float zBottom, int ignorePed, void* ctx) = nullptr;
-    TravelCapsuleResult (*probeCapsule)(float x, float y, float z1, float z2, float radius, int ignorePed, void* ctx) = nullptr;
+    // GTA's capsule shape test is asynchronous: start returns a handle (0 =
+    // not started), poll returns 1 while pending and 2 once complete.
+    int (*startCapsule)(float x, float y, float z1, float z2, float radius, int ignorePed, void* ctx) = nullptr;
+    TravelCapsuleResult (*pollCapsule)(int handle, void* ctx) = nullptr;
     void (*teleportPed)(int ped, float x, float y, float z, void* ctx) = nullptr;
     void (*setWaypoint)(float x, float y, void* ctx) = nullptr;
     void* ctx = nullptr;
+};
+
+// The standing volume the capsule test must find clear: never smaller than
+// the accepted ped model (review 2026-11-06: bounds up to 0.45 m / 2.10 m
+// were accepted while only 0.40 m / 1.90 m was tested).
+struct TravelClearance {
+    float radius = 0.40f;
+    float height = 1.90f;
 };
 
 struct TravelSession {
@@ -210,14 +221,29 @@ struct TravelSession {
     float targetPos[3] = {0, 0, 0};
     float startPos[3] = {0, 0, 0};
     float footOffset = 1.0f;
+    TravelClearance clearance{};
     unsigned deadlineMs = 0;
+    // Candidate scan state: one capsule test in flight at a time, polled on
+    // later frames (review 2026-11-06: same-frame results were pending and
+    // their handles were discarded, so every arrival fell back to GPS).
+    int nextCandidate = 0;
+    int capsuleHandle = 0;
+    float pendingNav[3] = {0, 0, 0};
+    float pendingSupportZ = 0.0f;
+    // A capsule still pending when travel ended: read once more until GTA
+    // completes it, so no shape-test result is left unread.
+    int drainHandle = 0;
 };
 
 void TravelCandidateOffset(int index, float (&dxDy)[2]);
 bool TravelCheckBounds(const TravelBounds& b, float& outFootOffset);
+bool TravelCheckBounds(const TravelBounds& b, float& outFootOffset, TravelClearance& outClearance);
 bool TravelCheckSafeCoord(const float (&marker)[3], const float (&req)[2], const float (&nav)[3]);
 bool TravelCheckFloorSupport(float navZ, const TravelLosSample (&samples)[5], float& outSupportZ);
 void TravelCapsuleSpheres(float supportZ, float& outZ1, float& outZ2);
+void TravelCapsuleSpheres(float supportZ, const TravelClearance& c, float& outZ1, float& outZ2);
+// Polls a capsule left pending by an ended session; true while still pending.
+bool TravelDrain(TravelSession& session, const TravelAdapter& api);
 const char* TravelGuardReason(const TravelGuard& g);
 std::string TravelRequest(TravelSession& session, const TravelGuard& guard, unsigned nowMs, const TravelAdapter& api);
 std::string TravelTick(TravelSession& session, const TravelGuard& guard, unsigned nowMs, const TravelAdapter& api);
