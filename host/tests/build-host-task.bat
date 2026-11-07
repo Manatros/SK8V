@@ -5,7 +5,7 @@ call "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliar
 rem Paths relative to this folder (host\tests of the checkout).
 cd /d %~dp0
 set SDK=%~dp0..\..\third_party\scripthookv
-for %%n in (menu_pages_tests menu_presets_tests menu_save_text_tests prop_collision_tests marks_tests collectibles_tests shop_hours_tests replay_tests) do (
+for %%n in (menu_pages_tests menu_presets_tests menu_save_text_tests prop_collision_tests marks_tests collectibles_tests shop_hours_tests replay_tests shop_stall_tests) do (
  cl /nologo /std:c++20 /EHsc /MD /W4 /DNOMINMAX /I..\src /I..\include /I%SDK%\inc %%n.cpp /Gy /O2 /Zc:inline /Fe:%%n.exe /link /OPT:REF user32.lib %SDK%\lib\ScriptHookV.lib >%%n.build.log 2>&1
  if errorlevel 1 exit /b 1
 )

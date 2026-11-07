@@ -4284,6 +4284,8 @@ std::vector<menu::Page> MenuPages(Session& s) {
             item.help = "Left/Right: previous/next collectible (GTAxSkate\\collectibles.tsv).";
             return item;
         }(),
+        Helped(Action("Skate Shop seller: stand here", [&s] { Notify(s, boardshop::SellerHere(), 4000); }),
+               "Saves where you stand as the Skate Shop seller's spot (SkateShopSeller in the INI)."),
         Action("Go to this collectible", [&s] {
             const std::string msg = collectibles::RequestTravel(CurrentTravelGuard(s, g_config));
             if (!msg.empty()) Notify(s, msg, 5000);

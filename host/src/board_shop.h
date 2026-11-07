@@ -49,6 +49,9 @@ int Unlock(const std::string& key);
 std::string GiveBoard(const std::string& key);
 int RelockAll();
 void CloseMenu();
+// Developer: the player's spot becomes the Skate Shop seller's (INI
+// SkateShopSeller); the line to show.
+std::string SellerHere();
 bool PickupPose(const float (&xyz)[3], float yawDegrees, SvBoardPose& pose);
 void Pay(int dollars);
 

@@ -1458,7 +1458,7 @@ mod tests {
         // Same boards in the same places on a second call.
         assert_eq!(boards, s.display(Tier::Skate, anchor, eye, None, 3, scene(None, false, false)));
         // A later find in another store saves only that store: no rack line.
-        assert!(!s.display(Tier::Mid, v(30.0, 20.0, 0.0), v(30.0, 20.0, 1.5), None, 3, scene(Some(19.4), false, true)).is_empty());
+        assert!(!s.display(Tier::Mid, v(30.0, 20.0, 0.0), v(30.0, 20.0, 1.5), None, 3, scene(Some(17.0), false, true)).is_empty());
         let saved = std::fs::read_to_string(dir_path("racks").join(DISPLAY_FILE)).unwrap();
         assert!(saved.contains("30 20") && !saved.contains("-1226"), "{saved}");
     }

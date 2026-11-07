@@ -6,6 +6,7 @@
 #include "natives.h"
 #include "runtime_bridge.h"
 #include "shop_hours.h"
+#include "shop_stall.h"
 #include <windows.h>
 #include <cmath>
 #include <cstring>
@@ -137,10 +138,19 @@ int Clerk(int ped) {
     return best;
 }
 
+// Inspect (design 2026-11-07-skate-shop-rework): the rack board the menu's
+// highlighted offer is (-1: none), the one in flight, how far up (0..1),
+// and the inspect pose ShowPreview last computed.
+int g_inspectWant = -1, g_inspect = -1;
+float g_flight = 0.0f;
+float g_inspectAt[16] = {};
+
 void ClearShow() {
     if (!g_onShow.empty()) boardparts::ClearDisplay();
     g_onShow.clear();
     g_showStore = 0;
+    g_inspectWant = g_inspect = -1;
+    g_flight = 0.0f;
 }
 
 // The store's point: its interior's location, or the board shop's anchor.
@@ -197,8 +207,30 @@ void ShowBoards(int ped, int tier) {
         if (n) Log("board shop: " + std::to_string(n) + " boards on show (" + (c ? "a clerk near: behind the till" : tier == 3 ? "at the storefront" : "on a wall") + ")");
         else if (!g_showMissed) g_showMissed = true, Log("board shop: no place for boards on show found yet (tried again every 1.5 s)");
     }
+    // Inspect: the highlighted rack board flies up to the preview pose and
+    // back (0.35 s each way); drawn here only, once per frame per board.
+    const float dt = Call<float>(GET_FRAME_TIME), step = (dt > 0.1f ? 0.1f : dt) / shopstall::kFlightSeconds;
+    const int want = g_open && g_inspectWant < static_cast<int>(g_onShow.size()) ? g_inspectWant : -1;
+    if (g_inspect >= 0 && want != g_inspect) {
+        g_flight -= step;
+        if (g_flight <= 0.0f) g_inspect = -1, g_flight = 0.0f;
+    } else if (g_inspect < 0 && want >= 0) {
+        g_inspect = want, g_flight = 0.0f;
+    } else if (g_inspect >= 0) {
+        g_flight = g_flight + step > 1.0f ? 1.0f : g_flight + step;
+    }
     for (std::size_t i = 0; i < g_onShow.size(); ++i) {
         SvBoardPose pose{};
+        if (static_cast<int>(i) == g_inspect) {
+            float rest[16], at[16];
+            std::memcpy(rest, g_onShow[i].at, sizeof(rest));
+            shopstall::Flight(rest, g_inspectAt, g_flight, at);
+            if (g_rt->ShopRestPose(at, pose)) {
+                boardparts::Display(static_cast<int>(i), g_onShow[i].models, pose);
+                if (g_flight > 0.5f) boardnative::GlowWheels(pose);
+            }
+            continue;
+        }
         if (g_rt->ShopRestPose(g_onShow[i].at, pose)) boardparts::Display(static_cast<int>(i), g_onShow[i].models, pose);
     }
 }
@@ -257,6 +289,7 @@ void Ride() {
 void Close() {
     g_rt->ShopClose();
     g_open = false;
+    g_inspectWant = -1;  // ShowBoards flies an inspected board back
     boardparts::Preview({}, SvBoardPose{});
     boardparts::Prefetch({});
 }
@@ -342,8 +375,20 @@ void ShowPreview() {
     at[13] = cam.y + fy * g_zoom + ry * side;
     at[14] = cam.z + fz * g_zoom - 0.2f * g_zoom / 1.6f;
     at[15] = 1.0f;
+    // The highlighted offer standing on the stall's racks: that board itself
+    // comes up (ShowBoards flies it), not a second copy (whole-board view only).
+    const std::vector<std::string> offer = Split(g_rt->ShopText(g_partView ? 5 : 2), ',');
+    g_inspectWant = -1;
+    if (!g_partView)
+        for (std::size_t i = 0; i < g_onShow.size(); ++i)
+            if (shopstall::SameBoard(g_onShow[i].models, offer)) { g_inspectWant = static_cast<int>(i); break; }
+    if (g_inspectWant >= 0) {
+        std::memcpy(g_inspectAt, at, sizeof(at));
+        boardparts::Preview({}, SvBoardPose{});
+        return;
+    }
     SvBoardPose pose{};
-    if (g_rt->ShopRestPose(at, pose) && boardparts::Preview(Split(g_rt->ShopText(g_partView ? 5 : 2), ','), pose))
+    if (g_rt->ShopRestPose(at, pose) && boardparts::Preview(offer, pose))
         boardnative::GlowWheels(pose);
 }
 
@@ -536,6 +581,123 @@ bool Start(RuntimeBridge& runtime, const std::string& dataRoot, const std::strin
     return g_ready;
 }
 
+// The Skate Shop's seller (design 2026-11-07-skate-shop-rework): a skater
+// at the back of the stall in opening hours.
+int g_seller = 0;
+std::uint32_t g_sellerLoading = 0;
+ULONGLONG g_sellerSince = 0;
+int g_sellerTry = 0;          // 0: a_m_y_skater_01, 1: a_m_y_skater_02, 2: none loaded
+bool g_sellerLost = false;    // lost (dead, vanished): a new one after the player left 80 m
+float g_sellerSpot[4] = {shopstall::kSeller[0], shopstall::kSeller[1], shopstall::kSeller[2], shopstall::kSeller[3]};
+constexpr const char* kSellerModels[2] = {"a_m_y_skater_01", "a_m_y_skater_02"};
+
+void ReadSellerSpot() {
+    static ULONGLONG s_readAt = 0;
+    if (g_iniPath.empty() || GetTickCount64() < s_readAt) return;
+    s_readAt = GetTickCount64() + 1000;
+    wchar_t text[96]{};
+    GetPrivateProfileStringW(L"SkateV", L"SkateShopSeller", L"", text, 96, g_iniPath.c_str());
+    char narrow[96]{};
+    for (int i = 0; i < 95 && text[i]; ++i) narrow[i] = static_cast<char>(text[i] < 128 ? text[i] : '?');
+    float spot[4] = {shopstall::kSeller[0], shopstall::kSeller[1], shopstall::kSeller[2], shopstall::kSeller[3]};
+    if (narrow[0]) shopstall::ParseSpot(narrow, spot);
+    if (std::memcmp(spot, g_sellerSpot, sizeof(spot)) != 0) {
+        std::memcpy(g_sellerSpot, spot, sizeof(spot));
+        if (g_seller) {
+            Call<void>(SET_ENTITY_COORDS_NO_OFFSET, g_seller, spot[0], spot[1], spot[2] + 1.0f, 0, 0, 0);
+            Call<void>(SET_ENTITY_HEADING, g_seller, spot[3]);
+        }
+    }
+}
+
+void RemoveSeller(const char* why) {
+    if (!g_seller) return;
+    if (Call<BOOL>(DOES_ENTITY_EXIST, g_seller)) {
+        Call<void>(FREEZE_ENTITY_POSITION, g_seller, 0);
+        Call<void>(SET_ENTITY_AS_MISSION_ENTITY, g_seller, 1, 1);
+        Call<void>(DELETE_PED, &g_seller);
+    }
+    g_seller = 0;
+    Log(std::string("board shop: the seller left (") + why + ")");
+}
+
+void SellerTick(const Vector3& me, bool openNow, bool inStall) {
+    const float dist = BeachDistance(me);
+    if (g_seller && (!Call<BOOL>(DOES_ENTITY_EXIST, g_seller) || Call<BOOL>(IS_ENTITY_DEAD, g_seller, 0))) {
+        int ped = g_seller;
+        if (Call<BOOL>(DOES_ENTITY_EXIST, ped)) Call<void>(SET_PED_AS_NO_LONGER_NEEDED, &ped);
+        g_seller = 0, g_sellerLost = true;
+        Log("board shop: the seller is gone; a new one after you leave the boardwalk");
+    }
+    if (dist > shopstall::kSellerFar) g_sellerLost = false, g_sellerTry = 0;
+    if (g_seller) {
+        if (shopstall::SellerGoes(openNow, dist, inStall)) RemoveSeller(openNow ? "you left" : "closed");
+        return;
+    }
+    const bool wanted = shopstall::SellerWanted(openNow, dist, inStall) && !g_sellerLost && g_sellerTry < 2;
+    if (!wanted) {
+        if (g_sellerLoading) {
+            Call<void>(SET_MODEL_AS_NO_LONGER_NEEDED, g_sellerLoading);
+            g_sellerLoading = 0;
+        }
+        return;
+    }
+    // After a reload a seller of ours may still stand there: take it over.
+    static int peds[256];
+    const int n = worldGetAllPeds(peds, 256);
+    for (int i = 0; i < n; ++i) {
+        const std::uint32_t m = Call<std::uint32_t>(GET_ENTITY_MODEL, peds[i]);
+        if (m != util::Joaat(kSellerModels[0]) && m != util::Joaat(kSellerModels[1])) continue;
+        const Vector3 c = Call<Vector3>(GET_ENTITY_COORDS, peds[i], 0);
+        const float dx = c.x - g_sellerSpot[0], dy = c.y - g_sellerSpot[1];
+        if (dx * dx + dy * dy <= 9.0f && !Call<BOOL>(IS_ENTITY_DEAD, peds[i], 0)) {
+            g_seller = peds[i];
+            Call<void>(SET_ENTITY_AS_MISSION_ENTITY, g_seller, 1, 1);
+            Log("board shop: the seller is back at the stall");
+            return;
+        }
+    }
+    if (!g_sellerLoading) {
+        g_sellerLoading = util::Joaat(kSellerModels[g_sellerTry]);
+        g_sellerSince = GetTickCount64();
+        if (!Call<BOOL>(IS_MODEL_IN_CDIMAGE, g_sellerLoading)) {
+            g_sellerLoading = 0, ++g_sellerTry;
+            return;
+        }
+        Call<void>(REQUEST_MODEL, g_sellerLoading);
+    }
+    if (!Call<BOOL>(HAS_MODEL_LOADED, g_sellerLoading)) {
+        if (GetTickCount64() - g_sellerSince > 10000) {
+            Log(std::string("board shop: the seller model ") + kSellerModels[g_sellerTry] + " did not load");
+            Call<void>(SET_MODEL_AS_NO_LONGER_NEEDED, g_sellerLoading);
+            g_sellerLoading = 0, ++g_sellerTry;
+        }
+        return;
+    }
+    // The ped's origin about 1 m over the floor; frozen there, so it cannot
+    // fall before the stall's collision has streamed in.
+    const int ped = Call<int>(CREATE_PED, 4, g_sellerLoading, g_sellerSpot[0], g_sellerSpot[1], g_sellerSpot[2] + 1.0f, g_sellerSpot[3], 0, 1);
+    Call<void>(SET_MODEL_AS_NO_LONGER_NEEDED, g_sellerLoading);
+    g_sellerLoading = 0;
+    if (!ped) {
+        ++g_sellerTry;
+        Log("board shop: GTA did not place the seller");
+        return;
+    }
+    g_seller = ped;
+    Call<void>(SET_ENTITY_AS_MISSION_ENTITY, ped, 1, 1);
+    Call<void>(SET_PED_RANDOM_COMPONENT_VARIATION, ped, 0);
+    Call<void>(SET_ENTITY_INVINCIBLE, ped, 1);
+    Call<void>(SET_BLOCKING_OF_NON_TEMPORARY_EVENTS, ped, 1);
+    Call<void>(SET_PED_CAN_RAGDOLL, ped, 0);
+    Call<void>(FREEZE_ENTITY_POSITION, ped, 1);
+    Call<void>(TASK_START_SCENARIO_IN_PLACE, ped, "WORLD_HUMAN_HANG_OUT_STREET", 0, 1);
+    char line[160];
+    std::snprintf(line, sizeof(line), "board shop: the seller (%s) at %.2f %.2f %.2f heading %.0f", kSellerModels[g_sellerTry],
+                  g_sellerSpot[0], g_sellerSpot[1], g_sellerSpot[2], g_sellerSpot[3]);
+    Log(line);
+}
+
 void Tick(bool busy, bool carryBoard) {
     if (!g_ready) return;
     const int ped = Call<int>(PLAYER_PED_ID);
@@ -554,11 +716,15 @@ void Tick(bool busy, bool carryBoard) {
     const Vector3 me = Call<Vector3>(GET_ENTITY_COORDS, ped, 0);
     int tier = TierHere(ped);
     // The boardwalk's board shop: its boards within 30 m, the menu at its front.
-    const bool atBeach = tier < 0 && g_rt->HasShopOpenAt() && BeachDistance(me) <= kBeachShow;
+    // Inside the stall counts as at its front (the back racks are 8 m from the anchor).
+    const bool inStall = shopstall::InStall(me.x, me.y) && std::abs(me.z - g_sellerSpot[2] - 1.0f) < 3.0f;
+    const bool atBeach = tier < 0 && g_rt->HasShopOpenAt() && (BeachDistance(me) <= kBeachShow || inStall);
     if (atBeach) tier = 3;
-    const bool beachFront = atBeach && BeachDistance(me) <= (g_open ? kBeachKeep : kBeachReach);
+    const bool beachFront = atBeach && (BeachDistance(me) <= (g_open ? kBeachKeep : kBeachReach) || inStall);
     ReadHours();
+    ReadSellerSpot();
     const bool beachOpen = shophours::OpenAt(Call<int>(GET_CLOCK_HOURS), g_hours);
+    if (g_rt->HasShopOpenAt()) SellerTick(me, beachOpen, inStall);
     if (tier != g_tierShown) {
         g_tierShown = tier;
         if (tier == 3) Log("board shop: at the Vespucci board shop (E at its front opens the boards)");
@@ -678,6 +844,21 @@ int Unlock(const std::string& key) {
 
 int RelockAll() {
     return g_ready && g_rt ? g_rt->ShopRelockAll() : -1;
+}
+
+std::string SellerHere() {
+    if (!g_ready || g_iniPath.empty()) return "Skate Shop seller: not available";
+    const int ped = Call<int>(PLAYER_PED_ID);
+    const Vector3 p = Call<Vector3>(GET_ENTITY_COORDS, ped, 0);
+    float ground = p.z - 1.0f;
+    Call<BOOL>(GET_GROUND_Z_FOR_3D_COORD, p.x, p.y, p.z + 0.5f, &ground, FALSE, FALSE);
+    char text[96];
+    std::snprintf(text, sizeof(text), "%.2f,%.2f,%.2f,%.0f", p.x, p.y, ground, Call<float>(GET_ENTITY_HEADING, ped));
+    wchar_t wide[96]{};
+    for (int i = 0; i < 95 && text[i]; ++i) wide[i] = static_cast<wchar_t>(text[i]);
+    WritePrivateProfileStringW(L"SkateV", L"SkateShopSeller", wide, g_iniPath.c_str());
+    Log(std::string("board shop: seller spot set to ") + text);
+    return std::string("Skate Shop seller: stands here (") + text + ")";
 }
 
 void CloseMenu() {
