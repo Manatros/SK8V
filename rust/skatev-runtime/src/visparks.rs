@@ -41,6 +41,10 @@ const CURVE_NEIGHBOUR: f32 = 0.015;
 /// ... unless it is a floor or deck (normal z at least this, 14 deg): those
 /// stay GTA's (decision 2026-10-26: flat decks stay GTA's).
 const CURVE_NEIGHBOUR_MAX_Z: f32 = 0.97;
+/// How far (m) a visible face may lie directly behind an admitted curve
+/// chord and still replace it (design 2026-11-08-chord-sag: a flat GTA chord
+/// across a round bowl wall sags up to 27 cm in front of it at 1103-2).
+const SAG_REACH: f32 = 0.45;
 /// ... and only when one of its visible faces turns at least 4 deg from it
 /// (cosine): a bend, not a flat offset.
 const CURVE_NEIGHBOUR_TURN: f32 = 0.99756;
@@ -600,6 +604,79 @@ fn replace_park(tris: &mut Vec<Tri>, stairs: &[Tri], visible: &[[[f32; 3]; 3]], 
     #[cfg(test)]
     if let Some(support) = &support { out.support_work = support.work; }
     if used.is_empty() { return; }
+    // Sag faces (design 2026-11-08-chord-sag): visible faces directly behind
+    // an admitted curve chord, farther than MATCH from it, where the flat chord
+    // spans a round wall ("the triangle hovers next to the actual bowl",
+    // 1103-2). They cut only their own chord and nothing snaps onto them.
+    let chords: std::collections::HashSet<usize> = owned.iter().copied().chain(used.iter().map(|u| u.partner)).collect();
+    let in_used: std::collections::HashSet<[[u32; 3]; 3]> = used.iter().map(|u| u.v.map(|p| p.map(f32::to_bits))).collect();
+    let sag_grid = Grid::new(park.iter().map(|&i| &tris[i].v), SAG_REACH);
+    // A chord's flat surface: admitted chord triangles in its plane (a quad's
+    // two halves): normals within 0.8 deg, planes within 2 mm.
+    let mut chord_list: Vec<usize> = chords.iter().copied().collect();
+    chord_list.sort_unstable();
+    let chord_grid = Grid::new(chord_list.iter().map(|&i| &tris[i].v), 0.0);
+    let mut surfaces: HashMap<usize, Vec<usize>> = HashMap::default();
+    let surface_of = |i: usize| -> Vec<usize> {
+        let (ni, g0) = (normal(&tris[i].v), v3(tris[i].v[0]));
+        let mut out: Vec<usize> = tris[i].v.iter().flat_map(|&p| chord_grid.at(v3(p)).iter().map(|&k| chord_list[k as usize]))
+            .filter(|&j| normal(&tris[j].v).dot(ni) > 0.9999 && tris[j].v.iter().all(|&q| (v3(q) - g0).dot(ni).abs() < 0.002))
+            .collect();
+        out.sort_unstable(); out.dedup(); out
+    };
+    // Ordered: the output order must not depend on hashing (same bake, same bytes).
+    let mut sag: std::collections::BTreeMap<usize, Vec<Used>> = std::collections::BTreeMap::new();
+    let mut sag_faces: Vec<Used> = Vec::new();
+    for t in &near {
+        if in_used.contains(&t.map(|p| p.map(f32::to_bits))) || normal(t).z < -0.2 { continue; }
+        let c = centroid(t);
+        let pts = [c, v3(t[0]) + (c - v3(t[0])) * 0.02, v3(t[1]) + (c - v3(t[1])) * 0.02, v3(t[2]) + (c - v3(t[2])) * 0.02];
+        let mut best: Option<(f32, usize, f32, Vec<usize>)> = None;
+        for &k in sag_grid.at(c) {
+            let i = park[k as usize];
+            if !chords.contains(&i) { continue; }
+            let ni = normal(&tris[i].v);
+            if ni == Vec3::ZERO || ni.z >= CURVE_NEIGHBOUR_MAX_Z || normal(t).dot(ni) < CURVE_FACING { continue; }
+            let g = tris[i].v.map(v3);
+            let mut worst = 0.0f32;
+            // Cheap depth test first (peer review 2026-11-08).
+            let back_c = (g[0] - c).dot(ni);
+            if back_c <= CURVE || back_c > SAG_REACH { continue; }
+            let surface = surfaces.entry(i).or_insert_with(|| surface_of(i)).clone();
+            // The centroid directly behind the chord's surface; corners within
+            // MATCH of its border (a leaning wall's outer corners project just
+            // past the chord's straight edge).
+            let behind = pts.iter().enumerate().all(|(k, &p)| {
+                let back = (g[0] - p).dot(ni);
+                let q = p + ni * back;
+                worst = worst.max(back);
+                back > CURVE && back <= SAG_REACH && if k == 0 {
+                    surface.iter().any(|&j| {
+                        let h = tris[j].v.map(v3);
+                        (0..3).all(|e| (h[(e + 1) % 3] - h[e]).cross(q - h[e]).dot(ni) >= -ON_EDGE * h[(e + 1) % 3].distance(h[e]))
+                    })
+                } else {
+                    // Corners: within MATCH of the surface (distance, not
+                    // widened half-planes: a thin triangle's widened corner
+                    // reaches metres; peer review 2026-11-08).
+                    surface.iter().any(|&j| distance(q, &tris[j].v) <= MATCH)
+                }
+            });
+            if !behind { continue; }
+            let back = (g[0] - c).dot(ni);
+            if best.as_ref().is_none_or(|b| back < b.0) { best = Some((back, i, worst, surface)); }
+        }
+        let Some((_, i, worst, surface)) = best else { continue };
+        // Another GTA face within MATCH, facing the same way and no part of
+        // this chord, would stay as a second layer under the sag face (peer
+        // review 2026-11-08); a floor or coping beside it would not.
+        if nearest_gta(c).is_some_and(|(d, k)| d <= MATCH && !surface.contains(&k) && normal(&tris[k].v).dot(normal(t)) >= CURVE_FACING) { continue; }
+        if samples(t).into_iter().any(|p| stair_grid.at(p).iter().any(|&k| distance(p, &stairs[k as usize].v) <= MATCH)) { continue; }
+        // It cuts every triangle of the chord's surface; it is collision once.
+        let limit = (worst + PARTNER_SLACK).min(SAG_REACH);
+        for j in surface { sag.entry(j).or_default().push(Used { v: **t, partner: i, limit }); }
+        sag_faces.push(Used { v: **t, partner: i, limit });
+    }
     let vis_grid = Grid::new(used.iter().map(|u| &u.v), MATCH);
     // 1.2/1.4: GTA triangles near a used visible one facing the same way are
     // cut by the visible footprints, and the vertices on the footprints'
@@ -637,7 +714,14 @@ fn replace_park(tris: &mut Vec<Tri>, stairs: &[Tri], visible: &[[[f32; 3]; 3]], 
             // box bakes exp4/N3 2026-11-07.)
             vlo.cmple(thi).all() && vhi.cmpge(tlo).all() && normal(&u.v).dot(n) >= if own { FACING } else { CURVE_FACING }
         });
-        if cover.is_empty() { continue; }
+        let extra = sag.get(&i);
+        if cover.is_empty() && extra.is_none() { continue; }
+        let extra = || extra.into_iter().flatten();
+        // Ordinary covers touching this chord's sag faces (a shared corner)
+        // cut it with the sag reach, so no slit stays between the footprints;
+        // other covers keep their limits (peer review 2026-11-08).
+        let sag_corners: std::collections::HashSet<[i32; 3]> = extra().flat_map(|u| u.v.iter().map(|&p| quant(p)).collect::<Vec<_>>()).collect();
+        let reaches = |u: &Used| u.v.iter().any(|&p| sag_corners.contains(&quant(p)));
         // A chord the curve replaces goes whole: where the flat chord lies
         // farther from the curve than a cover's limit, pockets of it stayed
         // standing in the bowl (connector marks 1103-1..8, M21; design
@@ -650,6 +734,7 @@ fn replace_park(tris: &mut Vec<Tri>, stairs: &[Tri], visible: &[[[f32; 3]; 3]], 
                     let along = normal(&u.v).dot(n);
                     Used { v: u.v, partner: u.partner, limit: if along >= CURVE_FACING { u.limit.max(POCKET_REACH) } else { u.limit / along.max(FACING) } }
                 })
+                .chain(extra().map(|u| Used { v: u.v, partner: u.partner, limit: u.limit }))
                 .collect();
             // Whole when the unfiltered subtraction leaves nothing. A partly
             // covered chord keeps the wide cut unless one of its remnants
@@ -672,10 +757,16 @@ fn replace_park(tris: &mut Vec<Tri>, stairs: &[Tri], visible: &[[[f32; 3]; 3]], 
                     let s = normal(&p.map(|q| snap(q, &used, &vis_grid)));
                     s != Vec3::ZERO && s.dot(n) < SNAP_FOLD
                 });
-                if folds { cut_along(&t, cover.iter().map(|&k| &used[k as usize]), true) } else { pieces }
+                if folds {
+                    let reach: Vec<Used> = cover.iter().map(|&k| &used[k as usize]).map(|u| Used { v: u.v, partner: u.partner,
+                        limit: if reaches(u) { u.limit.max(SAG_REACH) } else { u.limit } }).collect();
+                    cut_along(&t, reach.iter().chain(extra()), true)
+                } else { pieces }
             }
         } else {
-            cut(&t, cover.iter().map(|&k| &used[k as usize]))
+            let reach: Vec<Used> = cover.iter().map(|&k| &used[k as usize]).map(|u| Used { v: u.v, partner: u.partner,
+                limit: if reaches(u) { u.limit.max(SAG_REACH) } else { u.limit } }).collect();
+            cut(&t, reach.iter().chain(extra()))
         };
         if pieces.len() == 1 && pieces[0] == t { continue; }
         // A piece is flat in its face before snapping; snapping that turns it
@@ -741,7 +832,7 @@ fn replace_park(tris: &mut Vec<Tri>, stairs: &[Tri], visible: &[[[f32; 3]; 3]], 
         let m = t.map(|p| if pinned.contains(&quant(p)) { p } else { moved.get(&quant(p)).copied().unwrap_or(p) });
         (m != t).then(|| (i, vec![m]))
     })).collect();
-    for u in &used {
+    for u in used.iter().chain(&sag_faces) {
         out.added.push(Tri { v: u.v, material: tris[u.partner].material });
         out.surface_from.push(svwc::surfaces::key(&tris[u.partner].v));
         out.cut.push(false);
@@ -1185,6 +1276,64 @@ mod tests {
         assert!(visible.iter().all(|v| normal(v).z >= CURVE_NEIGHBOUR_MAX_Z));
         let out = run(&mut gta, &[], &visible);
         assert!(!out.added.is_empty(), "the transition facets replace the floor chord");
+    }
+
+    // Chord sag (design 2026-11-08-chord-sag): a round bowl wall (bank
+    // leaning out 0.5 m per metre of height) and one flat GTA chord pair
+    // spanning `span` rad of it, so its middle sags in front of the wall.
+    fn round_wall(span: f32, chord: bool) -> (Vec<Tri>, Vec<[[f32; 3]; 3]>) {
+        let (cx, cy, r) = (AT.x, AT.y + 8.0, 4.0f32);
+        let p = |a: f32, h: f32| [cx + (r + 0.5 * h) * a.cos(), cy + (r + 0.5 * h) * a.sin(), h];
+        let inward = |t: [[f32; 3]; 3]| {
+            let c = centroid(&t);
+            if normal(&t).dot(Vec3::new(cx - c.x, cy - c.y, 0.0)) < 0.0 { [t[0], t[2], t[1]] } else { t }
+        };
+        let mut vis = Vec::new();
+        let steps = 24;
+        for k in 0..steps {
+            let (a0, a1) = (span * k as f32 / steps as f32, span * (k + 1) as f32 / steps as f32);
+            for (h0, h1) in [(0.0, 0.6), (0.6, 1.2)] {
+                vis.push(inward([p(a0, h0), p(a1, h0), p(a1, h1)]));
+                vis.push(inward([p(a0, h0), p(a1, h1), p(a0, h1)]));
+            }
+        }
+        let gta = if chord {
+            vec![Tri { v: inward([p(0.0, 0.0), p(span, 0.0), p(span, 1.2)]), material: 1 },
+                 Tri { v: inward([p(0.0, 0.0), p(span, 1.2), p(0.0, 1.2)]), material: 1 }]
+        } else { Vec::new() };
+        (gta, vis)
+    }
+
+    #[test]
+    fn a_chord_sagging_in_front_of_a_round_wall_leaves_no_hovering_middle() {
+        let (mut gta, vis) = round_wall(0.8, true);   // sag 4 m * (1 - cos 0.4) = 32 cm
+        let out = run(&mut gta, &[], &vis);
+        let kept: Vec<[[f32; 3]; 3]> = gta.iter().map(|t| t.v)
+            .chain(out.added.iter().zip(&out.cut).filter(|(_, c)| **c).map(|(t, _)| t.v)).collect();
+        for t in &kept {
+            // The wall body. Below 15 cm the chord crosses the wedge between
+            // its straight bottom edge and the wall's round foot: floor in a
+            // real bowl (this fixture has none), checked on real data instead.
+            for p in samples(t).into_iter().filter(|p| p.z > 0.15 && p.z < 1.15) {
+                let d = vis.iter().map(|v| distance(p, v)).fold(f32::MAX, f32::min);
+                assert!(d <= 0.03 || area(t) < 1e-3, "GTA piece {:.0} cm in front of the wall at {p:?}", d * 100.0);
+            }
+        }
+        let shown = out.cut.iter().filter(|c| !**c).count();
+        assert_eq!(shown, vis.len(), "the whole visible wall is collision, its middle too");
+    }
+
+    #[test]
+    fn a_face_in_front_of_a_wall_without_curve_faces_is_left_alone() {
+        // A kicker/box face 30 cm in front of a visible wall: no visible face
+        // within MATCH makes it a curve chord, so no sag face replaces it.
+        let (_, vis) = round_wall(0.8, false);
+        let shift = |q: [f32; 3]| { let d = Vec3::new(q[0] - AT.x, q[1] - AT.y - 8.0, 0.0).normalize() * 0.30; [q[0] - d.x, q[1] - d.y, q[2]] };
+        let mut gta: Vec<Tri> = vis.iter().step_by(4).map(|t| Tri { v: t.map(shift), material: 1 }).collect();
+        let before: Vec<_> = gta.iter().map(|t| t.v).collect();
+        let out = run(&mut gta, &[], &vis);
+        assert!(out.added.is_empty());
+        assert_eq!(gta.iter().map(|t| t.v).collect::<Vec<_>>(), before);
     }
 
     #[test]
