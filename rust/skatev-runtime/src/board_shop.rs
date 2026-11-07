@@ -858,8 +858,24 @@ impl BoardShop {
             return Vec::new();
         }
         let store = crate::shop::store_key(interior);
-        let show = match self.shows.iter().find(|s| s.store == store) {
+        // An older saved storefront line of the Skate Shop gives way to the racks.
+        let show = match self.shows.iter().find(|s| s.store == store && (tier != Tier::Skate || s.racks)) {
             Some(kept) => kept.clone(),
+            // The Skate Shop is GTA's boardwalk stall: its boards stand on the
+            // stall's measured racks, no wall search, nothing written to the
+            // display file (design 2026-11-07-skate-shop-rework).
+            None if tier == Tier::Skate => {
+                // One probe at the stall's middle under the canopy; a hit
+                // outside 3.0-3.7 (a table, goods) or none: the measured floor.
+                let c = Vec3::new(crate::shop::STALL_CENTRE[0], crate::shop::STALL_CENTRE[1], 5.0);
+                let hit = probe(c, Vec3::new(c.x, c.y, 2.5)).map(|p| p.z).filter(|z| (3.0..=3.7).contains(z));
+                let floor = hit.unwrap_or(crate::shop::STALL_FLOOR);
+                self.note = format!("boards on the stall's racks, floor {floor:.2} ({})", if hit.is_some() { "probed" } else { "measured fallback" });
+                let _ = eye;
+                let show = crate::shop::ShowCase { store, at: c, normal: Vec3::X, floor, till: false, racks: true };
+                self.shows.push(show.clone());
+                show
+            }
             None => {
                 let till = clerk.and_then(|(at, forward)| crate::shop::wall_behind(at + Vec3::Z * 0.3, forward, &mut probe));
                 let mut relaxed = false;
@@ -908,11 +924,11 @@ impl BoardShop {
                 if tier == Tier::Skate {
                     self.note = format!("storefront {how} at {:.2} {:.2} {:.2}, facing {:.2} {:.2}, floor {:.2}", at.x, at.y, at.z, normal.x, normal.y, floor);
                 }
-                let show = crate::shop::ShowCase { store, at, normal, floor, till };
+                let show = crate::shop::ShowCase { store, at, normal, floor, till, racks: false };
                 self.shows.push(show.clone());
                 // A fixed front is not kept: each start searches for the real one first.
                 if how != "at the fixed storefront" {
-                    let _ = std::fs::write(self.garages.join(DISPLAY_FILE), crate::shop::shows_to_text(&self.shows.iter().filter(|s| !self.fixed.contains(&s.store)).cloned().collect::<Vec<_>>()));
+                    let _ = std::fs::write(self.garages.join(DISPLAY_FILE), crate::shop::shows_to_text(&self.shows.iter().filter(|s| !self.fixed.contains(&s.store) && !s.racks).cloned().collect::<Vec<_>>()));
                 } else {
                     self.fixed.push(store);
                 }
@@ -1426,37 +1442,25 @@ mod tests {
     }
 
     #[test]
-    fn the_board_shop_shows_at_a_fixed_front_after_five_misses_on_streamed_ground() {
-        let d = dir("front");
-        let mut s = shop(&d);
+    fn the_skate_shop_shows_its_boards_on_the_stalls_racks_and_never_saves_them() {
         let v = bevy_math::Vec3::new;
         let (anchor, eye) = (v(10.0, 20.0, 0.0), v(10.0, 20.0, 1.5));
-        // Not streamed: never placed.
-        for _ in 0..8 {
-            assert!(s.display(Tier::Skate, anchor, eye, None, 3, scene(None, false, false)).is_empty());
-        }
-        let mut s = shop(&dir("front2"));
-        for i in 1..5 {
-            assert!(s.display(Tier::Skate, anchor, eye, None, 3, scene(None, false, true)).is_empty(), "miss {i}");
-            if i == 1 {
-                assert!(s.note.contains("no storefront found"), "{}", s.note);
-            }
-        }
-        assert!(!s.display(Tier::Skate, anchor, eye, None, 3, scene(None, false, true)).is_empty());
-        let show = s.shows.iter().find(|x| x.store == crate::shop::store_key(anchor)).unwrap();
-        assert!((show.normal.truncate() - bevy_math::Vec2::from(crate::shop::SKATE_FRONT).normalize()).length() < 1e-3);
-        assert!(show.floor.abs() < 1e-3 && s.note.contains("fixed storefront"), "{}", s.note);
-        // Never saved, also not by a later find in another store.
-        assert!(!dir_path("front2").join(DISPLAY_FILE).exists());
-        let other = v(30.0, 20.0, 1.5);
-        assert!(!s.display(Tier::Skate, v(30.0, 20.0, 0.0), other, None, 3, scene(Some(19.4), false, true)).is_empty());
-        let saved = std::fs::read_to_string(dir_path("front2").join(DISPLAY_FILE)).unwrap();
-        assert!(saved.contains("30 20") && !saved.contains("10 20"), "{saved}");
-        // Clothing stores keep their search: no fixed front.
-        let mut c = shop(&dir("front3"));
-        for _ in 0..8 {
-            assert!(c.display(Tier::Mid, v(50.0, 50.0, 0.0), v(50.0, 50.0, 1.5), None, 3, scene(None, false, true)).is_empty());
-        }
+        // An older saved storefront line of this store gives way to the racks.
+        let d = dir("racks");
+        std::fs::write(dir_path("racks").join(DISPLAY_FILE), crate::shop::shows_to_text(&[crate::shop::ShowCase {
+            store: crate::shop::store_key(anchor), at: v(10.0, 19.0, 1.5), normal: v(0.0, 1.0, 0.0), floor: 0.0, till: false, racks: false }])).unwrap();
+        let mut s = shop(&d);
+        // Not streamed (no probe hit): placed anyway, on the fallback floor.
+        let boards = s.display(Tier::Skate, anchor, eye, None, 3, scene(None, false, false));
+        assert!(!boards.is_empty() && boards.len() <= crate::shop::STALL_BOARDS);
+        let show = s.shows.iter().find(|x| x.store == crate::shop::store_key(anchor) && x.racks).unwrap();
+        assert!((show.floor - crate::shop::STALL_FLOOR).abs() < 1e-3 && s.note.contains("racks"), "{}", s.note);
+        // Same boards in the same places on a second call.
+        assert_eq!(boards, s.display(Tier::Skate, anchor, eye, None, 3, scene(None, false, false)));
+        // A later find in another store saves only that store: no rack line.
+        assert!(!s.display(Tier::Mid, v(30.0, 20.0, 0.0), v(30.0, 20.0, 1.5), None, 3, scene(Some(19.4), false, true)).is_empty());
+        let saved = std::fs::read_to_string(dir_path("racks").join(DISPLAY_FILE)).unwrap();
+        assert!(saved.contains("30 20") && !saved.contains("-1226"), "{saved}");
     }
 
     #[test]
@@ -1556,7 +1560,7 @@ mod tests {
         let shown = s.display(Tier::Low, v(10.0, 20.0, 1.0), v(10.0, 20.0, 1.5), None, 3, |_, _| None);
         // One complete board in the test catalog: shown once, never repeated.
         assert_eq!(shown.len(), 1);
-        let places = crate::shop::ShowCase { store: (10, 20), at: v(12.0, 20.0, 1.5), normal: v(-1.0, 0.0, 0.0), floor: 0.5, till: false }
+        let places = crate::shop::ShowCase { store: (10, 20), at: v(12.0, 20.0, 1.5), normal: v(-1.0, 0.0, 0.0), floor: 0.5, till: false, racks: false }
             .places(1);
         // A point of the exported board lands where the place puts it.
         let w = v(0.02, 0.05, 0.4);

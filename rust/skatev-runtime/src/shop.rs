@@ -815,6 +815,51 @@ pub fn display_places(at: bevy_math::Vec3, normal: bevy_math::Vec3, floor: f32, 
         .collect()
 }
 
+/// The Vespucci Skate Shop stall's shelving units (`vb_29_stall_02`, measured
+/// 2026-11-07 with `visual-rails --surface-list`; design
+/// 2026-11-07-skate-shop-rework): centre and the normal into the stall.
+/// Each unit is 1.4 m long along STALL_ALONG and 0.4 m deep.
+pub const STALL_UNITS: [([f32; 2], [f32; 2]); 6] = [
+    ([-1227.39, -1440.42], [0.81, 0.58]),
+    ([-1228.28, -1439.14], [0.81, 0.58]),
+    ([-1223.54, -1439.64], [-0.81, -0.58]),
+    ([-1224.44, -1438.37], [-0.81, -0.58]),
+    ([-1226.49, -1441.70], [0.81, 0.58]),
+    ([-1229.17, -1437.88], [0.81, 0.58]),
+];
+pub const STALL_ALONG: [f32; 2] = [-0.58, 0.81];
+/// Where the floor is probed (the stall's middle) and its fallback height.
+pub const STALL_CENTRE: [f32; 2] = [-1226.4, -1438.8];
+pub const STALL_FLOOR: f32 = 3.34;
+/// Boards on the stall's racks.
+pub const STALL_BOARDS: usize = 8;
+
+/// Up to `count` (at most 12) boards standing on their tails in front of the
+/// stall's shelving, two per unit 0.35 m either side of its middle, the
+/// graphic out and leaning 10 deg back toward the shelf: the origin 0.40 m
+/// out from the unit's centre and 0.1 m over `floor` (the tail on the floor,
+/// the top about 0.28 m out, 8 cm clear of the 0.2 m deep shelf front). In the
+/// board models' frame (length along Z from the grip, the deck facing -X).
+pub fn stall_racks(floor: f32, count: usize) -> Vec<bevy_math::Mat4> {
+    use bevy_math::{Mat3, Mat4, Vec3};
+    let along = Vec3::new(STALL_ALONG[0], STALL_ALONG[1], 0.).normalize();
+    let lean = 10f32.to_radians();
+    let mut out = Vec::new();
+    for (centre, n) in STALL_UNITS {
+        let normal = Vec3::new(n[0], n[1], 0.).normalize();
+        // X (graphic side) out of the shelf and Z (length) up, tipped back.
+        let z = Vec3::Z * lean.cos() - normal * lean.sin();
+        let x = normal * lean.cos() + Vec3::Z * lean.sin();
+        let turn = Mat3::from_cols(x, z.cross(x), z);
+        for side in [-0.35f32, 0.35] {
+            let base = Vec3::new(centre[0], centre[1], floor + 0.1) + along * side + normal * 0.40;
+            out.push(Mat4::from_translation(base) * Mat4::from_mat3(turn));
+        }
+    }
+    out.truncate(count.min(12));
+    out
+}
+
 /// The wall behind a store's till: the clerk (at `clerk`, facing
 /// `forward`, toward the counter) stands before it. Lines cast with
 /// `probe` straight back from the clerk and 0.6 m to either side must meet
@@ -878,12 +923,16 @@ pub struct ShowCase {
     pub normal: bevy_math::Vec3,
     pub floor: f32,
     pub till: bool,
+    /// The Skate Shop stall's racks (never written to the display file).
+    pub racks: bool,
 }
 
 impl ShowCase {
     /// Where each board goes.
     pub fn places(&self, count: usize) -> Vec<bevy_math::Mat4> {
-        if self.till {
+        if self.racks {
+            stall_racks(self.floor, count)
+        } else if self.till {
             till_places(self.at, self.normal, self.floor)
         } else {
             display_places(self.at, self.normal, self.floor, count)
@@ -917,7 +966,7 @@ pub const MID_EXTRA: usize = 4;
 pub fn on_show(tier: Tier) -> usize {
     match tier {
         Tier::Low | Tier::Mid => 4,
-        Tier::Skate => 6,
+        Tier::Skate => STALL_BOARDS,
         _ => 5,
     }
 }
@@ -976,7 +1025,7 @@ pub fn shows_from_text(text: &str) -> Vec<ShowCase> {
             let normal = bevy_math::Vec3::new(number()?, number()?, 0.);
             let floor = number()?;
             let till = words.next()? == "till";
-            (normal.length() > 0.5).then_some(ShowCase { store, at, normal, floor, till })
+            (normal.length() > 0.5).then_some(ShowCase { store, at, normal, floor, till, racks: false })
         })
         .collect()
 }
@@ -1014,7 +1063,7 @@ mod tests {
         assert_eq!(section_count(Tier::Mid, "Build: Deck"), 5);
         assert_eq!(section_count(Tier::Mid, "Build: Sticker"), 0);
         assert_eq!(section_count(Tier::Skate, "Build: Truck Base paint"), 12);
-        assert_eq!((on_show(Tier::Low), on_show(Tier::Mid), on_show(Tier::Skate)), (4, 4, 6));
+        assert_eq!((on_show(Tier::Low), on_show(Tier::Mid), on_show(Tier::Skate)), (4, 4, STALL_BOARDS));
     }
 
     #[test]
@@ -1185,7 +1234,7 @@ mod tests {
         assert_eq!(a, super::show_picks(&decks, (-1188, -773), 12, 5), "the same store and day, the same decks");
         assert_ne!(a, super::show_picks(&decks, (418, -808), 12, 5), "another store, others");
         assert_ne!(a, super::show_picks(&decks, (-1188, -773), 13, 5), "the next day, others");
-        let show = super::ShowCase { store: (-1188, -773), at: Vec3::new(-1187.913, -773.07, 18.712), normal: Vec3::new(-0.5967, 0.8025, 0.), floor: 17.6, till: true };
+        let show = super::ShowCase { store: (-1188, -773), at: Vec3::new(-1187.913, -773.07, 18.712), normal: Vec3::new(-0.5967, 0.8025, 0.), floor: 17.6, till: true, racks: false };
         let back = super::shows_from_text(&super::shows_to_text(std::slice::from_ref(&show)));
         assert_eq!(back.len(), 1);
         assert_eq!(back[0].store, show.store);
@@ -1346,4 +1395,41 @@ mod tests {
         assert_eq!(menu.row, 2, "on the maker it was");
         assert_eq!(menu.handle(Input::Back, &garage), Action::Close);
     }
+
+    #[test]
+    fn stall_racks_stand_boards_upright_in_front_of_the_shelves_on_the_floor() {
+        use bevy_math::{Vec2, Vec3};
+        let floor = 3.34;
+        let racks = super::stall_racks(floor, 12);
+        assert_eq!(racks.len(), 12);
+        assert_eq!(super::stall_racks(floor, super::STALL_BOARDS).len(), super::STALL_BOARDS);
+        let along = Vec2::from(super::STALL_ALONG).normalize();
+        for (k, m) in racks.iter().enumerate() {
+            let (x, z, o) = (m.x_axis.truncate(), m.z_axis.truncate(), m.w_axis.truncate());
+            assert!((x.length() - 1.).abs() < 1e-4 && (z.length() - 1.).abs() < 1e-4 && x.dot(z).abs() < 1e-4, "orthonormal {k}");
+            assert!(z.z > 15f32.to_radians().cos(), "upright within 15 deg: {k}");
+            let tail = o - z * 0.1;
+            assert!((tail.z - floor).abs() < 0.02, "tail on the floor: {k} {tail:?}");
+            let (centre, n) = super::STALL_UNITS[k / 2];
+            let n = Vec2::from(n).normalize();
+            let rel = o.truncate() - Vec2::from(centre);
+            assert!(x.truncate().normalize().dot(n) > 0.95, "graphic out of the shelf: {k}");
+            assert!((rel.dot(n) - 0.40).abs() < 1e-3 && rel.dot(along).abs() <= 0.36, "in front of its unit: {k}");
+            // The top tips toward the shelf, and stays 5 cm or more clear of its front.
+            let top = (o + z * 0.7).truncate() - Vec2::from(centre);
+            assert!(top.dot(n) < rel.dot(n) && top.dot(n) > 0.25, "lean toward the shelf, clear of it: {k}");
+            // No point of the board (length 0.8 m from 0.1 behind the origin) inside any unit.
+            for t in [-0.1f32, 0.3, 0.7] {
+                let p = (o + z * t).truncate();
+                for (c, un) in super::STALL_UNITS {
+                    let (c, un) = (Vec2::from(c), Vec2::from(un).normalize());
+                    let r = p - c;
+                    assert!(!(r.dot(un).abs() < 0.2 && r.dot(along).abs() < 0.7), "board {k} at {t} inside a shelf");
+                }
+            }
+        }
+        let mut seen: Vec<Vec3> = Vec::new();
+        for m in &racks { let o = m.w_axis.truncate(); assert!(seen.iter().all(|s| s.distance(o) > 0.3)); seen.push(o); }
+    }
+
 }
