@@ -26,6 +26,23 @@ int main() {
     assert(!InStall(-1220.0f, -1445.0f));
     assert(!InStall(-1235.0f, -1435.0f));
 
+    // The seller stands behind the glass counter, clear of its panes and the back wall.
+    auto segDist = [](const float* a, const float* b, float x, float y) {
+        const float ex = b[0] - a[0], ey = b[1] - a[1];
+        float t = ((x - a[0]) * ex + (y - a[1]) * ey) / (ex * ex + ey * ey);
+        t = t < 0 ? 0 : t > 1 ? 1 : t;
+        return std::hypot(x - a[0] - ex * t, y - a[1] - ey * t);
+    };
+    for (int i = 0; i < 3; ++i) assert(segDist(kCounter[i], kCounter[i + 1], kSeller[0], kSeller[1]) > 0.4f);
+    assert(segDist(kBackWall[0], kBackWall[1], kSeller[0], kSeller[1]) > 0.4f);
+    // On the far side of the register's arm from the customer (1104-4 stood before the counter).
+    const auto side = [](const float* a, const float* b, float x, float y) { return (b[0] - a[0]) * (y - a[1]) - (b[1] - a[1]) * (x - a[0]); };
+    assert(side(kCounter[2], kCounter[3], kSeller[0], kSeller[1]) * side(kCounter[2], kCounter[3], -1226.07f, -1438.69f) < 0);
+    // Facing the customer's side: the heading's forward points back across the arm.
+    const float h = kSeller[3] * 3.14159265f / 180.0f;
+    const float fx = -std::sin(h), fy = std::cos(h);
+    assert(side(kCounter[2], kCounter[3], kSeller[0] + fx, kSeller[1] + fy) * side(kCounter[2], kCounter[3], kSeller[0], kSeller[1]) < 0);
+
     float spot[4] = {kSeller[0], kSeller[1], kSeller[2], kSeller[3]};
     assert(ParseSpot("-1227.1, -1437.2, 3.40, 200", spot) && std::abs(spot[3] - 200.0f) < 1e-4f);
     assert(!ParseSpot("1,2,3", spot) && std::abs(spot[0] + 1227.1f) < 1e-3f);
