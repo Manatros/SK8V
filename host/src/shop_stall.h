@@ -12,8 +12,8 @@ namespace shopstall {
 // The stall's outline (GTA's vb_29_stall_02/marketwalls, measured 2026-11-07).
 inline constexpr float kOutline[4][2] = {
     {-1230.3f, -1437.0f}, {-1227.0f, -1443.0f}, {-1222.6f, -1440.3f}, {-1225.8f, -1435.0f}};
-// The seller's default spot: the back of the stall facing the entrance.
-inline constexpr float kSeller[4] = {-1227.23f, -1437.54f, 3.34f, 215.6f};
+// The seller's default spot: behind the register, facing the entrance.
+inline constexpr float kSeller[4] = {-1226.50f, -1437.02f, 3.34f, 205.0f};  // 0.9 m right of the first spot, behind the register (test 2026-11-08 02:22)
 inline constexpr float kSellerNear = 60.0f;  // wanted within this of the anchor
 inline constexpr float kSellerFar = 80.0f;   // removed beyond this
 inline constexpr float kFlightSeconds = 0.35f;
