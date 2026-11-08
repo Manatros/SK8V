@@ -1075,6 +1075,7 @@ struct Session {
     float lastGround[3]{};        // where Skate's skater last stood on ground (fall-through rescue)
     bool lastGroundValid = false;
     int prevFoot = -1;            // GTA's follow mode last frame in a GTA view (-1: not yet / SK8V's camera)
+    int footSettle = 0;  // frames after entry that only note the foot mode
     bool vHeld = false;           // V that left SK8V's camera still held: GTA must not take it too
     int action = 0;               // R: 0 off, 1 the cinematic camera, 2 the skate filmer
     bool wipingOut = false; // last output was a Wipeout state (bail voice)
@@ -1789,6 +1790,12 @@ void BeginActive(Session& s, const Config& cfg) {
     g_gtaView = camera::GameplayView(s.view, cfg.gtaCamera, s.action);
     if (g_gtaView) s.view = camera::ViewFromFootMode(Call<int>(gta::GET_FOLLOW_PED_CAM_VIEW_MODE));
     g_lastView = s.view;
+    // No stale foot mode from the last session: it read as V wrapping to SK8V's
+    // camera with no key pressed (audit 2026-11-08). A mode set above may read
+    // back a frame late, so the first frames only note it.
+    s.prevFoot = -1;
+    s.vHeld = false;
+    s.footSettle = 10;
     Logf("SkateV Legacy: camera session start: %s", camera::Name(s.view));
     s.cam = Call<Cam>(gta::CREATE_CAM, "DEFAULT_SCRIPTED_CAMERA", 0);
     s.dynamicDue = 1.0f; // gather on the first skating frame
@@ -1914,7 +1921,7 @@ void DisableSkateControls(std::uint16_t buttons, bool aiming) {
                   c == 199 || c == 200 || c == 170 || c == 288 || c == 289 || (c >= 296 && c <= 328) || c == 349 ||
                   (c == 19 && !(buttons & 0x0100)) ||
                   (c == 244 && gtaKeyboard) || // keyboard and mouse: M stays GTA's interaction menu
-                  (g_gtaView && (((c == 1 || c == 2) && mouseLook) || c == 26 || c == 0)) || // GTA's look, look behind, V
+                  (g_gtaView && !replay::Active() && (((c == 1 || c == 2) && mouseLook) || (c == 26 && !gtaKeyboard) || c == 0)) || // GTA's look, look behind (pad: on the keyboard C is a grab), V
                   (aiming && (c == 1 || c == 2 || c == 24 || c == 25 || c == 45 || (c >= 270 && c <= 273) || (c >= 290 && c <= 295)));
         if (skip[c]) continue;
         // GTA's value this frame whether or not it is disabled (scripts run after the input update).
@@ -2765,7 +2772,10 @@ void UpdateCameraView(Session& s, const Config& cfg, SvPad& pad) {
     }
     const int foot = Call<int>(gta::GET_FOLLOW_PED_CAM_VIEW_MODE);
     if (g_gtaView) {
-        if (s.prevFoot >= 0 && foot != s.prevFoot && !menu::IsOpen()) {
+        if (s.footSettle > 0) {
+            --s.footSettle;
+            s.view = camera::ViewFromFootMode(foot);
+        } else if (s.prevFoot >= 0 && foot != s.prevFoot && !menu::IsOpen()) {
             s.view = camera::Wrapped(s.prevFoot, foot) ? 0 : camera::ViewFromFootMode(foot);
             g_lastView = s.view;
             Logf("SkateV Legacy: camera V: %s%s", camera::Name(s.view), cfg.gtaCamera ? " (GtaCamera override)" : "");
@@ -2773,7 +2783,7 @@ void UpdateCameraView(Session& s, const Config& cfg, SvPad& pad) {
             s.view = camera::ViewFromFootMode(foot);
         }
         s.prevFoot = s.view == 0 ? -1 : foot;
-    } else if (!KeysTaken() && Call<BOOL>(gta::IS_DISABLED_CONTROL_JUST_PRESSED, 0, 0)) {
+    } else if (!KeysTaken() && !boardshop::IsOpen() && !s.action && Call<BOOL>(gta::IS_DISABLED_CONTROL_JUST_PRESSED, 0, 0)) {
         s.view = 1;
         Call<void>(gta::SET_FOLLOW_PED_CAM_VIEW_MODE, camera::FootMode(1));
         s.prevFoot = camera::FootMode(1);
@@ -2785,7 +2795,7 @@ void UpdateCameraView(Session& s, const Config& cfg, SvPad& pad) {
     }
     // R on the keyboard (the pad's reload is Skate's B): the cinematic camera,
     // the skate filmer, and back.
-    if (!KeysTaken() && !s.aiming && g_runtime.HasActionCam() && Call<BOOL>(gta::IS_USING_KEYBOARD_AND_MOUSE, 0) &&
+    if (!KeysTaken() && !boardshop::IsOpen() && !s.aiming && g_runtime.HasActionCam() && Call<BOOL>(gta::IS_USING_KEYBOARD_AND_MOUSE, 0) &&
         Call<BOOL>(gta::IS_DISABLED_CONTROL_JUST_PRESSED, 0, 45)) {
         s.action = (s.action + 1) % 3;
         float none[7]{};
