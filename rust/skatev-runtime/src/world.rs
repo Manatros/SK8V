@@ -1298,6 +1298,30 @@ pub fn park_edge_lines(area: &mut Area, gta_rails: &[Vec<[f32; 3]>]) -> usize {
             }
         }
     }
+    // A rounded edge turns 30 deg over several shallow faces and has no single
+    // fold (design 2026-11-09-visible-owner, Goldfish 10): faces within
+    // PARK_ROUND of the point that differ by the fold angle count too.
+    const PARK_ROUND: f32 = 0.10;
+    let mut face_grid: std::collections::HashMap<(i32, i32), Vec<u32>> = Default::default();
+    for (i, t) in tris.iter().enumerate() {
+        let (lo, hi) = (t[0].min(t[1]).min(t[2]) - Vec3::splat(PARK_ROUND), t[0].max(t[1]).max(t[2]) + Vec3::splat(PARK_ROUND));
+        if hi.x - lo.x > 64.0 || hi.y - lo.y > 64.0 { continue; }
+        for x in lo.x.floor() as i32..=hi.x.floor() as i32 {
+            for y in lo.y.floor() as i32..=hi.y.floor() as i32 {
+                face_grid.entry((x, y)).or_default().push(i as u32);
+            }
+        }
+    }
+    let rounded = |p: Vec3, dir: Vec3| {
+        let near: Vec<Vec3> = face_grid.get(&(p.x.floor() as i32, p.y.floor() as i32)).map_or(Vec::new(), |list| list.iter()
+            .map(|&i| &tris[i as usize])
+            .filter(|t| closest_on_triangle(p, t).distance(p) <= PARK_ROUND)
+            .map(normal).filter(|n| *n != Vec3::ZERO).collect());
+        // The turn's axis must run along the line; opposite normals (a slab's
+        // top and bottom) have none.
+        near.iter().enumerate().any(|(i, a)| near[i + 1..].iter().any(|b| a.dot(*b) <= PARK_FOLD_COS
+            && a.cross(*b).normalize_or_zero().dot(dir).abs() >= 25f32.to_radians().cos()))
+    };
     let on_fold = |p: Vec3, dir: Vec3| grid.get(&(p.x.floor() as i32, p.y.floor() as i32)).is_some_and(|list| list.iter().any(|&i| {
         let (a, b) = folds[i as usize];
         let ab = b - a;
@@ -1305,7 +1329,7 @@ pub fn park_edge_lines(area: &mut Area, gta_rails: &[Vec<[f32; 3]>]) -> usize {
         if l2 < 1e-8 || (ab / l2.sqrt()).dot(dir).abs() < 25f32.to_radians().cos() { return false; }
         let q = a + ab * ((p - a).dot(ab) / l2).clamp(0.0, 1.0);
         (q - p).truncate().length() <= 0.06 && (q.z - p.z).abs() <= 0.08
-    }));
+    })) || rounded(p, dir);
     // Lines the area already has, as segments.
     let have: Vec<(Vec3, Vec3)> = area.rails.iter().flat_map(|r| r.windows(2).map(|w| (g(w[0]), g(w[1])))).collect();
     let covered = |p: Vec3| have.iter().any(|&(a, b)| {
@@ -2583,6 +2607,44 @@ mod tests {
         let mut area = Area { triangles: hump.clone(), tags: vec![0; hump.len()], rails: Vec::new(), ..area };
         let crease = vec![vec![coords::to_skate(v(0.2, 0., 0.5)).to_array(), coords::to_skate(v(3.8, 0., 0.5)).to_array()]];
         assert_eq!(park_edge_lines(&mut area, &crease), 0);
+    }
+
+    #[test]
+    fn park_edge_lines_come_back_on_a_rounded_edge_but_not_on_a_slab_or_across_a_wall() {
+        // Design 2026-11-09-visible-owner: a ledge edge rounded in six 15 deg facets
+        // 2 cm wide has no single fold of 30 deg.
+        let v = Vec3::new;
+        let s = |t: [Vec3; 3]| t.map(|p| coords::to_skate(p).to_array());
+        let with = |tris: Vec<[[f32; 3]; 3]>| Area { noses: Vec::new(), center: Vec3::ZERO, tags: vec![0; tris.len()], triangles: tris, rails: Vec::new(),
+            census: Default::default(), bevels: Default::default(), note: String::new(), bounds: Vec::new(), live_required: false,
+            changed: None, fixed: 0, options: 0, origins: Default::default() };
+        let line = |a: Vec3, b: Vec3| vec![vec![coords::to_skate(a).to_array(), coords::to_skate(b).to_array()]];
+        let mut pts = vec![(0.0f32, 0.5f32)];
+        for k in 0..6 {
+            let a = (k as f32 + 0.5) * 15f32.to_radians();
+            let (y, z) = *pts.last().unwrap();
+            pts.push((y + 0.02 * a.cos(), z - 0.02 * a.sin()));
+        }
+        let round: Vec<_> = pts.windows(2).flat_map(|w| {
+            let ((y0, z0), (y1, z1)) = (w[0], w[1]);
+            [s([v(0., y0, z0), v(4., y0, z0), v(4., y1, z1)]), s([v(0., y0, z0), v(4., y1, z1), v(0., y1, z1)])]
+        }).collect();
+        let mut area = with(round);
+        assert_eq!(park_edge_lines(&mut area, &line(v(0.2, 0.05, 0.49), v(3.8, 0.05, 0.49))), 1, "rounded edge");
+        // A slab 8 cm thick: top and bottom are no fold.
+        let slab = vec![
+            s([v(0., -1., 0.5), v(4., -1., 0.5), v(4., 1., 0.5)]), s([v(0., -1., 0.5), v(4., 1., 0.5), v(0., 1., 0.5)]),
+            s([v(0., -1., 0.42), v(4., 1., 0.42), v(4., -1., 0.42)]), s([v(0., -1., 0.42), v(0., 1., 0.42), v(4., 1., 0.42)]),
+        ];
+        let mut area = with(slab);
+        assert_eq!(park_edge_lines(&mut area, &line(v(0.2, 0., 0.5), v(3.8, 0., 0.5))), 0, "slab");
+        // A line crossing a wall's foot: the turn's axis is across it.
+        let foot = vec![
+            s([v(0., -2., 0.), v(4., -2., 0.), v(4., 2., 0.)]), s([v(0., -2., 0.), v(4., 2., 0.), v(0., 2., 0.)]),
+            s([v(2., -2., 0.), v(2., 2., 0.), v(2., 2., 1.)]), s([v(2., -2., 0.), v(2., 2., 1.), v(2., -2., 1.)]),
+        ];
+        let mut area = with(foot);
+        assert_eq!(park_edge_lines(&mut area, &line(v(1.5, 0., 0.02), v(2.5, 0., 0.02))), 0, "across a wall");
     }
 
     #[test]

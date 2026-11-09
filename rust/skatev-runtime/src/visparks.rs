@@ -239,6 +239,13 @@ pub fn replace(tris: &mut Vec<Tri>, stairs: &[Tri]) -> Replacement {
     out
 }
 
+/// A visible strip narrower than this (m) beside an owned face is collision too
+/// (a coping's chamfer; design 2026-11-09-visible-owner 2).
+const CHAMFER_WIDTH: f32 = 0.05;
+/// A near-flat neighbour keeps its corners when one would move farther (m;
+/// design 2026-11-09-visible-owner 4).
+const FLAT_NEIGHBOUR_MOVE: f32 = 0.05;
+
 /// Smallest piece of a cut GTA triangle that is kept (m2), and the thinnest
 /// (area / longest edge, m): nothing stands on less, and the gap is smaller.
 const PIECE_AREA: f32 = 2e-4;
@@ -509,37 +516,36 @@ fn replace_park(tris: &mut Vec<Tri>, stairs: &[Tri], visible: &[[[f32; 3]; 3]], 
         let deviation = dev(i).max(dev(partner));
         Some((Used { v: **t, partner, limit: (deviation + PARTNER_SLACK).min(MATCH) }, i))
     }).collect();
-    // GTA's collision is the base (Manatros 2026-10-26 19:03 recording:
-    // "plain GTA collision is a solid basis that just needs fine-tuning like
-    // the high-res bowl"). Only the bowls' curves replace it, a whole GTA
-    // face at a time: a GTA surface (not a rail, post or trim) that the
-    // visible one leaves by 3 cm or more somewhere. Flat decks, ledges and
-    // railings stay GTA's (their visible copies cut GTA's into dense
-    // fragments, marks 5, 7, 8).
+    // How far each GTA face lies from the visible one. 3 cm or more somewhere
+    // makes it a curve chord (the wide cut, chord sag); design
+    // 2026-11-09-visible-owner: the other surfaces the visible model covers
+    // are owned by it too, cut narrowly.
     // A visible sliver (handrail bracket, trim; under 0.01 m2) or a flat
     // visible face over a flat GTA deck never makes its chord deviate: the
     // bracket facets 9-21 cm in front of the flat wall at 1105-11 and the
     // raised ledge top over the deck at 1105-10 cut both into shards
     // (design 2026-11-07-park-narrow-fixes; decision 2026-10-26: flat decks
     // stay GTA's; `turn` below already skips slivers).
+    let is_sliver = |v: &[[f32; 3]; 3]| {
+        let p = v.map(v3);
+        (p[1] - p[0]).cross(p[2] - p[0]).length() / 2.0 < SLIVER_AREA
+    };
+    // A flat face a ledge's height off a flat deck is another surface
+    // (the 23-26 cm ledge top at 1105-10), not the deck bending.
+    let raised_top = |u: &Used, chord: usize| normal(&u.v).z >= CURVE_NEIGHBOUR_MAX_Z && normal(&tris[u.partner].v).z >= CURVE_NEIGHBOUR_MAX_Z
+        && normal(&tris[chord].v).z >= CURVE_NEIGHBOUR_MAX_Z && {
+            // Every corner that far off (a parallel ledge top), not only the
+            // highest one: a 10 deg transition facet rising from the floor
+            // reaches 15 cm at its far corner and is curve evidence
+            // (Goldfish 2026-11-07, item D).
+            let a = v3(tris[chord].v[0]);
+            let n = normal(&tris[chord].v);
+            u.v.iter().map(|&q| (v3(q) - a).dot(n).abs()).fold(f32::MAX, f32::min) >= LEDGE_RISE
+        };
     let mut deviates: HashMap<usize, f32> = HashMap::default();
     for &(ref u, chord) in &candidates {
         let e = deviates.entry(chord).or_insert(0.0);
-        let p = u.v.map(v3);
-        let sliver = (p[1] - p[0]).cross(p[2] - p[0]).length() / 2.0 < SLIVER_AREA;
-        // A flat face a ledge's height off a flat deck is another surface
-        // (the 23-26 cm ledge top at 1105-10), not the deck bending.
-        let flat_deck = normal(&u.v).z >= CURVE_NEIGHBOUR_MAX_Z && normal(&tris[u.partner].v).z >= CURVE_NEIGHBOUR_MAX_Z
-            && normal(&tris[chord].v).z >= CURVE_NEIGHBOUR_MAX_Z && {
-                // Every corner that far off (a parallel ledge top), not only the
-                // highest one: a 10 deg transition facet rising from the floor
-                // reaches 15 cm at its far corner and is curve evidence
-                // (Goldfish 2026-11-07, item D).
-                let a = v3(tris[chord].v[0]);
-                let n = normal(&tris[chord].v);
-                p.iter().map(|&q| (q - a).dot(n).abs()).fold(f32::MAX, f32::min) >= LEDGE_RISE
-            };
-        if sliver || flat_deck { continue; }
+        if is_sliver(&u.v) || raised_top(u, chord) { continue; }
         *e = e.max(u.limit - PARTNER_SLACK);
     }
     // Rescue upward bowl facets only. Admitting small sidewall details
@@ -592,11 +598,24 @@ fn replace_park(tris: &mut Vec<Tri>, stairs: &[Tri], visible: &[[[f32; 3]; 3]], 
     // GTA faces a used visible face stands on (its nearest chord and its
     // partner): those are always cut by it, whatever their facing.
     let mut owned: std::collections::HashSet<usize> = std::collections::HashSet::new();
+    // Chords a curve replaces (the wide cut, chord sag); the other owned faces
+    // are cut narrowly (design 2026-11-09-visible-owner 1).
+    let mut curve_chords: std::collections::HashSet<usize> = std::collections::HashSet::new();
+    let mut curve_partners: std::collections::HashSet<usize> = std::collections::HashSet::new();
     let used: Vec<Used> = candidates.into_iter().filter_map(|(u, chord)| {
         let d = deviation(&u, chord);
         let curve = d >= CURVE || (d >= CURVE_NEIGHBOUR && (beside_curve(chord) || beside_curve(u.partner)));
-        if !curve || !small_ok(&u, chord, &mut support) { return None; }
+        if !small_ok(&u, chord, &mut support) { return None; }
+        // The visible model owns every surface it covers (Manatros 2026-11-08
+        // 05:36; A50 as updated 2026-10-27; box gates in the design), except a
+        // raised top with no GTA top (the deck under it must stay: no lid over
+        // a hole) and a bracket off a flat face.
+        if !curve && (is_sliver(&u.v) || raised_top(&u, chord)) { return None; }
         owned.insert(chord);
+        if curve {
+            curve_chords.extend([chord, u.partner]);
+            curve_partners.insert(u.partner);
+        }
         // The whole face's deviation is the limit: the parts of the chord
         // close to the curve go with it.
         Some(Used { limit: (d + PARTNER_SLACK).min(MATCH), ..u })
@@ -608,7 +627,7 @@ fn replace_park(tris: &mut Vec<Tri>, stairs: &[Tri], visible: &[[[f32; 3]; 3]], 
     // an admitted curve chord, farther than MATCH from it, where the flat chord
     // spans a round wall ("the triangle hovers next to the actual bowl",
     // 1103-2). They cut only their own chord and nothing snaps onto them.
-    let chords: std::collections::HashSet<usize> = owned.iter().copied().chain(used.iter().map(|u| u.partner)).collect();
+    let chords = &curve_chords;
     let in_used: std::collections::HashSet<[[u32; 3]; 3]> = used.iter().map(|u| u.v.map(|p| p.map(f32::to_bits))).collect();
     let sag_grid = Grid::new(park.iter().map(|&i| &tris[i].v), SAG_REACH);
     // A chord's flat surface: admitted chord triangles in its plane (a quad's
@@ -677,6 +696,48 @@ fn replace_park(tris: &mut Vec<Tri>, stairs: &[Tri], visible: &[[[f32; 3]; 3]], 
         for j in surface { sag.entry(j).or_default().push(Used { v: **t, partner: i, limit }); }
         sag_faces.push(Used { v: **t, partner: i, limit });
     }
+    // Chamfers (design 2026-11-09-visible-owner 2): thin visible strips beside an
+    // owned face, two hops at most (a strip's two triangles).
+    let mut chamfers: Vec<Used> = Vec::new();
+    {
+        let bits = |v: &[[f32; 3]; 3]| v.map(|p| p.map(f32::to_bits));
+        let taken: std::collections::HashSet<[[u32; 3]; 3]> = used.iter().chain(&sag_faces).map(|u| bits(&u.v)).collect();
+        let thin: Vec<&[[f32; 3]; 3]> = near.iter().copied().filter(|t| {
+            let p = t.map(v3);
+            let area = (p[1] - p[0]).cross(p[2] - p[0]).length() / 2.0;
+            let longest = p[0].distance(p[1]).max(p[1].distance(p[2])).max(p[2].distance(p[0]));
+            !taken.contains(&bits(t)) && normal(t).z >= 0.3 && longest > 0.0 && 2.0 * area / longest < CHAMFER_WIDTH
+                && !samples(t).into_iter().any(|q| stair_grid.at(q).iter().any(|&k| distance(q, &stairs[k as usize].v) <= MATCH))
+        }).collect();
+        // Edge -> lowest index of the owner holding it.
+        let edge = |a: [f32; 3], b: [f32; 3]| { let (x, y) = (quant(a), quant(b)); if x <= y { (x, y) } else { (y, x) } };
+        let edges_of = |v: &[[f32; 3]; 3]| [edge(v[0], v[1]), edge(v[1], v[2]), edge(v[2], v[0])];
+        let mut owner_edges: HashMap<([i32; 3], [i32; 3]), usize> = HashMap::default();
+        for (k, u) in used.iter().enumerate() {
+            for e in edges_of(&u.v) { let o = owner_edges.entry(e).or_insert(k); *o = (*o).min(k); }
+        }
+        let mut hop1: Vec<bool> = vec![false; thin.len()];
+        let mut first_edges: HashMap<([i32; 3], [i32; 3]), usize> = HashMap::default();
+        for (k, t) in thin.iter().enumerate() {
+            let owner = edges_of(t).iter().filter_map(|e| owner_edges.get(e).copied()).min()
+                .filter(|&o| {
+                    let (un, a) = (normal(&used[o].v), v3(used[o].v[0]));
+                    normal(t).dot(un) > 0.0 && t.iter().all(|&q| (v3(q) - a).dot(un).abs() <= MATCH)
+                });
+            if let Some(o) = owner {
+                hop1[k] = true;
+                let partner = used[o].partner;
+                chamfers.push(Used { v: **t, partner, limit: 0.0 });
+                for e in edges_of(t) { first_edges.entry(e).or_insert(partner); }
+            }
+        }
+        for (k, t) in thin.iter().enumerate() {
+            if hop1[k] { continue; }
+            if let Some(&partner) = edges_of(t).iter().find_map(|e| first_edges.get(e)) {
+                chamfers.push(Used { v: **t, partner, limit: 0.0 });
+            }
+        }
+    }
     let vis_grid = Grid::new(used.iter().map(|u| &u.v), MATCH);
     // 1.2/1.4: GTA triangles near a used visible one facing the same way are
     // cut by the visible footprints, and the vertices on the footprints'
@@ -685,7 +746,29 @@ fn replace_park(tris: &mut Vec<Tri>, stairs: &[Tri], visible: &[[[f32; 3]; 3]], 
     let mut moved: HashMap<[i32; 3], [f32; 3]> = HashMap::default();
     let mut pinned: std::collections::HashSet<[i32; 3]> = std::collections::HashSet::new();
     let mut cover: Vec<u32> = Vec::new();
-    let partners: std::collections::HashSet<usize> = used.iter().map(|u| u.partner).collect();
+    // Whether a cut piece is on an owned visible face: its centroid, corners and
+    // edge midpoints each within a used face's own limit (the same surface: a
+    // deck 20 cm under an overhang's top is not), facing like the piece's
+    // chord, no bracket. `inside`: projecting inside the face (a second owner);
+    // otherwise near it (a thin remnant beside it).
+    let piece_points = |piece: &[[f32; 3]; 3]| {
+        let p = piece.map(v3);
+        let c = (p[0] + p[1] + p[2]) / 3.0;
+        [c, p[0], p[1], p[2], (p[0] + p[1]) * 0.5, (p[1] + p[2]) * 0.5, (p[2] + p[0]) * 0.5].map(|q| q + (c - q) * 0.02)
+    };
+    let on_owned = |piece: &[[f32; 3]; 3], n: Vec3, inside: bool| piece_points(piece).iter().all(|&q| vis_grid.at(q).iter().any(|&k| {
+        let u = &used[k as usize];
+        let un = normal(&u.v);
+        if un.dot(n) < FACING || is_sliver(&u.v) { return false; }
+        // A remnant under 2 cm wide: dropping it leaves at most that slit, so
+        // the reach is MATCH (standing slivers came back with the limit).
+        if !inside { return distance(q, &u.v) <= MATCH; }
+        let (a, b, e) = (v3(u.v[0]), v3(u.v[1]), v3(u.v[2]));
+        let d = (q - a).dot(un);
+        if d.abs() > u.limit { return false; }
+        let s = q - un * d;
+        [(a, b), (b, e), (e, a)].iter().all(|&(g, h)| (h - g).cross(s - g).dot(un) >= -1e-4)
+    }));
     for i in 0..tris.len() {
         let t = tris[i].v;
         let n = normal(&t);
@@ -699,7 +782,7 @@ fn replace_park(tris: &mut Vec<Tri>, stairs: &[Tri], visible: &[[[f32; 3]; 3]], 
         }
         cover.sort_unstable();
         cover.dedup();
-        let replaced_chord = partners.contains(&i);
+        let replaced_chord = curve_partners.contains(&i);
         cover.retain(|&k| {
             let u = &used[k as usize];
             // A replaced chord's covers reach POCKET_REACH (peer review 2026-11-03).
@@ -708,7 +791,7 @@ fn replace_park(tris: &mut Vec<Tri>, stairs: &[Tri], visible: &[[[f32; 3]; 3]], 
             // own surface (within 40 deg): a wall grazing a lip row's seam by
             // millimetres sliced it into dozens of shards (1104-5; design
             // 2026-11-07-park-narrow-fixes).
-            let own = replaced_chord || owned.contains(&i);
+            let own = curve_chords.contains(&i);
             // (Goldfish item I, "trim cuts only the faces it stands on", was
             // measured and dropped: it left 2-5 cm floor layers at Hawick,
             // box bakes exp4/N3 2026-11-07.)
@@ -796,6 +879,12 @@ fn replace_park(tris: &mut Vec<Tri>, stairs: &[Tri], visible: &[[[f32; 3]; 3]], 
     // Pins until none is added (re-review 2026-11-03): a pin can make a piece
     // or neighbour that was fine fold; it then pins all its corners too. Pins
     // only grow, so this ends; afterwards every face folds nowhere.
+    for &i in &neighbours {
+        let t = tris[i].v;
+        if normal(&t).z < CURVE_NEIGHBOUR_MAX_Z { continue; }
+        let far = t.iter().any(|&p| !pinned.contains(&quant(p)) && moved.get(&quant(p)).is_some_and(|&m| v3(m).distance(v3(p)) > FLAT_NEIGHBOUR_MOVE));
+        if far { pinned.extend(t.iter().map(|&q| quant(q))); }
+    }
     loop {
         let before = pinned.len();
         let place = |q: [f32; 3]| if pinned.contains(&quant(q)) { q } else { snap(q, &used, &vis_grid) };
@@ -818,12 +907,16 @@ fn replace_park(tris: &mut Vec<Tri>, stairs: &[Tri], visible: &[[[f32; 3]; 3]], 
     // Snapping can squeeze a piece into a sliver: those go too (they broke the
     // lip test of a park curb, 2026-10-26).
     let changed: Vec<(usize, Vec<[[f32; 3]; 3]>)> = changed.into_iter().map(|(i, pieces)| {
+        let chord_n = normal(&tris[i].v);
         let kept = pieces.iter().map(|p| p.map(place))
             .filter(|t| {
                 let p = t.map(v3);
                 let area = (p[1] - p[0]).cross(p[2] - p[0]).length() / 2.0;
                 let longest = p[0].distance(p[1]).max(p[1].distance(p[2])).max(p[2].distance(p[0]));
-                area >= PIECE_AREA && area / longest >= PIECE_WIDTH
+                // A piece lying on an owned visible face is a second owner; a
+                // remnant under 2 cm wide beside one stands off it as a shard.
+                area >= PIECE_AREA && area / longest >= PIECE_WIDTH && !on_owned(t, chord_n, true)
+                    && !(2.0 * area / longest < REMNANT_WIDTH && on_owned(t, chord_n, false))
             })
             .collect();
         (i, kept)
@@ -832,7 +925,7 @@ fn replace_park(tris: &mut Vec<Tri>, stairs: &[Tri], visible: &[[[f32; 3]; 3]], 
         let m = t.map(|p| if pinned.contains(&quant(p)) { p } else { moved.get(&quant(p)).copied().unwrap_or(p) });
         (m != t).then(|| (i, vec![m]))
     })).collect();
-    for u in used.iter().chain(&sag_faces) {
+    for u in used.iter().chain(&sag_faces).chain(&chamfers) {
         out.added.push(Tri { v: u.v, material: tris[u.partner].material });
         out.surface_from.push(svwc::surfaces::key(&tris[u.partner].v));
         out.cut.push(false);
@@ -1251,7 +1344,6 @@ mod tests {
         let centre = Vec3::new(-1355., -1396., 2.);
         let map = |[x,y,z]: [f32;3]| (centre + Vec3::new(z,y,-x)).to_array();
         let mut gta: Vec<_> = square(0.,2.,0.,2.,0.).into_iter().map(|v| Tri { v: v.map(map), material: 1 }).collect();
-        let original = gta.iter().map(|t| t.v).collect::<Vec<_>>();
         let mut visible: Vec<_> = square(0.,2.,0.,2.,0.).into_iter().map(|v| v.map(map)).collect();
         // Small mounted bracket has offset and a real bend, but neither side
         // carries 0.01 m2 / 5 cm breadth of its own connected support sheet.
@@ -1261,8 +1353,8 @@ mod tests {
             [[0.94,0.9,0.20],[0.98,0.94,0.22],[0.94,0.94,0.20]],
         ].map(|v| v.map(map)));
         let out = run(&mut gta, &[], &visible);
-        assert!(out.added.is_empty());
-        assert_eq!(gta.iter().map(|t| t.v).collect::<Vec<_>>(), original);
+        // Design 2026-11-09-visible-owner: the wall may be owned, the bracket never.
+        assert!(out.added.iter().zip(&out.cut).all(|(t, c)| *c || area(&t.v) >= SLIVER_AREA), "no bracket face in the collision");
     }
     #[test]
     fn a_transition_facet_rising_from_a_flat_floor_still_counts_as_curve() {
@@ -1581,10 +1673,10 @@ mod tests {
             let out = run(&mut gta, &[], &[vis_seam, vis_flat]);
             let added_vis: Vec<_> = out.added.iter().zip(&out.cut).zip(&out.surface_from)
                 .filter(|((_, c), _)| !**c).collect();
-            assert_eq!(added_vis.len(), 1, "only the displaced seam triangle is admitted (reverse={reverse})");
-            assert_eq!(added_vis[0].0.0.v, vis_seam);
-            assert_eq!(added_vis[0].0.0.material, 7, "inherits adjacent bank material");
-            assert_eq!(*added_vis[0].1, bank_key, "inherits adjacent bank surface key");
+            // The flat visible face is owned too (design 2026-11-09-visible-owner).
+            let seam = added_vis.iter().find(|((t, _), _)| t.v == vis_seam).expect("the displaced seam triangle is admitted");
+            assert_eq!(seam.0.0.material, 7, "inherits adjacent bank material");
+            assert_eq!(*seam.1, bank_key, "inherits adjacent bank surface key");
             assert_eq!(layered(&gta, &out.added, &out.cut), 0);
         }
     }
@@ -1770,7 +1862,7 @@ mod tests {
     }
 
     #[test]
-    fn rails_trims_and_flat_matches_stay_gta_s() {
+    fn rails_stay_gta_s_and_a_flat_deck_gets_one_owner() {
         // A railing bar: GTA's thin box face (0.05 x 2 m) with a round visible tube 4 cm off it.
         let x0 = -1360.0;
         let y0 = -1400.0;
@@ -1778,10 +1870,12 @@ mod tests {
         let visible = vec![[[x0, y0, 1.04], [x0 + 2., y0, 1.04], [x0 + 2., y0 + 0.05, 1.04]]];
         let out = run(&mut gta, &[], &visible);
         assert!(out.added.is_empty() && gta.len() == 1, "a rail-sized face is no bowl");
-        // A flat deck the visible model matches within 2 cm stays GTA's.
+        // A flat deck under its visible copy: the visible one owns it, one layer
+        // (design 2026-11-09-visible-owner; was "stays GTA's" until 2026-11-09).
         let mut deck: Vec<Tri> = square(x0, x0 + 2., y0, y0 + 2., 0.).into_iter().map(|v| Tri { v, material: 3 }).collect();
-        let out = run(&mut deck, &[], &square(x0, x0 + 2., y0, y0 + 2., 0.02));
-        assert!(out.added.is_empty() && deck.len() == 2);
+        let out = run(&mut deck, &[], &square(x0, x0 + 2., y0, y0 + 2., 0.10));
+        assert!(deck.is_empty() && out.cut.iter().all(|c| !c), "no GTA piece stays under it");
+        assert_eq!(out.added.len(), 2);
     }
 
     #[test]
@@ -1911,37 +2005,58 @@ mod tests {
         let (mut gta, visible) = two_chords(true, 0.03);
         let out = run(&mut gta, &[], &visible);
         assert!(gta_left_on_second(&gta, &out) < 0.01, "second chord kept {} m2", gta_left_on_second(&gta, &out));
-        // The same chord with no curve beside it stays GTA's.
+        // Design 2026-11-09-visible-owner: without a curve beside it, the visible
+        // bulge owns the chord too (it stayed GTA's until 2026-11-09).
         let (mut gta, visible) = two_chords(false, 0.03);
         let out = run(&mut gta, &[], &visible);
-        assert!(gta_left_on_second(&gta, &out) > 2.0);
-        // A floor 2 cm off its visible floor beside the curve stays GTA's.
-        let (x0, y0) = (-1355.0f32, -1396.0f32);
-        let mut gta = vec![
-            Tri { v: [[x0, y0, 0.], [x0 + 1., y0, 0.5], [x0 + 1., y0 + 2., 0.5]], material: 1 },
-            Tri { v: [[x0, y0, 0.], [x0 + 1., y0 + 2., 0.5], [x0, y0 + 2., 0.]], material: 1 },
-            Tri { v: [[x0 - 1., y0, 0.], [x0, y0, 0.], [x0, y0 + 2., 0.]], material: 1 },
-            Tri { v: [[x0 - 1., y0, 0.], [x0, y0 + 2., 0.], [x0 - 1., y0 + 2., 0.]], material: 1 },
-        ];
-        let mut visible = two_chords(true, 0.0).1.into_iter().filter(|t| centroid(t).x < x0 + 1.0).collect::<Vec<_>>();
-        for k in 0..10 {
-            let (a, b) = (-1.0 + k as f32 / 10.0, -1.0 + (k + 1) as f32 / 10.0);
-            let p = |x: f32, y: f32| [x0 + x, y0 + y, -0.02 * 4.0 * (x + 1.0) * (-x)];
-            visible.push([p(a, 0.), p(b, 0.), p(b, 2.)]);
-            visible.push([p(a, 0.), p(b, 2.), p(a, 2.)]);
-        }
-        run(&mut gta, &[], &visible);
-        assert_eq!(gta.iter().filter(|t| centroid(&t.v).x < x0).count(), 2, "the floor stays GTA's");
-        // A flat visible plane 2 cm off the second chord (offset, no turn) stays GTA's.
+        assert!(gta_left_on_second(&gta, &out) < 0.01);
+        // A flat visible plane 2 cm off the second chord: owned, no layer.
         let (mut gta, mut visible) = two_chords(true, 0.0);
         for t in visible.iter_mut().filter(|t| centroid(t).x > -1355.0 + 1.0) {
             for p in t.iter_mut() { p[2] += 0.02; }
         }
         let out = run(&mut gta, &[], &visible);
-        assert!(gta_left_on_second(&gta, &out) > 2.0, "an offset plane is no curve");
-        // A planar bank beside the curve (no bulge) stays GTA's.
-        let (mut gta, visible) = two_chords(true, 0.0);
+        assert!(gta_left_on_second(&gta, &out) < 0.01, "an offset plane owns its chord");
+    }
+
+    #[test]
+    fn a_raised_flat_top_without_a_gta_top_leaves_the_deck_whole() {
+        // Goldfish 2026-11-09 item 1: a visible ledge top 23 cm over a flat GTA deck,
+        // no GTA top. Taking it would remove the deck: a lid over a hole.
+        let (x0, y0) = (-1360.0f32, -1400.0f32);
+        let mut gta: Vec<Tri> = square(x0, x0 + 4., y0, y0 + 4., 0.).into_iter().map(|v| Tri { v, material: 3 }).collect();
+        let original: Vec<_> = gta.iter().map(|t| t.v).collect();
+        let out = run(&mut gta, &[], &square(x0 + 1., x0 + 2., y0 + 1., y0 + 2., 0.23));
+        assert!(out.added.is_empty());
+        assert_eq!(gta.iter().map(|t| t.v).collect::<Vec<_>>(), original);
+    }
+
+    #[test]
+    fn a_chamfer_beside_an_owned_top_is_collision_for_two_hops_only() {
+        let (x0, y0) = (-1360.0f32, -1400.0f32);
+        let x1 = x0 + 2.;
+        let y1 = y0 + 2.;
+        let mut gta: Vec<Tri> = square(x0, x0 + 4., y0, y0 + 4., 0.).into_iter().map(|v| Tri { v, material: 3 }).collect();
+        let mut visible = square(x0, x1, y0, y1, 0.05);
+        // A 45 deg strip along the top's edge: two triangles, then a third thin one.
+        let a = [[x1, y0, 0.05], [x1 + 0.03, y1, 0.02], [x1, y1, 0.05]];
+        let a = if normal(&a).z < 0.0 { [a[0], a[2], a[1]] } else { a };
+        let b = [[x1, y0, 0.05], [x1 + 0.03, y0, 0.02], [x1 + 0.03, y1, 0.02]];
+        let c = [[x1 + 0.03, y0, 0.02], [x1 + 0.06, y1, -0.01], [x1 + 0.03, y1, 0.02]];
+        visible.extend([a, b, c]);
         let out = run(&mut gta, &[], &visible);
-        assert!(gta_left_on_second(&gta, &out) > 2.0);
+        let has = |t: &[[f32; 3]; 3]| out.added.iter().zip(&out.cut).any(|(f, cut)| !*cut && f.v == *t);
+        assert!(has(&a) && has(&b), "both triangles of the strip");
+        assert!(!has(&c), "no growth past two hops");
+    }
+
+    #[test]
+    fn a_thin_visible_face_beside_nothing_owned_is_no_chamfer() {
+        let (x0, y0) = (-1360.0f32, -1400.0f32);
+        let mut gta: Vec<Tri> = square(x0, x0 + 4., y0, y0 + 4., 0.).into_iter().map(|v| Tri { v, material: 3 }).collect();
+        let strip = [[x0 + 1., y0 + 1., 1.05], [x0 + 1.03, y0 + 3., 1.02], [x0 + 1., y0 + 3., 1.05]];
+        let strip = if normal(&strip).z < 0.0 { [strip[0], strip[2], strip[1]] } else { strip };
+        let out = run(&mut gta, &[], &[strip]);
+        assert!(out.added.is_empty());
     }
 }
