@@ -16,6 +16,7 @@ struct FrameData {
     float heading = 0.0f;        // skater heading, degrees
     float velocity[3] = {};
     float camera[7] = {};        // position, rotation (pitch, roll, yaw), fov
+    std::uint32_t gameMs = 0;    // GET_GAME_TIMER at this frame (replay sound)
     bool board = false;          // board matrices valid
     float boardEntity[16] = {};
     float boardWorld[7][16] = {};
@@ -94,10 +95,14 @@ struct KeysIn {                    // held this frame
     bool left = false, right = false;     // A / D or Left / Right arrow
     bool forward = false, back = false;   // W / S
     bool up = false, down = false;        // E / Q
+    bool plus = false, minus = false;     // + / - (main row and numpad): speed
+    bool filter = false, lens = false;    // F / L
+    bool shift = false;                   // Shift held: F and L step back
     float mouseX = 0.0f, mouseY = 0.0f;   // GTA's look normals this frame (0: mouse not in use)
 };
 struct Command {
     bool playPause = false, slower = false, faster = false, nextCamera = false, leave = false;
+    int filterStep = 0, lensStep = 0;  // -1, 0, +1 this frame
     bool reverse = false;          // held
     float scrub = 0.0f;            // -1..1, while paused
     float move[3] = {};            // free camera: right, forward, up, each -1..1
@@ -108,7 +113,9 @@ struct Command {
 class Input {
 public:
     void Reset() { fresh_ = true; }
-    Command Update(const PadIn& pad, const KeysIn& keys, float dt);
+    // `arrowsMove`: the Free and Orbit cameras, where the Up/Down arrows move
+    // the camera up and down instead of changing the speed.
+    Command Update(const PadIn& pad, const KeysIn& keys, float dt, bool arrowsMove = false);
 private:
     bool fresh_ = true;
     std::uint16_t prevPad_ = 0;
@@ -129,6 +136,27 @@ private:
 };
 // A stick axis with the 20 % dead zone, -1..1.
 float StickAxis(std::int16_t v);
+
+// Lenses (design 2026-11-09-replay-look-sound): Auto keeps each camera's own
+// field of view; the others are 35 mm focal lengths; Fisheye is 120 degrees
+// plus the barrel pass.
+enum Lens { kLensAuto, kLensFisheye, kLens14, kLens24, kLens35, kLens50, kLens85, kLens135, kLensCount };
+const char* LensName(int lens);
+// GTA's (vertical) field of view in degrees for `lens`; `autoFov` for Auto.
+float LensFov(int lens, float autoFov);
+
+// Film filters: Off, black and white, the Rockstar Editor's 25 film looks.
+inline constexpr int kFilterCount = 27;
+const char* FilterName(int filter);      // "Off", "Black and white", "Film 1".."Film 25"
+const char* FilterModifier(int filter);  // GTA timecycle modifier; null for Off
+// Steps an index by `step` with wrap-around.
+int Cycle(int index, int step, int count);
+
+// Replay sound: the GTA game time (ms) at the sample, -1 across a cut (silence).
+double GameMsAt(const Recording::Sample& s);
+// The sound's playback rate: 0 (silent) while paused, reversed or scrubbing,
+// else the playhead speed.
+double SoundRate(const Playhead& head, bool scrubbing);
 
 // Back: a tap (pressed and released within `tapMs`, nothing else pressed
 // meanwhile) opens the replay; held longer it stays the gun button.

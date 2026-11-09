@@ -8,6 +8,7 @@
 
 #include "board_native.h"
 #include "board_parts.h"
+#include "fisheye.h"
 #include "gta_audio.h"
 #include "natives.h"
 #include "pose_hook.h"
@@ -21,8 +22,8 @@ using namespace gta;
 constexpr double kTickSeconds = 1.0 / 60.0;  // Skate's fixed step
 constexpr float kFilmerFov = 100.0f;         // the filmer's fisheye
 
-enum Camera { Recorded, Follow, Tripod, Free, Filmer, kCameras };
-constexpr const char* kCameraNames[kCameras] = {"Recorded", "Follow", "Tripod", "Free", "Filmer"};
+enum Camera { Recorded, Follow, Tripod, Free, Filmer, Orbit, Static, kCameras };
+constexpr const char* kCameraNames[kCameras] = {"Recorded", "Follow", "Tripod", "Free", "Filmer", "Orbit", "Static"};
 
 void (*g_log)(const char*) = nullptr;
 bool g_enabled = true;
@@ -41,6 +42,28 @@ float g_eye[3] = {}, g_look[3] = {};  // follow/free/tripod state
 float g_yaw = 0.0f, g_pitch = 0.0f;
 Input g_input;               // both devices; the first frame takes what is held as it is
 unsigned g_applyCalls = 0;
+// Look and sound (design 2026-11-09-replay-look-sound). Filter and lens are
+// kept for the session.
+bool g_sound = true, g_fisheyeOk = true;
+float g_soundGainDb = -4.0f, g_filterStrength = 0.85f;
+int g_filter = 0, g_lens = kLensAuto;
+bool g_filterSet = false;    // the replay set a timecycle modifier (and clears it)
+float g_height = 0.0f;       // Follow, Tripod, Filmer: metres above their own height
+float g_orbitYaw = 0.0f, g_orbitDist = 4.0f, g_orbitHeight = 1.2f;
+float g_staticRot[3] = {};
+
+bool ArrowsMove() { return g_camera == Free || g_camera == Orbit; }
+
+void ApplyFilter() {
+    if (g_filterSet) Call<void>(CLEAR_TIMECYCLE_MODIFIER), g_filterSet = false;
+    if (const char* mod = FilterModifier(g_filter)) {
+        Call<void>(SET_TIMECYCLE_MODIFIER, mod);
+        Call<void>(SET_TIMECYCLE_MODIFIER_STRENGTH, std::clamp(g_filterStrength, 0.0f, 1.0f));
+        g_filterSet = true;
+    }
+}
+
+void ApplyLens() { fisheye::SetEnabled(g_active && g_lens == kLensFisheye && g_fisheyeOk); }
 
 void Log(const char* text) {
     if (g_log) g_log(text);
@@ -114,7 +137,7 @@ void Aim(const Recording::Sample& s, float dt, const Command& in) {
         fov = a.camera[6] + (b.camera[6] - a.camera[6]) * s.t;
         break;
     case Follow: {
-        const float want[3] = {root[0] + std::sin(heading) * 4.0f, root[1] - std::cos(heading) * 4.0f, root[2] + 1.8f};
+        const float want[3] = {root[0] + std::sin(heading) * 4.0f, root[1] - std::cos(heading) * 4.0f, root[2] + 1.8f + g_height};
         const float k = std::min(1.0f, dt * 4.0f);
         for (int i = 0; i < 3; ++i) g_eye[i] += (want[i] - g_eye[i]) * k;
         std::memcpy(eye, g_eye, sizeof(eye));
@@ -122,6 +145,22 @@ void Aim(const Recording::Sample& s, float dt, const Command& in) {
     }
     case Tripod:
         std::memcpy(eye, g_eye, sizeof(eye));
+        eye[2] += g_height;
+        break;
+    case Orbit: {
+        // Around the skater: look turns it, forward/back the distance, up/down the height.
+        g_orbitYaw += in.lookYaw;
+        g_orbitDist = std::clamp(g_orbitDist - in.move[1] * 4.0f * dt, 1.5f, 12.0f);
+        g_orbitHeight = std::clamp(g_orbitHeight + in.move[2] * 3.0f * dt, -1.0f, 8.0f);
+        const float yaw = g_orbitYaw * 0.01745329f;
+        eye[0] = root[0] + std::sin(yaw) * g_orbitDist;
+        eye[1] = root[1] - std::cos(yaw) * g_orbitDist;
+        eye[2] = root[2] + g_orbitHeight;
+        break;
+    }
+    case Static:
+        std::memcpy(eye, g_eye, sizeof(eye));
+        std::memcpy(rot, g_staticRot, sizeof(rot));
         break;
     case Free: {
         g_yaw += in.lookYaw;
@@ -140,18 +179,20 @@ void Aim(const Recording::Sample& s, float dt, const Command& in) {
     default: {  // Filmer: low behind the board, wide lens
         eye[0] = root[0] + std::sin(heading) * 1.6f;
         eye[1] = root[1] - std::cos(heading) * 1.6f;
-        eye[2] = root[2] - 0.5f;
+        eye[2] = root[2] - 0.5f + g_height;
         fov = kFilmerFov;
         break;
     }
     }
-    if (g_camera != Recorded && g_camera != Free) {
+    if (g_camera != Recorded && g_camera != Free && g_camera != Static) {
         // Turn to the skater's chest.
         const float dx = root[0] - eye[0], dy = root[1] - eye[1], dz = root[2] + 0.4f - eye[2];
         rot[0] = std::atan2(dz, std::hypot(dx, dy)) * 57.29578f;
         rot[2] = std::atan2(-dx, dy) * 57.29578f;
         fov = g_camera == Filmer ? kFilmerFov : 50.0f;
     }
+    if (g_camera == Static) fov = 50.0f;
+    fov = LensFov(g_lens, fov);
     Call<void>(SET_CAM_COORD, g_cam, eye[0], eye[1], eye[2]);
     Call<void>(SET_CAM_ROT, g_cam, rot[0], rot[1], rot[2], 2);
     Call<void>(SET_CAM_FOV, g_cam, std::clamp(fov, 10.0f, 120.0f));
@@ -159,7 +200,7 @@ void Aim(const Recording::Sample& s, float dt, const Command& in) {
 
 void DrawTimeline() {
     const double start = g_rec.Start(), len = std::max(g_rec.Length(), 1e-3);
-    const float x0 = 0.2f, w = 0.6f, y = 0.92f;
+    const float x0 = 0.2f, w = 0.6f, y = StatusY() - 0.02f;
     Call<void>(DRAW_RECT, x0 + w / 2, y, w, 0.008f, 20, 20, 20, 180, 0);
     const float f = static_cast<float>((g_head.time - start) / len);
     Call<void>(DRAW_RECT, x0 + w * f / 2, y, w * f, 0.008f, 255, 200, 40, 230, 0);
@@ -177,6 +218,13 @@ void Configure(bool enabled, double seconds, float worldTimeScale, void (*log)(c
 }
 
 bool Enabled() { return g_enabled; }
+
+void ConfigureLook(bool sound, float soundGainDb, bool fisheye, float filterStrength) {
+    g_sound = sound;
+    g_soundGainDb = std::clamp(soundGainDb, -30.0f, 6.0f);
+    g_fisheyeOk = fisheye;
+    g_filterStrength = filterStrength;
+}
 
 void Clear() {
     g_rec.Clear();
@@ -208,6 +256,7 @@ void Record(const SvOutput& o, const float* placed, const float* bones, int coun
     f.camera[0] = cam.x, f.camera[1] = cam.y, f.camera[2] = cam.z;
     f.camera[3] = rot.x, f.camera[4] = rot.y, f.camera[5] = rot.z;
     f.camera[6] = Call<float>(GET_FINAL_RENDERED_CAM_FOV);
+    f.gameMs = static_cast<std::uint32_t>(Call<int>(GET_GAME_TIMER));
     f.board = board != nullptr;
     if (board) {
         std::memcpy(f.boardEntity, board->entity, sizeof(f.boardEntity));
@@ -232,17 +281,30 @@ bool Enter(int ped) {
     // Tripod and free cameras start at the camera play left.
     std::memcpy(g_eye, last.camera, sizeof(g_eye));
     g_pitch = last.camera[3], g_yaw = last.camera[5];
+    g_height = 0.0f;
+    g_orbitYaw = last.camera[5], g_orbitDist = 4.0f, g_orbitHeight = 1.2f;
+    std::memcpy(g_staticRot, last.camera + 3, sizeof(g_staticRot));
     g_cam = Call<int>(CREATE_CAM, "DEFAULT_SCRIPTED_CAMERA", 0);
     Call<void>(SET_CAM_ACTIVE, g_cam, 1);
     Call<void>(RENDER_SCRIPT_CAMS, 1, 0, 0, 1, 0, 0);
     Call<void>(SET_TIME_SCALE, g_worldScale);
+    // The recorded sound first (it stops Skate's recording), then Skate's live sound pauses.
+    bool sound = false;
+    if (g_sound) {
+        const Recording::Sample first = g_rec.At(g_rec.Start());
+        sound = first.a && gtaaudio::ReplaySoundStart(first.a->gameMs, last.gameMs + 50, std::pow(10.0f, g_soundGainDb / 20.0f));
+    }
     gtaaudio::SetReplayPaused(true);
+    g_filterSet = false;
+    ApplyFilter();
+    ApplyLens();
     g_input.Reset();
     posehook::TakeApplyTime();
     g_applyCalls = 0;
     (void)ped;
     char text[160];
-    std::snprintf(text, sizeof(text), "replay: entered (%.1f s recorded, world time scale %.2f)", g_rec.Length(), g_worldScale);
+    std::snprintf(text, sizeof(text), "replay: entered (%.1f s recorded, world time scale %.2f, sound %s, %s, %s)", g_rec.Length(),
+                  g_worldScale, !g_sound ? "off" : sound ? "on" : "none recorded", FilterName(g_filter), LensName(g_lens));
     Log(text);
     return true;
 }
@@ -252,7 +314,9 @@ bool Tick(int ped, const PadIn& pad, const KeysIn& keys, float dt) {
     // GTA's controls are taken by the caller as in skating (DisableSkateControls),
     // never all at once: that would stop GTA's own recorder.
     Call<void>(HIDE_HUD_AND_RADAR_THIS_FRAME);
-    const Command in = g_input.Update(pad, keys, dt);
+    // D-pad down is GTA's character wheel; the replay uses it for the lens.
+    Call<void>(DISABLE_CONTROL_ACTION, 0, 19, 1);
+    const Command in = g_input.Update(pad, keys, dt, ArrowsMove());
     // B, Back, Tab or Backspace leaves on the release, so the press never reaches
     // skating afterwards (a Back release there toggles the gun or opens the replay).
     if (in.leave) return false;
@@ -264,14 +328,33 @@ bool Tick(int ped, const PadIn& pad, const KeysIn& keys, float dt) {
     if (in.faster) g_head.Faster();
     if (in.nextCamera) {
         g_camera = (g_camera + 1) % kCameras;
-        if (g_camera == Tripod || g_camera == Free) {
+        g_height = 0.0f;  // each camera starts at its own height (the copied eye already has the old one)
+        if (g_camera == Free || g_camera == Orbit) g_head.reverse = false;  // no reverse there: never latched on
+        // Tripod, Free and Static start where the camera is; Static also keeps its direction.
+        if (g_camera == Tripod || g_camera == Free || g_camera == Static) {
             const Vector3 c = Call<Vector3>(GET_CAM_COORD, g_cam);
             g_eye[0] = c.x, g_eye[1] = c.y, g_eye[2] = c.z;
+            if (g_camera == Static) {
+                const Vector3 r = Call<Vector3>(GET_CAM_ROT, g_cam, 2);
+                g_staticRot[0] = r.x, g_staticRot[1] = r.y, g_staticRot[2] = r.z;
+            }
         }
     }
-    if (g_camera != Free) {
+    if (in.filterStep) g_filter = Cycle(g_filter, in.filterStep, kFilterCount), ApplyFilter();
+    if (in.lensStep) g_lens = Cycle(g_lens, in.lensStep, kLensCount), ApplyLens();
+    // Follow, Tripod and Filmer: E/Q and the right stick's up/down set the
+    // camera height (LT stays "hold to play backwards").
+    if (g_camera == Follow || g_camera == Tripod || g_camera == Filmer) {
+        const float rise = static_cast<float>(keys.up) - static_cast<float>(keys.down) + StickAxis(pad.rightY);
+        g_height = std::clamp(g_height + std::clamp(rise, -1.0f, 1.0f) * 3.0f * dt, -1.0f, 4.0f);
+    }
+    bool scrubbing = false;
+    if (g_camera != Free && g_camera != Orbit) {
         g_head.reverse = in.reverse;
-        if (!g_head.playing) g_head.time += in.scrub * dt * 2.0;  // scrub
+        if (!g_head.playing) {
+            g_head.time += in.scrub * dt * 2.0;  // scrub
+            scrubbing = in.scrub != 0.0f;
+        }
     }
     g_head.Advance(dt, g_rec.Start(), g_rec.End());
     const Recording::Sample s = g_rec.At(g_head.time);
@@ -279,6 +362,7 @@ bool Tick(int ped, const PadIn& pad, const KeysIn& keys, float dt) {
         Present(ped, s);
         Aim(s, dt, in);
     }
+    gtaaudio::ReplaySoundAt(GameMsAt(s), SoundRate(g_head, scrubbing));
     DrawTimeline();
     g_applyCalls += posehook::TakeApplyTime().calls;
     return true;
@@ -293,22 +377,41 @@ void Exit() {
         Call<void>(DESTROY_CAM, g_cam, 0);
         g_cam = 0;
     }
+    gtaaudio::ReplaySoundStop();
     gtaaudio::SetReplayPaused(false);
+    if (g_filterSet) Call<void>(CLEAR_TIMECYCLE_MODIFIER), g_filterSet = false;
+    fisheye::SetEnabled(false);
     char text[160];
     std::snprintf(text, sizeof(text), "replay: left (pose writes during the replay: %u)", g_applyCalls);
     Log(text);
 }
 
 std::string Status(bool keyboard) {
-    char text[256];
+    char text[384];
     static const char* speeds[] = {"1/4x", "1/2x", "1x", "2x"};
-    const char* help = !keyboard ? (g_camera == Free ? "A play/pause  LB/RB speed  Y camera  left stick move  RT/LT up/down  right stick look  B back"
-                                                     : "A play/pause  left stick scrub  LB/RB speed  hold LT reverse  Y camera  B back")
-                       : g_camera == Free ? "Space play/pause  Up/Down or wheel speed  C camera  W A S D move  E/Q up/down  mouse look  Tab back"
-                                          : "Space play/pause  A/D scrub  Up/Down or wheel speed  hold R reverse  C camera  Tab back";
-    std::snprintf(text, sizeof(text), "REPLAY  %s%s  %s camera  %.1f / %.1f s   %s", g_head.reverse ? "-" : "", speeds[g_head.speed],
-                  kCameraNames[g_camera], g_head.time - g_rec.Start(), g_rec.Length(), help);
+    const bool height = g_camera == Follow || g_camera == Tripod || g_camera == Filmer;
+    const char* help;
+    if (fisheye::Enabled()) {
+        // The fisheye shows only the middle of GTA's frame: a short line.
+        help = keyboard ? "F filter  L lens  C camera  Tab back" : "X filter  D-pad lens  Y camera  B back";
+    } else if (!keyboard) {
+        help = g_camera == Free    ? "A play/pause  LB/RB speed  Y camera  left stick move  RT/LT up/down  right stick look  X filter  D-pad lens  B back"
+               : g_camera == Orbit ? "A play/pause  LB/RB speed  Y camera  right stick turn  left stick distance  RT/LT up/down  X filter  D-pad lens  B back"
+               : height ? "A play/pause  left stick scrub  LB/RB speed  hold LT reverse  right stick up/down  Y camera  X filter  D-pad lens  B back"
+                        : "A play/pause  left stick scrub  LB/RB speed  hold LT reverse  Y camera  X filter  D-pad lens  B back";
+    } else {
+        help = g_camera == Free    ? "Space play/pause  wheel or +/- speed  C camera  W A S D move  E/Q or Up/Down up/down  mouse look  F filter  L lens  Tab back"
+               : g_camera == Orbit ? "Space play/pause  wheel or +/- speed  C camera  mouse turn  W/S distance  E/Q or Up/Down up/down  F filter  L lens  Tab back"
+               : height ? "Space play/pause  A/D scrub  Up/Down, wheel or +/- speed  hold R reverse  E/Q up/down  C camera  F filter  L lens  Tab back"
+                        : "Space play/pause  A/D scrub  Up/Down, wheel or +/- speed  hold R reverse  C camera  F filter  L lens  Tab back";
+    }
+    std::snprintf(text, sizeof(text), "REPLAY  %s%s  %s  %s  %s  %.1f / %.1f s   %s", g_head.reverse ? "-" : "", speeds[g_head.speed],
+                  kCameraNames[g_camera], LensName(g_lens), FilterName(g_filter), g_head.time - g_rec.Start(), g_rec.Length(), help);
     return text;
 }
+
+// Under the fisheye (full frame, the centre magnified about 2.7x) GTA's y
+// 0.68 near the middle column appears at about 0.93 (fisheye::SourcePoint).
+float StatusY() { return fisheye::Enabled() ? 0.68f : 0.94f; }
 
 }  // namespace replay

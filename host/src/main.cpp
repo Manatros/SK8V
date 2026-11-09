@@ -92,6 +92,9 @@ struct Config {
     bool replay = true;          // Replay: Back tap opens the last seconds (design 2026-11-02-replay-editor)
     float replaySeconds = 30.0f; // ReplaySeconds: the recorded window, 10-60
     float replayWorldScale = 0.0f; // ReplayWorldTimeScale: GTA's time scale while replaying (0 frozen)
+    bool replaySound = true;       // ReplaySound: Skate's recorded sound in the replay (design 2026-11-09-replay-look-sound)
+    float replaySoundGainDb = -4.0f; // ReplaySoundGainDb: the replay plays the whole mix unplaced, so a little quieter
+    bool replayFisheye = true;     // ReplayFisheye: the Fisheye lens bends the picture (0: a plain 120-degree view)
     bool boardShop = true;    // BoardShop: Skate 3's boards and parts for sale in street clothing stores (G)
     bool wheelsFromPaint = true; // WheelsFromPaint: painted wheels set the wheel hardness (matte soft .. metallic hard)
     bool vehicleShapes = true; // VehicleShapes: survey vehicles without an extracted bound (a roof to ride, a gap to hippie jump)
@@ -316,6 +319,9 @@ const Key kKeys[] = {
     {"Replay", Store<&Config::replay>},
     {"ReplaySeconds", Store<&Config::replaySeconds>},
     {"ReplayWorldTimeScale", Store<&Config::replayWorldScale>},
+    {"ReplaySound", Store<&Config::replaySound>},
+    {"ReplaySoundGainDb", Store<&Config::replaySoundGainDb>},
+    {"ReplayFisheye", Store<&Config::replayFisheye>},
     {"BoardShop", Store<&Config::boardShop>},
     {"WheelsFromPaint", Store<&Config::wheelsFromPaint>},
     {"VehicleShapes", Store<&Config::vehicleShapes>},
@@ -902,6 +908,11 @@ replay::KeysIn ReplayKeys() {
     k.back = held('S');
     k.up = held('E');
     k.down = held('Q');
+    k.filter = held('F');
+    k.lens = held('L');
+    k.shift = held(VK_SHIFT);
+    k.plus = held(VK_OEM_PLUS) || held(VK_ADD);        // the = / + key, numpad +
+    k.minus = held(VK_OEM_MINUS) || held(VK_SUBTRACT); // the - key, numpad -
     k.faster = held(VK_UP);
     k.slower = held(VK_DOWN);
     // The mouse: GTA's look normals and wheel, only while GTA says the mouse
@@ -1984,7 +1995,7 @@ void DisableSkateControls(std::uint16_t buttons, bool aiming) {
         // (and the look axes 1, 2: the pad's right stick, in case the wheel reads it there)
         skip[c] = (g_weaponWheel && ((c >= 12 && c <= 17) || c == 37 || c == 1 || c == 2)) ||
                   c == 199 || c == 200 || c == 170 || c == 288 || c == 289 || (c >= 296 && c <= 328) || c == 349 ||
-                  (c == 19 && !(buttons & 0x0100)) ||
+                  (c == 19 && !(buttons & 0x0100) && !replay::Active()) ||  // the replay's D-pad down is a lens, not the character wheel
                   (c == 244 && gtaKeyboard) || // keyboard and mouse: M stays GTA's interaction menu
                   (g_gtaView && !replay::Active() && (((c == 1 || c == 2) && mouseLook) || (c == 26 && !gtaKeyboard) || c == 0)) || // GTA's look, look behind (pad: on the keyboard C is a grab), V
                   (aiming && (c == 1 || c == 2 || c == 24 || c == 25 || c == 45 || (c >= 270 && c <= 273) || (c >= 290 && c <= 295)));
@@ -3447,7 +3458,10 @@ void LifecycleFrame(Session& s, const Config& cfg, bool f6) {
         // A request from the menu waits until the menu is closed.
         if (s.replayRequested && !menu::IsOpen() && !gta::FrontendActive()) {
             s.replayRequested = false;
-            if (!replay::Active() && !dead && cfg.replay && replay::Enter(s.ped)) Log("SkateV Legacy: replay opened");
+            if (!replay::Active() && !dead && cfg.replay && replay::Ready()) {
+                FilmLook(s, cfg, 0, 0.0f);  // the action camera's look off: the replay owns the timecycle filter
+                if (replay::Enter(s.ped)) Log("SkateV Legacy: replay opened");
+            }
         }
         if (replay::Active()) {
             // Play is held: no step, placement, watchdog or put-away while it runs.
@@ -3468,7 +3482,7 @@ void LifecycleFrame(Session& s, const Config& cfg, bool f6) {
                               !replay::Tick(s.ped, ReplayPad(pad), ReplayKeys(), dt);
             if (stop) s_replayClock.QuadPart = 0;
             if (!stop) {
-                Text(replay::Status(ReplayOnKeyboard()).c_str(), 0.5f, 0.94f, 0.32f, 255, 255, 255, true);
+                Text(replay::Status(ReplayOnKeyboard()).c_str(), 0.5f, replay::StatusY(), 0.32f, 255, 255, 255, true);
                 s.watchSince = now, s.watchFrames = 0;
                 break;
             }
@@ -4824,6 +4838,7 @@ void ScriptMain() {
         // Collectibles first: the shop keeps as many secret items as there are part collectibles.
         collectibles::Start(g_gameDir, cfg.collectibles, Log);
         replay::Configure(cfg.replay, cfg.replaySeconds, cfg.replayWorldScale, Log);
+        replay::ConfigureLook(cfg.replaySound, cfg.replaySoundGainDb, cfg.replayFisheye, cfg.filmFilterStrength);
         // The board shop's part models and the shop itself (garages in the game folder).
         if (cfg.drawBoard && boardparts::Start(std::filesystem::u8path(cfg.dataRoot).wstring(), Log) && cfg.boardShop)
             boardshop::Start(g_runtime, cfg.dataRoot, util::Narrow(g_gameDir), Log, [](float hardness) {
@@ -4967,7 +4982,7 @@ void ScriptMain() {
             if (recordsui::Showing()) recordsui::NextPage();  // '/' also closes the records board
             else menu::Toggle();
         }
-        FilmLookPreview(s, cfg); // under the menu: drawn first
+        if (!replay::Active()) FilmLookPreview(s, cfg); // under the menu: drawn first (the replay owns the filter while it runs)
         menu::Tick();
         if (g_routeNotice) Notify(s, g_routeNotice, 3000), g_routeNotice = nullptr;
         Lap(kPartMenu);

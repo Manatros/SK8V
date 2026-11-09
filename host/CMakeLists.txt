@@ -37,6 +37,7 @@ add_library(SkateVLegacy SHARED
   src/live_clip.cpp
   src/hud_overlay.cpp
   src/hud_renderer.cpp
+  src/fisheye.cpp
   src/xray_renderer.cpp
   src/records_ui.cpp
   src/board_native.cpp

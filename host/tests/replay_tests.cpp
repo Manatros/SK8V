@@ -2,6 +2,7 @@
 #include <cassert>
 #include <cmath>
 #include <iostream>
+#include <string>
 
 using namespace replay;
 
@@ -207,6 +208,113 @@ int main() {
         p.rightTrigger = 200;
         m.Apply(p);
         assert(p.buttons == 0x8000 && p.rightTrigger == 200);  // a new press goes through
+    }
+
+    // Design 2026-11-09-replay-look-sound: lenses (vertical FOV of a 24 mm high frame).
+    assert(LensFov(kLensAuto, 50.0f) == 50.0f);
+    assert(LensFov(kLensFisheye, 50.0f) == 120.0f);
+    assert(std::fabs(LensFov(kLens14, 0) - 81.2f) < 0.1f);
+    assert(std::fabs(LensFov(kLens24, 0) - 53.1f) < 0.1f);
+    assert(std::fabs(LensFov(kLens35, 0) - 37.8f) < 0.1f);
+    assert(std::fabs(LensFov(kLens50, 0) - 27.0f) < 0.1f);
+    assert(std::fabs(LensFov(kLens85, 0) - 16.1f) < 0.1f);
+    assert(std::fabs(LensFov(kLens135, 0) - 10.2f) < 0.1f);
+    assert(Cycle(0, -1, kLensCount) == kLensCount - 1 && Cycle(kLensCount - 1, 1, kLensCount) == 0);
+    // Filters: Off, black and white, Film 1..25 = NG_filmic01..25.
+    assert(FilterModifier(0) == nullptr && std::string(FilterName(0)) == "Off");
+    assert(std::string(FilterModifier(1)) == "blackNwhite");
+    assert(std::string(FilterModifier(2)) == "NG_filmic01" && std::string(FilterName(2)) == "Film 1");
+    assert(std::string(FilterModifier(kFilterCount - 1)) == "NG_filmic25" && std::string(FilterName(kFilterCount - 1)) == "Film 25");
+    assert(Cycle(kFilterCount - 1, 1, kFilterCount) == 0);
+    {
+        // Free and Orbit: the Up/Down arrows move the camera, not the speed;
+        // elsewhere they stay the speed keys. + and - are the speed everywhere.
+        Input in;
+        KeysIn k;
+        in.Update(PadIn{}, k, 0.016f, true);  // first frame: held state only
+        k.faster = true;                       // Up arrow
+        Command c = in.Update(PadIn{}, k, 0.016f, true);
+        assert(!c.faster && c.move[2] == 1.0f);
+        k = KeysIn{};
+        k.slower = true;                       // Down arrow
+        c = in.Update(PadIn{}, k, 0.016f, true);
+        assert(!c.slower && c.move[2] == -1.0f);
+        k = KeysIn{};
+        in.Update(PadIn{}, k, 0.016f, false);
+        k.faster = true;
+        c = in.Update(PadIn{}, k, 0.016f, false);
+        assert(c.faster && c.move[2] == 0.0f);
+        k = KeysIn{};
+        in.Update(PadIn{}, k, 0.016f, true);
+        k.plus = true;
+        c = in.Update(PadIn{}, k, 0.016f, true);
+        assert(c.faster);
+        k = KeysIn{};
+        k.minus = true;
+        c = in.Update(PadIn{}, k, 0.016f, true);
+        assert(c.slower);
+        // F next, Shift+F back; L next, Shift+L back (edges only).
+        k = KeysIn{};
+        in.Update(PadIn{}, k, 0.016f);
+        k.filter = true;
+        c = in.Update(PadIn{}, k, 0.016f);
+        assert(c.filterStep == 1);
+        c = in.Update(PadIn{}, k, 0.016f);
+        assert(c.filterStep == 0);  // held: once
+        k = KeysIn{};
+        in.Update(PadIn{}, k, 0.016f);
+        k.filter = k.shift = true;
+        c = in.Update(PadIn{}, k, 0.016f);
+        assert(c.filterStep == -1);
+        k = KeysIn{};
+        in.Update(PadIn{}, k, 0.016f);
+        k.lens = true;
+        c = in.Update(PadIn{}, k, 0.016f);
+        assert(c.lensStep == 1);
+        // Controller: X and D-pad right/left filter, D-pad up/down lens.
+        k = KeysIn{};
+        PadIn p;
+        in.Update(p, k, 0.016f);
+        p.buttons = 0x4000;
+        assert(in.Update(p, k, 0.016f).filterStep == 1);
+        p.buttons = 0;
+        in.Update(p, k, 0.016f);
+        p.buttons = 0x0004;
+        assert(in.Update(p, k, 0.016f).filterStep == -1);
+        p.buttons = 0;
+        in.Update(p, k, 0.016f);
+        p.buttons = 0x0001;
+        assert(in.Update(p, k, 0.016f).lensStep == 1);
+        p.buttons = 0;
+        in.Update(p, k, 0.016f);
+        p.buttons = 0x0002;
+        assert(in.Update(p, k, 0.016f).lensStep == -1);
+    }
+    {
+        // Sound: game time between two frames; a gap (a menu was open) is silence.
+        Recording s(30.0);
+        s.Reserve(30.0, 60.0, 2);
+        Frame f = At(0.0f);
+        f.gameMs = 1000;
+        s.Add(f, 0.0);
+        f.gameMs = 1100;
+        s.Add(f, 0.1);
+        f.gameMs = 6000;  // 4.9 s of game time in 0.1 s of recording
+        s.Add(f, 0.1);
+        assert(std::fabs(GameMsAt(s.At(s.Start() + 0.05)) - 1050.0) < 1.0);
+        assert(GameMsAt(s.At(s.Start() + 0.15)) < 0.0);
+        assert(GameMsAt(s.At(s.Start() - 1.0)) == 1000.0);  // before the first frame: its time
+        assert(GameMsAt(Recording::Sample{}) < 0.0);
+        Playhead h;
+        assert(SoundRate(h, false) == 1.0);
+        h.speed = 0;
+        assert(SoundRate(h, false) == 0.25);
+        assert(SoundRate(h, true) == 0.0);  // scrubbing
+        h.reverse = true;
+        assert(SoundRate(h, false) == 0.0);
+        h.reverse = false;
+        h.playing = false;
+        assert(SoundRate(h, false) == 0.0);
     }
 
     std::cout << "replay tests passed\n";

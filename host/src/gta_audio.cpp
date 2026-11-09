@@ -115,6 +115,10 @@ std::atomic<bool> g_run{false};
 
 void Record(int slot, const float* mix, int frames);
 void EditorPlay(float* out, int frames);
+// The replay (design 2026-11-09-replay-look-sound): the recorded mix at the replay's playhead.
+std::atomic<bool> g_replayHold{false}; // Record() writes nothing (set first, cleared last)
+std::atomic<bool> g_replayPlay{false}; // the feeder plays g_replayClip instead of Skate's live sound
+void ReplayPlay(float* out, int frames);
 std::atomic<bool> g_editorPlay{false}; // the board stream plays the clip at the editor's playhead
 
 // ---- runtime --------------------------------------------------------------
@@ -162,6 +166,18 @@ bool FeedGta() {
     static float mix[kChunk];
     static std::int16_t pcm[kChunk];
     bool any = false;
+    // During the replay one stream plays the recorded mix and the others are
+    // silent: the speed bed's (non-positional, as Skate's replay does not
+    // follow the camera), else the board's.
+    // The choice is kept for the whole replay, unless that stream goes away.
+    const bool replay = g_replayPlay.load();
+    static int replaySlot = -1;
+    if (!replay) replaySlot = -1;
+    else if (replaySlot < 0 || !g_slots[replaySlot].ring.load(std::memory_order_acquire)) {
+        replaySlot = -1;
+        for (int i : {static_cast<int>(SV_AUDIO_EMITTER_SPEED), static_cast<int>(SV_AUDIO_EMITTER_BOARD)})
+            if (replaySlot < 0 && !g_slots[i].merged.load() && g_slots[i].ring.load(std::memory_order_acquire)) replaySlot = i;
+    }
     for (int i = 0; i < kSlots; ++i) {
         Slot& s = g_slots[i];
         GtaRingBuffer* r = s.ring.load(std::memory_order_acquire);
@@ -172,12 +188,16 @@ bool FeedGta() {
         int frames = std::min(want / 2, kChunk);
         if (frames < 64) continue;
         std::fill(mix, mix + frames, 0.0f);
-        AddSource(i, mix, frames);
-        if (i == SV_AUDIO_EMITTER_BOARD) {
-            for (int j = 1; j < kSlots; ++j)
-                if (g_slots[j].merged.load()) AddSource(j, mix, frames);
+        if (replay) {
+            if (i == replaySlot) ReplayPlay(mix, frames);
+        } else {
+            AddSource(i, mix, frames);
+            if (i == SV_AUDIO_EMITTER_BOARD) {
+                for (int j = 1; j < kSlots; ++j)
+                    if (g_slots[j].merged.load()) AddSource(j, mix, frames);
+            }
+            Record(i, mix, frames); // before the gain: the editor's playback applies it again
         }
-        Record(i, mix, frames); // before the gain: the editor's playback applies it again
         s.limiter.Process(mix, static_cast<std::size_t>(frames), s.pcmGain.load());
         FloatToPcm16(mix, pcm, frames, 1.0f, 1.0f);
         RingPush(r, pcm, static_cast<std::uint32_t>(frames * 2));
@@ -545,7 +565,7 @@ double NowMs() {
 
 // Feeder: a stream's PCM at the game time it plays.
 void Record(int slot, const float* mix, int frames) {
-    if (!g_record || !g_recording.load(std::memory_order_relaxed)) return;
+    if (!g_record || !g_recording.load(std::memory_order_relaxed) || g_replayHold.load()) return;
     const std::uint64_t late = std::min<std::uint64_t>(GetTickCount64() - g_gameAt.load(), 100);
     const std::int64_t now = (static_cast<std::int64_t>(g_gameMs.load()) + static_cast<std::int64_t>(late)) * kRate / 1000;
     std::int64_t& c = g_recCursor[slot];
@@ -698,6 +718,41 @@ void EditorPlay(float* out, int frames) {
                     ph.rate, kRate, 0.15 * kRate, out, frames);
 }
 
+// ---- replay sound ------------------------------------------------------------
+// g_replayClip is written (script thread) and read (feeder) under g_replayClipLock.
+struct ReplayClip {
+    std::uint32_t startMs = 0;
+    std::vector<std::int16_t> pcm;
+};
+ReplayClip g_replayClip;
+std::mutex g_replayClipLock;
+std::mutex g_replayLock;
+Playhead g_replayHead;            // under g_replayLock
+PlayheadFollower g_replayFollower; // feeder only
+std::atomic<bool> g_replayReset{false};
+std::atomic<float> g_replayGain{1.0f};
+
+void ReplayPlay(float* out, int frames) {
+    Playhead ph;
+    {
+        std::lock_guard<std::mutex> lock(g_replayLock);
+        ph = g_replayHead;
+    }
+    if (g_replayReset.exchange(false)) g_replayFollower.pos = -1.0;
+    if (ph.rate <= 0.0 || ph.ms < 0.0) {
+        std::fill(out, out + frames, 0.0f);
+        g_replayFollower.pos = -1.0; // resumes cleanly at the playhead
+        return;
+    }
+    const double ms = ph.ms + ph.rate * (NowMs() - ph.at);
+    // A jump of more than 0.1 s (a scrub, back to the start) is followed at once.
+    std::lock_guard<std::mutex> clipLock(g_replayClipLock);
+    g_replayFollower.Fill(g_replayClip.pcm.data(), static_cast<std::int64_t>(g_replayClip.pcm.size()),
+                          (ms - g_replayClip.startMs) * kRate / 1000.0, ph.rate, kRate, 0.1 * kRate, out, frames);
+    const float gain = g_replayGain.load();
+    for (int k = 0; k < frames; ++k) out[k] *= gain;
+}
+
 void EditorTick() {
     if (g_path.load() != Path::Gta) return;
     const DWORD now = GetTickCount();
@@ -812,6 +867,41 @@ void PollStatus(DWORD now) {
 } // namespace
 
 void SetReplayPaused(bool paused) { g_replayPaused = paused; }
+
+bool ReplaySoundStart(std::uint32_t startMs, std::uint32_t endMs, float gain) {
+    ReplaySoundStop();
+    if (!g_record || !g_started || endMs <= startMs || endMs - startMs > 120000) return false;
+    g_replayHold = true; // nothing new goes into the ring while it is copied and played
+    std::vector<std::int16_t> pcm(static_cast<std::size_t>(endMs - startMs) * kRate / 1000, 0);
+    const bool any = g_record->Read(static_cast<std::int64_t>(startMs) * kRate / 1000, pcm.data(), static_cast<std::int64_t>(pcm.size()));
+    {
+        std::lock_guard<std::mutex> lock(g_replayClipLock);
+        g_replayClip.startMs = startMs;
+        g_replayClip.pcm = std::move(pcm);
+    }
+    {
+        std::lock_guard<std::mutex> lock(g_replayLock);
+        g_replayHead = {-1.0, 0.0, NowMs()};
+    }
+    g_replayGain = std::isfinite(gain) ? std::clamp(gain, 0.0f, 2.0f) : 1.0f;
+    g_replayReset = true;
+    g_replayPlay = true;
+    Logf("gta audio: replay sound: game time %u..%u ms copied (%s)", startMs, endMs,
+         any ? "Skate sound found" : "silence: nothing recorded there");
+    return any;
+}
+
+void ReplaySoundAt(double gameMs, double rate) {
+    if (!g_replayPlay.load()) return;
+    std::lock_guard<std::mutex> lock(g_replayLock);
+    g_replayHead = {gameMs, rate, NowMs()};
+}
+
+void ReplaySoundStop() {
+    if (!g_replayHold.load() && !g_replayPlay.load()) return;
+    g_replayPlay = false;
+    g_replayHold = false;
+}
 
 void SetGainDb(float db) {
     g_set.gainDb = std::clamp(db, -100.0f, 24.0f);

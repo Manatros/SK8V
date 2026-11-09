@@ -114,7 +114,7 @@ void ExitMask::Apply(PadIn& pad) {
     if (rt_) pad.rightTrigger = 0;
 }
 
-Command Input::Update(const PadIn& pad, const KeysIn& in, float dt) {
+Command Input::Update(const PadIn& pad, const KeysIn& in, float dt, bool arrowsMove) {
     // Keys not read this frame (focus lost, a menu has them) keep their last
     // state: a Backspace held into an alt-tab is no release.
     KeysIn keys = in.read ? in : prevKeys_;
@@ -130,15 +130,26 @@ Command Input::Update(const PadIn& pad, const KeysIn& in, float dt) {
     // reaches skating afterwards.
     c.leave = (released & (0x2000 | 0x0020)) || up(&KeysIn::leave);
     c.playPause = (pressed & 0x1000) || down(&KeysIn::play);
-    c.slower = (pressed & 0x0100) || down(&KeysIn::slower) || keys.wheelDown;
-    c.faster = (pressed & 0x0200) || down(&KeysIn::faster) || keys.wheelUp;
+    // Speed: LB/RB, the wheel, + and -; the Up/Down arrows too, except in the
+    // Free and Orbit cameras, where they move the camera up and down.
+    c.slower = (pressed & 0x0100) || (!arrowsMove && down(&KeysIn::slower)) || down(&KeysIn::minus) || keys.wheelDown;
+    c.faster = (pressed & 0x0200) || (!arrowsMove && down(&KeysIn::faster)) || down(&KeysIn::plus) || keys.wheelUp;
+    // Filters: F (Shift+F back), X, D-pad left/right. Lenses: L (Shift+L back), D-pad up/down.
+    if (down(&KeysIn::filter)) c.filterStep = keys.shift ? -1 : 1;
+    if (pressed & 0x4000) c.filterStep = 1;
+    if (pressed & 0x0008) c.filterStep = 1;
+    if (pressed & 0x0004) c.filterStep = -1;
+    if (down(&KeysIn::lens)) c.lensStep = keys.shift ? -1 : 1;
+    if (pressed & 0x0001) c.lensStep = 1;
+    if (pressed & 0x0002) c.lensStep = -1;
     c.nextCamera = (pressed & 0x8000) || down(&KeysIn::camera);
     c.reverse = pad.leftTrigger > 128 || keys.reverse;
     const float side = static_cast<float>(keys.right) - static_cast<float>(keys.left);
     c.scrub = clamp1(StickAxis(pad.leftX) + side);
     c.move[0] = clamp1(StickAxis(pad.leftX) + side);
     c.move[1] = clamp1(StickAxis(pad.leftY) + static_cast<float>(keys.forward) - static_cast<float>(keys.back));
-    c.move[2] = clamp1((pad.rightTrigger - pad.leftTrigger) / 255.0f + static_cast<float>(keys.up) - static_cast<float>(keys.down));
+    const float arrows = arrowsMove ? static_cast<float>(keys.faster) - static_cast<float>(keys.slower) : 0.0f;
+    c.move[2] = clamp1((pad.rightTrigger - pad.leftTrigger) / 255.0f + static_cast<float>(keys.up) - static_cast<float>(keys.down) + arrows);
     // The right stick turns at 120 / 90 degrees a second; the mouse as in the
     // object dropper (8 / 6 degrees per look normal).
     c.lookYaw = -StickAxis(pad.rightX) * 120.0f * dt - keys.mouseX * 8.0f;
@@ -146,6 +157,56 @@ Command Input::Update(const PadIn& pad, const KeysIn& in, float dt) {
     prevPad_ = pad.buttons;
     prevKeys_ = keys;
     return c;
+}
+
+const char* LensName(int lens) {
+    static const char* const names[kLensCount] = {"Auto lens", "Fisheye", "14 mm", "24 mm", "35 mm", "50 mm", "85 mm", "135 mm"};
+    return lens >= 0 && lens < kLensCount ? names[lens] : names[0];
+}
+
+float LensFov(int lens, float autoFov) {
+    // 35 mm film: the frame is 24 mm high; GTA's field of view is vertical.
+    static const float focal[kLensCount] = {0.0f, 0.0f, 14.0f, 24.0f, 35.0f, 50.0f, 85.0f, 135.0f};
+    if (lens == kLensFisheye) return 120.0f;
+    if (lens <= kLensAuto || lens >= kLensCount) return autoFov;
+    return 2.0f * std::atan(12.0f / focal[lens]) * 57.29578f;
+}
+
+const char* FilterName(int filter) {
+    static const char* const names[kFilterCount] = {
+        "Off", "Black and white", "Film 1", "Film 2", "Film 3", "Film 4", "Film 5", "Film 6", "Film 7",
+        "Film 8", "Film 9", "Film 10", "Film 11", "Film 12", "Film 13", "Film 14", "Film 15", "Film 16",
+        "Film 17", "Film 18", "Film 19", "Film 20", "Film 21", "Film 22", "Film 23", "Film 24", "Film 25"};
+    return filter >= 0 && filter < kFilterCount ? names[filter] : names[0];
+}
+
+const char* FilterModifier(int filter) {
+    static const char* const mods[kFilterCount] = {
+        nullptr, "blackNwhite", "NG_filmic01", "NG_filmic02", "NG_filmic03", "NG_filmic04", "NG_filmic05",
+        "NG_filmic06", "NG_filmic07", "NG_filmic08", "NG_filmic09", "NG_filmic10", "NG_filmic11", "NG_filmic12",
+        "NG_filmic13", "NG_filmic14", "NG_filmic15", "NG_filmic16", "NG_filmic17", "NG_filmic18", "NG_filmic19",
+        "NG_filmic20", "NG_filmic21", "NG_filmic22", "NG_filmic23", "NG_filmic24", "NG_filmic25"};
+    return filter > 0 && filter < kFilterCount ? mods[filter] : nullptr;
+}
+
+int Cycle(int index, int step, int count) {
+    if (count <= 0) return 0;
+    return ((index + step) % count + count) % count;
+}
+
+double GameMsAt(const Recording::Sample& s) {
+    if (!s.a) return -1.0;
+    if (s.b == s.a || !s.b) return s.a->gameMs;
+    // Game time ran on while nothing was recorded (a menu, a pause): the sound
+    // there is not this stretch's, so it is silence.
+    const double step = static_cast<double>(s.b->gameMs) - s.a->gameMs;
+    if (step < 0.0 || step > (s.b->time - s.a->time) * 1000.0 + 100.0) return -1.0;
+    return s.a->gameMs + step * s.t;
+}
+
+double SoundRate(const Playhead& head, bool scrubbing) {
+    if (!head.playing || head.reverse || scrubbing) return 0.0;
+    return kSpeeds[head.speed];
 }
 
 }  // namespace replay

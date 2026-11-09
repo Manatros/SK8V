@@ -14,6 +14,9 @@ namespace replay {
 // INI: Replay, ReplaySeconds (10-60), ReplayWorldTimeScale (0-1).
 void Configure(bool enabled, double seconds, float worldTimeScale, void (*log)(const char*));
 bool Enabled();
+// INI: ReplaySound, ReplaySoundGainDb, ReplayFisheye, FilmFilterStrength
+// (design 2026-11-09-replay-look-sound).
+void ConfigureLook(bool sound, float soundGainDb, bool fisheye, float filterStrength);
 
 // Once per new Skate tick while skating and not in a replay: the output,
 // where the ped was placed (3 floats, null: the skater root), the published bone matrices (`count` x 16 floats, GTA world) and the
@@ -39,5 +42,8 @@ void Exit();
 // Status and help line ("1/2x  Follow  12.3 / 30.0 s  ..."), naming the
 // keyboard's keys or the controller's buttons.
 std::string Status(bool keyboard);
+// Where the caller draws the status line (screen 0-1): higher while the
+// fisheye bends the bottom of the picture.
+float StatusY();
 
 }  // namespace replay

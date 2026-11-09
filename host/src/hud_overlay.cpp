@@ -17,6 +17,7 @@
 #include <mutex>
 #include <vector>
 #include "hud_renderer.h"
+#include "fisheye.h"
 #include "xray_renderer.h"
 #include "natives.h"
 #include "skatev_runtime.h"
@@ -127,6 +128,7 @@ void Present(void* swapChainPtr) {
     // Recheck after copying: a live preset change may have cleared the gate
     // while the render thread was preparing this frame.
     xray.visible = xray.visible && g.visible.load();
+    fisheye::Present(sc); // the replay's fisheye lens bends GTA's frame, under everything we draw
     xrayrender::Present(sc, xray); // under the HUD
     frame.visible = frame.visible && g.visible.load();
     hudrender::Present(sc, frame);
@@ -204,6 +206,7 @@ void Start(const std::wstring& iniPath, void* runtime, LogFn log) {
     g.stopping.store(false);
     if (!g.registered) {
         hudrender::SetLog(log);
+        fisheye::SetLog(log);
         xrayrender::SetLog(log);
         hudrender::SetCompositeOverride(static_cast<int>(IniFloat(iniPath, L"HudComposite", -1.0f)));
         presentCallbackRegister(OnPresent);
@@ -353,6 +356,7 @@ void Tick(bool skating) {
 
 void Shutdown(bool processExit) {
     g.stopping.store(true);
+    fisheye::SetEnabled(false);
     // DllMain can run after other threads stopped while holding the mutex.
     // The atomic gates suffice here; never wait for a publication on detach.
     g.visible.store(false);
@@ -363,6 +367,7 @@ void Shutdown(bool processExit) {
     g.enabled = false;
     if (!processExit) {
         hudrender::Release();
+        fisheye::Release();
         xrayrender::Release();
     }
 }

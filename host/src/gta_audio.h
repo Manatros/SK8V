@@ -1,5 +1,6 @@
 #pragma once
 #include <windows.h>
+#include <cstdint>
 #include <string>
 
 // Skate's dry gameplay audio played INSIDE GTA's audio engine (ledger P0-3b).
@@ -48,5 +49,14 @@ void Stop();
 void SetGainDb(float db);
 // The replay (replay.h) holds Skate: its sound pauses as for GTA's menu.
 void SetReplayPaused(bool paused);
+// The replay's own sound (design 2026-11-09-replay-look-sound), script
+// thread: Start copies Skate's recorded mix for GTA game time
+// [startMs, endMs] (false: none recorded there, the replay stays silent) and
+// stops recording; At sets the playhead each frame (`rate` 0: silent); Stop
+// ends it (idempotent).
+// `gain`: a factor on the recorded mix (ReplaySoundGainDb).
+bool ReplaySoundStart(std::uint32_t startMs, std::uint32_t endMs, float gain);
+void ReplaySoundAt(double gameMs, double rate);
+void ReplaySoundStop();
 
 } // namespace gtaaudio
