@@ -702,7 +702,7 @@ bool GameFocused() {
 void DrawKeyboardHints(bool onFoot) {
     std::string& text = g_keyHints[onFoot ? 1 : 0];
     if (text.empty()) {
-        text = g_runtime.KeyboardHints(onFoot) + "Tab\tGun out / away (hold: weapon wheel)\nMouse buttons\tAim / shoot (gun out)\nF10\tSK8V menu (all settings)\nV\tCamera view\n";
+        text = g_runtime.KeyboardHints(onFoot) + "Tab\tTap: replay; hold: gun out and weapon wheel\nMouse buttons\tAim / shoot (gun out)\nF10\tSK8V menu (all settings)\nV\tCamera view\n";
         if (g_runtime.HasActionCam()) text += "R\tCinematic camera\n";
     }
     float y = 0.25f;
@@ -893,7 +893,7 @@ replay::KeysIn ReplayKeys() {
     }
     const auto held = [](int vk) { return (GetAsyncKeyState(vk) & 0x8000) != 0; };
     k.play = held(VK_SPACE);
-    k.leave = held(VK_BACK);
+    k.leave = held(VK_TAB) || held(VK_BACK);  // Tab (the gun key, Skate's Back) opened it
     k.camera = held('C');
     k.reverse = held('R');
     k.left = held('A') || held(VK_LEFT);
@@ -3994,10 +3994,10 @@ std::vector<menu::Page> MenuPages(Session& s) {
         Helped(Flag("Replay (tap Back)", "Replay", D.replay, Bound("Replay", [] {
                    replay::Configure(g_config.replay, g_config.replaySeconds, g_config.replayWorldScale, Log);
                })),
-               "Tap Back (keyboard: Backspace) while skating to watch the last seconds again, as in Skate 3. "
+               "Tap Back (keyboard: Tab) while skating to watch the last seconds again, as in Skate 3. "
                "Controller: A play/pause, left stick scrubs, LB/RB speed, LT backwards, Y camera, B or Back returns. "
                "Keyboard: Space play/pause, A/D scrub, Up/Down or mouse wheel speed, hold R backwards, C camera, "
-               "free camera W A S D, E/Q up/down, mouse look; Backspace returns to play where it stopped."),
+               "free camera W A S D, E/Q up/down, mouse look; Tab or Backspace returns to play where it stopped."),
         Number("Replay length", "ReplaySeconds", D.replaySeconds, 10, 60, 5, Fixed("%.0f s"), Bound("ReplaySeconds", [] {
                    replay::Configure(g_config.replay, g_config.replaySeconds, g_config.replayWorldScale, Log);
                })),

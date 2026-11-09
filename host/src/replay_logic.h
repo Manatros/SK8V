@@ -89,7 +89,7 @@ struct KeysIn {                    // held this frame
     bool faster = false, slower = false;  // Up / Down arrow (held)
     bool wheelUp = false, wheelDown = false;  // a mouse wheel notch this frame (one step each, no edge test)
     bool camera = false;           // C
-    bool leave = false;            // Backspace
+    bool leave = false;            // Tab or Backspace
     bool reverse = false;          // R
     bool left = false, right = false;     // A / D or Left / Right arrow
     bool forward = false, back = false;   // W / S

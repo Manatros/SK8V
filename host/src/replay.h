@@ -30,7 +30,7 @@ bool Enter(int ped);
 bool Active();
 // One script frame (`dt` real seconds): input from the controller and the
 // keyboard and mouse (replay_logic Input), playhead, presentation.
-// False when the player asked to leave (B, Back or Backspace).
+// False when the player asked to leave (B, Back, Tab or Backspace).
 bool Tick(int ped, const PadIn& pad, const KeysIn& keys, float dt);
 // Ends a running replay (idempotent): time scale, camera (the caller makes
 // its own camera render again), controls, Skate's sound. The caller puts the

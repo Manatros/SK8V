@@ -253,7 +253,7 @@ bool Tick(int ped, const PadIn& pad, const KeysIn& keys, float dt) {
     // never all at once: that would stop GTA's own recorder.
     Call<void>(HIDE_HUD_AND_RADAR_THIS_FRAME);
     const Command in = g_input.Update(pad, keys, dt);
-    // B, Back or Backspace leaves on the release, so the press never reaches
+    // B, Back, Tab or Backspace leaves on the release, so the press never reaches
     // skating afterwards (a Back release there toggles the gun or opens the replay).
     if (in.leave) return false;
     if (in.playPause) {
@@ -304,8 +304,8 @@ std::string Status(bool keyboard) {
     static const char* speeds[] = {"1/4x", "1/2x", "1x", "2x"};
     const char* help = !keyboard ? (g_camera == Free ? "A play/pause  LB/RB speed  Y camera  left stick move  RT/LT up/down  right stick look  B back"
                                                      : "A play/pause  left stick scrub  LB/RB speed  hold LT reverse  Y camera  B back")
-                       : g_camera == Free ? "Space play/pause  Up/Down or wheel speed  C camera  W A S D move  E/Q up/down  mouse look  Backspace back"
-                                          : "Space play/pause  A/D scrub  Up/Down or wheel speed  hold R reverse  C camera  Backspace back";
+                       : g_camera == Free ? "Space play/pause  Up/Down or wheel speed  C camera  W A S D move  E/Q up/down  mouse look  Tab back"
+                                          : "Space play/pause  A/D scrub  Up/Down or wheel speed  hold R reverse  C camera  Tab back";
     std::snprintf(text, sizeof(text), "REPLAY  %s%s  %s camera  %.1f / %.1f s   %s", g_head.reverse ? "-" : "", speeds[g_head.speed],
                   kCameraNames[g_camera], g_head.time - g_rec.Start(), g_rec.Length(), help);
     return text;
