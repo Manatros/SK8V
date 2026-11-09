@@ -70,6 +70,7 @@ pub fn skating(controls: &Controls, pad: bool, on_foot: bool) -> Vec<Hint> {
     push(&mut out, c, pad, "LB + Left", &["retry"], "Checkpoint");
     push(&mut out, c, pad, "LB + Right", &["object_dropper"], "Object dropper");
     push(&mut out, c, pad, "", &["camera"], "First / third person");
+    push(&mut out, c, pad, "Tap Back", &["back"], "Replay");
     out
 }
 
@@ -110,6 +111,7 @@ pub fn keyboard(controls: &Controls, on_foot: bool) -> Vec<Hint> {
     push(&mut out, c, false, "", &["retry", "object_dropper"], "Radio: previous, next station");
     push(&mut out, c, false, "", &["marker_place"], "Set a marker");
     push(&mut out, c, false, "", &["marker_return"], "Hold: back to the marker");
+    push(&mut out, c, false, "", &["back"], "Tap: replay");
     out
 }
 
@@ -155,5 +157,8 @@ mod tests {
         assert!(d.iter().any(|(k, w)| k == "Z, C" && w.starts_with("Lower")));
         assert_eq!(one(&c, true, "LB + Down", "marker_place"), "N / LB + Down");
         assert_eq!(skating(&c, false, true)[0].1, "Walk");
+        // The replay is named on both devices.
+        assert!(keyboard(&c, false).iter().any(|(k, w)| k == "Backspace" && *w == "Tap: replay"));
+        assert!(skating(&c, true, false).iter().any(|(k, w)| k == "Backspace / Tap Back" && *w == "Replay"));
     }
 }

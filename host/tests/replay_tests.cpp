@@ -92,6 +92,80 @@ int main() {
     assert(!t.Update(true, false, 6100));
     assert(t.Update(false, false, 6200));   // the next tap opens it again
 
+    // Input: the controller and the keyboard and mouse give the same commands.
+    {
+        Input in;
+        PadIn pad;
+        KeysIn keys;
+        pad.buttons = 0x1000;  // A held on entry: no play/pause
+        Command c = in.Update(pad, keys, 0.016f);
+        assert(!c.playPause && !c.leave);
+        pad.buttons = 0;
+        c = in.Update(pad, keys, 0.016f);
+        pad.buttons = 0x1000;
+        assert(in.Update(pad, keys, 0.016f).playPause);
+        assert(!in.Update(pad, keys, 0.016f).playPause);  // held: one edge
+        pad.buttons = 0;
+        in.Update(pad, keys, 0.016f);
+        keys.play = true;
+        assert(in.Update(pad, keys, 0.016f).playPause);   // Space
+        keys.play = false;
+        keys.camera = true;
+        assert(in.Update(pad, keys, 0.016f).nextCamera);  // C
+        keys.camera = false;
+        keys.faster = true;
+        assert(in.Update(pad, keys, 0.016f).faster);      // Up arrow or wheel
+        keys.faster = false;
+        // Backspace leaves on the release, like B and Back.
+        keys.leave = true;
+        assert(!in.Update(pad, keys, 0.016f).leave);
+        keys.leave = false;
+        assert(in.Update(pad, keys, 0.016f).leave);
+        pad.buttons = 0x2000;
+        assert(!in.Update(pad, keys, 0.016f).leave);
+        pad.buttons = 0;
+        assert(in.Update(pad, keys, 0.016f).leave);
+        // Keys held when the replay opens do nothing until let go.
+        in.Reset();
+        keys.leave = true;
+        in.Update(pad, keys, 0.016f);
+        keys.leave = false;
+        assert(in.Update(pad, keys, 0.016f).leave);  // its release still leaves (as before: B held on entry)
+        // Axes: keys reach full throw, the stick's dead zone holds, both clamp.
+        keys = KeysIn{};
+        keys.right = true;
+        keys.forward = true;
+        keys.up = true;
+        c = in.Update(pad, keys, 0.016f);
+        assert(c.scrub == 1.0f && c.move[0] == 1.0f && c.move[1] == 1.0f && c.move[2] == 1.0f);
+        pad.leftX = 32767;
+        assert(in.Update(pad, keys, 0.016f).move[0] == 1.0f);
+        keys = KeysIn{};
+        pad = PadIn{};
+        pad.leftX = 5000;  // inside the dead zone
+        assert(in.Update(pad, keys, 0.016f).scrub == 0.0f);
+        pad.leftX = -32768;
+        assert(in.Update(pad, keys, 0.016f).scrub == -1.0f);
+        pad = PadIn{};
+        pad.leftTrigger = 200;
+        c = in.Update(pad, keys, 0.016f);
+        assert(c.reverse && c.move[2] < -0.7f);
+        pad = PadIn{};
+        keys.reverse = true;
+        assert(in.Update(pad, keys, 0.016f).reverse);    // hold R
+        // Look: mouse right turns right (yaw down), mouse up looks up, as the stick.
+        keys = KeysIn{};
+        keys.mouseX = 0.5f;
+        keys.mouseY = -0.5f;
+        c = in.Update(pad, keys, 0.016f);
+        assert(c.lookYaw < 0.0f && c.lookPitch > 0.0f);
+        keys = KeysIn{};
+        pad.rightX = 32767;
+        pad.rightY = 32767;
+        c = in.Update(pad, keys, 0.5f);
+        assert(std::fabs(c.lookYaw + 60.0f) < 1e-3f && std::fabs(c.lookPitch - 45.0f) < 1e-3f);
+    }
+
     std::cout << "replay tests passed\n";
     return 0;
 }

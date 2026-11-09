@@ -28,14 +28,16 @@ bool Ready();
 // sound paused. False when not ready.
 bool Enter(int ped);
 bool Active();
-// One script frame (`dt` real seconds): input, playhead, presentation and the
-// on-screen help. False when the player asked to leave (B or Back).
-bool Tick(int ped, const SvPad& pad, float dt);
+// One script frame (`dt` real seconds): input from the controller and the
+// keyboard and mouse (replay_logic Input), playhead, presentation.
+// False when the player asked to leave (B, Back or Backspace).
+bool Tick(int ped, const PadIn& pad, const KeysIn& keys, float dt);
 // Ends a running replay (idempotent): time scale, camera (the caller makes
 // its own camera render again), controls, Skate's sound. The caller puts the
 // ped back where play stopped.
 void Exit();
-// Status for the help line ("1/2x  Follow  12.3 / 30.0 s").
-std::string Status();
+// Status and help line ("1/2x  Follow  12.3 / 30.0 s  ..."), naming the
+// keyboard's keys or the controller's buttons.
+std::string Status(bool keyboard);
 
 }  // namespace replay

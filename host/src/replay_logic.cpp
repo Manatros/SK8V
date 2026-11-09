@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cmath>
 #include <iterator>
+#include <utility>
 
 namespace replay {
 
@@ -97,6 +98,41 @@ bool Tap::Update(bool down, bool otherDown, unsigned nowMs) {
         return !spoiled_ && nowMs - since_ <= tapMs_;
     }
     return false;
+}
+
+float StickAxis(std::int16_t v) {
+    const float x = std::max(-1.0f, v / 32767.0f);
+    return std::fabs(x) < 0.2f ? 0.0f : x;
+}
+
+Command Input::Update(const PadIn& pad, const KeysIn& keys, float dt) {
+    if (std::exchange(fresh_, false)) prevPad_ = pad.buttons, prevKeys_ = keys;
+    const std::uint16_t pressed = pad.buttons & ~prevPad_;
+    const std::uint16_t released = prevPad_ & ~pad.buttons;
+    const auto down = [&](bool KeysIn::*k) { return keys.*k && !(prevKeys_.*k); };
+    const auto up = [&](bool KeysIn::*k) { return !(keys.*k) && prevKeys_.*k; };
+    const auto clamp1 = [](float v) { return std::clamp(v, -1.0f, 1.0f); };
+    Command c;
+    // B or Back (Backspace) leave on the release, so the press never
+    // reaches skating afterwards.
+    c.leave = (released & (0x2000 | 0x0020)) || up(&KeysIn::leave);
+    c.playPause = (pressed & 0x1000) || down(&KeysIn::play);
+    c.slower = (pressed & 0x0100) || down(&KeysIn::slower);
+    c.faster = (pressed & 0x0200) || down(&KeysIn::faster);
+    c.nextCamera = (pressed & 0x8000) || down(&KeysIn::camera);
+    c.reverse = pad.leftTrigger > 128 || keys.reverse;
+    const float side = static_cast<float>(keys.right) - static_cast<float>(keys.left);
+    c.scrub = clamp1(StickAxis(pad.leftX) + side);
+    c.move[0] = clamp1(StickAxis(pad.leftX) + side);
+    c.move[1] = clamp1(StickAxis(pad.leftY) + static_cast<float>(keys.forward) - static_cast<float>(keys.back));
+    c.move[2] = clamp1((pad.rightTrigger - pad.leftTrigger) / 255.0f + static_cast<float>(keys.up) - static_cast<float>(keys.down));
+    // The right stick turns at 120 / 90 degrees a second; the mouse as in the
+    // object dropper (8 / 6 degrees per look normal).
+    c.lookYaw = -StickAxis(pad.rightX) * 120.0f * dt - keys.mouseX * 8.0f;
+    c.lookPitch = StickAxis(pad.rightY) * 90.0f * dt - keys.mouseY * 6.0f;
+    prevPad_ = pad.buttons;
+    prevKeys_ = keys;
+    return c;
 }
 
 }  // namespace replay

@@ -39,8 +39,7 @@ int g_camera = Recorded;
 int g_cam = 0;               // the replay's own camera
 float g_eye[3] = {}, g_look[3] = {};  // follow/free/tripod state
 float g_yaw = 0.0f, g_pitch = 0.0f;
-std::uint16_t g_prevButtons = 0;
-bool g_fresh = false;        // the first replay frame takes the buttons held as they are
+Input g_input;               // both devices; the first frame takes what is held as it is
 unsigned g_applyCalls = 0;
 
 void Log(const char* text) {
@@ -97,13 +96,8 @@ void Present(int ped, const Recording::Sample& s) {
     }
 }
 
-float Axis(std::int16_t v) {
-    const float x = v / 32767.0f;
-    return std::fabs(x) < 0.2f ? 0.0f : x;
-}
-
 // Camera position/rotation/fov for the presented frame.
-void Aim(const Recording::Sample& s, float dt, const SvPad& pad) {
+void Aim(const Recording::Sample& s, float dt, const Command& in) {
     const Frame& a = *s.a;
     const Frame& b = *s.b;
     float root[3], vel[3];
@@ -130,11 +124,11 @@ void Aim(const Recording::Sample& s, float dt, const SvPad& pad) {
         std::memcpy(eye, g_eye, sizeof(eye));
         break;
     case Free: {
-        g_yaw -= Axis(pad.right_x) * 120.0f * dt;
-        g_pitch = std::clamp(g_pitch + Axis(pad.right_y) * 90.0f * dt, -85.0f, 85.0f);
+        g_yaw += in.lookYaw;
+        g_pitch = std::clamp(g_pitch + in.lookPitch, -85.0f, 85.0f);
         const float yaw = g_yaw * 0.01745329f;
-        const float fwd = Axis(pad.left_y) * 8.0f * dt, side = Axis(pad.left_x) * 8.0f * dt;
-        const float up = (pad.right_trigger - pad.left_trigger) / 255.0f * 6.0f * dt;
+        const float fwd = in.move[1] * 8.0f * dt, side = in.move[0] * 8.0f * dt;
+        const float up = in.move[2] * 6.0f * dt;
         g_eye[0] += -std::sin(yaw) * fwd + std::cos(yaw) * side;
         g_eye[1] += std::cos(yaw) * fwd + std::sin(yaw) * side;
         g_eye[2] += up;
@@ -243,7 +237,7 @@ bool Enter(int ped) {
     Call<void>(RENDER_SCRIPT_CAMS, 1, 0, 0, 1, 0, 0);
     Call<void>(SET_TIME_SCALE, g_worldScale);
     gtaaudio::SetReplayPaused(true);
-    g_fresh = true;
+    g_input.Reset();
     posehook::TakeApplyTime();
     g_applyCalls = 0;
     (void)ped;
@@ -253,25 +247,22 @@ bool Enter(int ped) {
     return true;
 }
 
-bool Tick(int ped, const SvPad& pad, float dt) {
+bool Tick(int ped, const PadIn& pad, const KeysIn& keys, float dt) {
     if (!g_active) return false;
     // GTA's controls are taken by the caller as in skating (DisableSkateControls),
     // never all at once: that would stop GTA's own recorder.
     Call<void>(HIDE_HUD_AND_RADAR_THIS_FRAME);
-    if (std::exchange(g_fresh, false)) g_prevButtons = pad.buttons;
-    const std::uint16_t pressed = pad.buttons & ~g_prevButtons;
-    const std::uint16_t released = g_prevButtons & ~pad.buttons;
-    g_prevButtons = pad.buttons;
-    // B or Back leaves on the release, so the press never reaches skating
-    // afterwards (a Back release there toggles the gun or opens the replay).
-    if (released & (0x2000 | 0x0020)) return false;
-    if (pressed & 0x1000) {                          // A
+    const Command in = g_input.Update(pad, keys, dt);
+    // B, Back or Backspace leaves on the release, so the press never reaches
+    // skating afterwards (a Back release there toggles the gun or opens the replay).
+    if (in.leave) return false;
+    if (in.playPause) {
         if (!g_head.playing && g_head.time >= g_rec.End()) g_head.time = g_rec.Start();
         g_head.playing = !g_head.playing;
     }
-    if (pressed & 0x0100) g_head.Slower();  // LB
-    if (pressed & 0x0200) g_head.Faster();  // RB
-    if (pressed & 0x8000) {                 // Y
+    if (in.slower) g_head.Slower();
+    if (in.faster) g_head.Faster();
+    if (in.nextCamera) {
         g_camera = (g_camera + 1) % kCameras;
         if (g_camera == Tripod || g_camera == Free) {
             const Vector3 c = Call<Vector3>(GET_CAM_COORD, g_cam);
@@ -279,14 +270,14 @@ bool Tick(int ped, const SvPad& pad, float dt) {
         }
     }
     if (g_camera != Free) {
-        g_head.reverse = pad.left_trigger > 128;
-        if (!g_head.playing) g_head.time += Axis(pad.left_x) * dt * 2.0;  // scrub
+        g_head.reverse = in.reverse;
+        if (!g_head.playing) g_head.time += in.scrub * dt * 2.0;  // scrub
     }
     g_head.Advance(dt, g_rec.Start(), g_rec.End());
     const Recording::Sample s = g_rec.At(g_head.time);
     if (s.a) {
         Present(ped, s);
-        Aim(s, dt, pad);
+        Aim(s, dt, in);
     }
     DrawTimeline();
     g_applyCalls += posehook::TakeApplyTime().calls;
@@ -308,11 +299,15 @@ void Exit() {
     Log(text);
 }
 
-std::string Status() {
-    char text[160];
+std::string Status(bool keyboard) {
+    char text[256];
     static const char* speeds[] = {"1/4x", "1/2x", "1x", "2x"};
-    std::snprintf(text, sizeof(text), "REPLAY  %s%s  %s camera  %.1f / %.1f s   A play/pause  LB/RB speed  LT reverse  Y camera  B back",
-                  g_head.reverse ? "-" : "", speeds[g_head.speed], kCameraNames[g_camera], g_head.time - g_rec.Start(), g_rec.Length());
+    const char* help = !keyboard ? (g_camera == Free ? "A play/pause  LB/RB speed  Y camera  left stick move  RT/LT up/down  right stick look  B back"
+                                                     : "A play/pause  left stick scrub  LB/RB speed  hold LT reverse  Y camera  B back")
+                       : g_camera == Free ? "Space play/pause  Up/Down or wheel speed  C camera  W A S D move  E/Q up/down  mouse look  Backspace back"
+                                          : "Space play/pause  A/D scrub  Up/Down or wheel speed  hold R reverse  C camera  Backspace back";
+    std::snprintf(text, sizeof(text), "REPLAY  %s%s  %s camera  %.1f / %.1f s   %s", g_head.reverse ? "-" : "", speeds[g_head.speed],
+                  kCameraNames[g_camera], g_head.time - g_rec.Start(), g_rec.Length(), help);
     return text;
 }
 

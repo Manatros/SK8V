@@ -855,6 +855,49 @@ void DrawInputs(const SvPad& pad) {
     Text(line, 0.5f, 0.955f, 0.32f, 255, 255, 255, true);
 }
 
+// ---- replay input (design 2026-11-09-replay-input) --------------------------
+// The replay reads the controller as it is and the keyboard and mouse by its
+// own fixed keys, never through the skating key translation (there Q is Y,
+// the camera, and LCtrl is B, leave).
+bool ReplayOnKeyboard() { return g_keyboard && !g_controller; }
+
+replay::PadIn ReplayPad(const SvPad& pad) {
+    replay::PadIn in;
+    if (!g_controller) return in;  // the pad frame is the keyboard's translation
+    in.buttons = pad.buttons;
+    in.leftTrigger = pad.left_trigger, in.rightTrigger = pad.right_trigger;
+    in.leftX = pad.left_x, in.leftY = pad.left_y, in.rightX = pad.right_x, in.rightY = pad.right_y;
+    return in;
+}
+
+replay::KeysIn ReplayKeys() {
+    replay::KeysIn k;
+    if (!g_keyboard || !GameFocused() || KeysTaken()) return k;
+    const auto held = [](int vk) { return (GetAsyncKeyState(vk) & 0x8000) != 0; };
+    k.play = held(VK_SPACE);
+    k.leave = held(VK_BACK);
+    k.camera = held('C');
+    k.reverse = held('R');
+    k.left = held('A') || held(VK_LEFT);
+    k.right = held('D') || held(VK_RIGHT);
+    k.forward = held('W');
+    k.back = held('S');
+    k.up = held('E');
+    k.down = held('Q');
+    k.faster = held(VK_UP);
+    k.slower = held(VK_DOWN);
+    // The mouse: GTA's look normals and wheel, only while GTA says the mouse
+    // is in use (on a controller the look controls are the right stick).
+    if (Call<BOOL>(gta::IS_USING_KEYBOARD_AND_MOUSE, 2)) {
+        k.mouseX = Call<float>(gta::GET_DISABLED_CONTROL_NORMAL, 0, 1);  // INPUT_LOOK_LR
+        k.mouseY = Call<float>(gta::GET_DISABLED_CONTROL_NORMAL, 0, 2);  // INPUT_LOOK_UD
+        // A wheel notch is one frame long: held for that frame is an edge.
+        k.faster = k.faster || Call<BOOL>(gta::IS_DISABLED_CONTROL_JUST_PRESSED, 0, 241);  // INPUT_CURSOR_SCROLL_UP
+        k.slower = k.slower || Call<BOOL>(gta::IS_DISABLED_CONTROL_JUST_PRESSED, 0, 242);  // INPUT_CURSOR_SCROLL_DOWN
+    }
+    return k;
+}
+
 // Skate and the lifecycle see a neutral pad while the settings menu is open.
 SvPad ReadPad() {
     // The object dropper reads the pad itself; F and Y must not get on or off meanwhile.
@@ -1668,7 +1711,7 @@ void TryEnter(Session& s, const Config& cfg, bool strict) {
             Logf("SkateV Legacy: no controller: XInputGetState slots 0-3 return %lu %lu %lu %lu (this ASI's import %lu %lu %lu %lu)",
                  codes[0][0], codes[0][1], codes[0][2], codes[0][3], codes[1][0], codes[1][1], codes[1][2], codes[1][3]);
         }
-        Notify(s, "SK8V needs a controller (Xbox or PlayStation); none is connected", 5000);
+        Notify(s, "No controller connected and the keyboard is off: connect a controller or set Keyboard=1 in SkateVLegacy.ini", 6000);
         SetState(s, LifeState::Ready, "no controller");
         return;
     }
@@ -3400,10 +3443,10 @@ void LifecycleFrame(Session& s, const Config& cfg, bool f6) {
             Call<void>(gta::ENABLE_CONTROL_ACTION, 0, 199, 1); // INPUT_FRONTEND_PAUSE
             Call<void>(gta::ENABLE_CONTROL_ACTION, 0, 200, 1); // INPUT_FRONTEND_PAUSE_ALTERNATE
             const bool stop = dead || f6 || !cfg.replay || gta::FrontendActive() || Call<BOOL>(gta::NETWORK_IS_SESSION_STARTED) ||
-                              !replay::Tick(s.ped, pad, dt);
+                              !replay::Tick(s.ped, ReplayPad(pad), ReplayKeys(), dt);
             if (stop) s_replayClock.QuadPart = 0;
             if (!stop) {
-                Text(replay::Status().c_str(), 0.5f, 0.94f, 0.32f, 255, 255, 255, true);
+                Text(replay::Status(ReplayOnKeyboard()).c_str(), 0.5f, 0.94f, 0.32f, 255, 255, 255, true);
                 s.watchSince = now, s.watchFrames = 0;
                 break;
             }
@@ -3925,8 +3968,10 @@ std::vector<menu::Page> MenuPages(Session& s) {
         Helped(Flag("Replay (tap Back)", "Replay", D.replay, Bound("Replay", [] {
                    replay::Configure(g_config.replay, g_config.replaySeconds, g_config.replayWorldScale, Log);
                })),
-               "Tap Back while skating to watch the last seconds again, as in Skate 3: A play/pause, left stick scrubs, "
-               "LB/RB speed, LT backwards, Y camera, B or Back returns to play where it stopped."),
+               "Tap Back (keyboard: Backspace) while skating to watch the last seconds again, as in Skate 3. "
+               "Controller: A play/pause, left stick scrubs, LB/RB speed, LT backwards, Y camera, B or Back returns. "
+               "Keyboard: Space play/pause, A/D scrub, Up/Down or mouse wheel speed, hold R backwards, C camera, "
+               "free camera W A S D, E/Q up/down, mouse look; Backspace returns to play where it stopped."),
         Number("Replay length", "ReplaySeconds", D.replaySeconds, 10, 60, 5, Fixed("%.0f s"), Bound("ReplaySeconds", [] {
                    replay::Configure(g_config.replay, g_config.replaySeconds, g_config.replayWorldScale, Log);
                })),
@@ -4427,7 +4472,7 @@ std::vector<menu::Page> MenuPages(Session& s) {
         {"BailTimeLimit", "Lie on the ground at most this long after a bail (0 = no limit)."},
         {"SkitchStandoff", "Distance kept behind a car while skitching."},
         {"SwimDepth", "Water depth where GTA's swimming takes over."},
-        {"PutAwayHoldMs", "How long Y (E) must be held to put the board away."},
+        {"PutAwayHoldMs", "How long Y (keyboard: the get-off key, Q by default) must be held to put the board away."},
         {"BoardTracks", "Marks the board leaves on the ground."},
         {"WheelGlow", "Lights the wheels and the ground under them. Off by default; raise it for brighter glow."},
         {"CollisionView", "Draws what Skate collides with: green floor, cyan bank, red wall, purple underside, grey no grind (curb bevels, stair steps), orange moving objects, yellow grind rails."},

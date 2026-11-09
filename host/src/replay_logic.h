@@ -75,6 +75,46 @@ struct Playhead {
     void Slower() { if (speed > 0) --speed; }
 };
 
+// The replay's controls from either device, read the same way (design
+// 2026-11-09-replay-input). A controller and the keyboard and mouse work
+// side by side; the keyboard keys are fixed and named in the help line.
+struct PadIn {                     // XInput layout
+    std::uint16_t buttons = 0;
+    std::uint8_t leftTrigger = 0, rightTrigger = 0;
+    std::int16_t leftX = 0, leftY = 0, rightX = 0, rightY = 0;
+};
+struct KeysIn {                    // held this frame
+    bool play = false;             // Space
+    bool faster = false, slower = false;  // Up / Down arrow, or the mouse wheel (edges)
+    bool camera = false;           // C
+    bool leave = false;            // Backspace
+    bool reverse = false;          // R
+    bool left = false, right = false;     // A / D or Left / Right arrow
+    bool forward = false, back = false;   // W / S
+    bool up = false, down = false;        // E / Q
+    float mouseX = 0.0f, mouseY = 0.0f;   // GTA's look normals this frame (0: mouse not in use)
+};
+struct Command {
+    bool playPause = false, slower = false, faster = false, nextCamera = false, leave = false;
+    bool reverse = false;          // held
+    float scrub = 0.0f;            // -1..1, while paused
+    float move[3] = {};            // free camera: right, forward, up, each -1..1
+    float lookYaw = 0.0f, lookPitch = 0.0f;  // degrees to add this frame
+};
+// Edges come from the previous frame; the first frame after Reset only
+// takes the held state, so keys and buttons held on entry do nothing.
+class Input {
+public:
+    void Reset() { fresh_ = true; }
+    Command Update(const PadIn& pad, const KeysIn& keys, float dt);
+private:
+    bool fresh_ = true;
+    std::uint16_t prevPad_ = 0;
+    KeysIn prevKeys_{};
+};
+// A stick axis with the 20 % dead zone, -1..1.
+float StickAxis(std::int16_t v);
+
 // Back: a tap (pressed and released within `tapMs`, nothing else pressed
 // meanwhile) opens the replay; held longer it stays the gun button.
 class Tap {
