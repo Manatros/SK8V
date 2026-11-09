@@ -861,18 +861,36 @@ void DrawInputs(const SvPad& pad) {
 // the camera, and LCtrl is B, leave).
 bool ReplayOnKeyboard() { return g_keyboard && !g_controller; }
 
-replay::PadIn ReplayPad(const SvPad& pad) {
+// Buttons held as the replay closed stay out of skating until let go.
+replay::ExitMask g_replayExitMask;
+
+replay::PadIn ToPadIn(const SvPad& pad) {
     replay::PadIn in;
-    if (!g_controller) return in;  // the pad frame is the keyboard's translation
     in.buttons = pad.buttons;
     in.leftTrigger = pad.left_trigger, in.rightTrigger = pad.right_trigger;
     in.leftX = pad.left_x, in.leftY = pad.left_y, in.rightX = pad.right_x, in.rightY = pad.right_y;
     return in;
 }
 
+void ApplyReplayExitMask(SvPad& pad) {
+    if (!g_replayExitMask.Active()) return;
+    replay::PadIn in = ToPadIn(pad);
+    g_replayExitMask.Apply(in);
+    pad.buttons = in.buttons, pad.left_trigger = in.leftTrigger, pad.right_trigger = in.rightTrigger;
+}
+
+replay::PadIn ReplayPad(const SvPad& pad) {
+    if (!g_controller) return {};  // the pad frame is the keyboard's translation
+    return ToPadIn(pad);
+}
+
 replay::KeysIn ReplayKeys() {
     replay::KeysIn k;
-    if (!g_keyboard || !GameFocused() || KeysTaken()) return k;
+    if (!g_keyboard) return k;
+    if (!GameFocused() || KeysTaken()) {
+        k.read = false;  // held keys keep their state: no false release
+        return k;
+    }
     const auto held = [](int vk) { return (GetAsyncKeyState(vk) & 0x8000) != 0; };
     k.play = held(VK_SPACE);
     k.leave = held(VK_BACK);
@@ -891,9 +909,9 @@ replay::KeysIn ReplayKeys() {
     if (Call<BOOL>(gta::IS_USING_KEYBOARD_AND_MOUSE, 2)) {
         k.mouseX = Call<float>(gta::GET_DISABLED_CONTROL_NORMAL, 0, 1);  // INPUT_LOOK_LR
         k.mouseY = Call<float>(gta::GET_DISABLED_CONTROL_NORMAL, 0, 2);  // INPUT_LOOK_UD
-        // A wheel notch is one frame long: held for that frame is an edge.
-        k.faster = k.faster || Call<BOOL>(gta::IS_DISABLED_CONTROL_JUST_PRESSED, 0, 241);  // INPUT_CURSOR_SCROLL_UP
-        k.slower = k.slower || Call<BOOL>(gta::IS_DISABLED_CONTROL_JUST_PRESSED, 0, 242);  // INPUT_CURSOR_SCROLL_DOWN
+        // Each wheel notch is one speed step (two notches on two frames: two steps).
+        k.wheelUp = Call<BOOL>(gta::IS_DISABLED_CONTROL_JUST_PRESSED, 0, 241) != 0;    // INPUT_CURSOR_SCROLL_UP
+        k.wheelDown = Call<BOOL>(gta::IS_DISABLED_CONTROL_JUST_PRESSED, 0, 242) != 0;  // INPUT_CURSOR_SCROLL_DOWN
     }
     return k;
 }
@@ -908,7 +926,11 @@ SvPad ReadPad() {
         return idle;
     }
     // GTA's pause menu and map (setting a marker) take the pad: nothing reaches skating.
-    if (!menu::IsOpen() && !boardshop::IsOpen() && !gta::FrontendActive()) return ReadPadRaw();
+    if (!menu::IsOpen() && !boardshop::IsOpen() && !gta::FrontendActive()) {
+        SvPad pad = ReadPadRaw();
+        ApplyReplayExitMask(pad);
+        return pad;
+    }
     SvPad idle{};
     idle.connected = 1;
     return idle;
@@ -3450,6 +3472,10 @@ void LifecycleFrame(Session& s, const Config& cfg, bool f6) {
                 s.watchSince = now, s.watchFrames = 0;
                 break;
             }
+            // Held keys and buttons (Q is Y, C is RT, Space is A on the keyboard)
+            // stay out of skating until let go: leaving never steps off or grabs.
+            g_replayExitMask.Start(ToPadIn(pad));
+            ApplyReplayExitMask(pad);
             EndReplay(s, cfg, &pad.buttons);
             s.yHeldSince = 0, s.yWasDown = true;  // the Y that cycled cameras is no put-away
             // Play goes on this very frame: the live pose and board replace the replay's.

@@ -166,6 +166,49 @@ int main() {
         assert(std::fabs(c.lookYaw + 60.0f) < 1e-3f && std::fabs(c.lookPitch - 45.0f) < 1e-3f);
     }
 
+    // Review 2026-11-09: wheel notches on consecutive frames are two steps;
+    // keys not read (focus lost) are no release.
+    {
+        Input in;
+        PadIn pad;
+        KeysIn keys;
+        in.Update(pad, keys, 0.016f);
+        keys.wheelUp = true;
+        assert(in.Update(pad, keys, 0.016f).faster);
+        assert(in.Update(pad, keys, 0.016f).faster);
+        keys = KeysIn{};
+        keys.leave = true;
+        in.Update(pad, keys, 0.016f);
+        KeysIn unread;
+        unread.read = false;
+        assert(!in.Update(pad, unread, 0.016f).leave);  // alt-tab with Backspace held
+        assert(!in.Update(pad, keys, 0.016f).leave);    // back, still held
+        keys.leave = false;
+        assert(in.Update(pad, keys, 0.016f).leave);     // the real release
+    }
+    // Held on leaving: masked until let go, then back to normal.
+    {
+        ExitMask m;
+        PadIn held;
+        held.buttons = 0x8000 | 0x1000;  // Y (Q) and A (Space)
+        held.rightTrigger = 255;         // RT (C)
+        m.Start(held);
+        PadIn p = held;
+        m.Apply(p);
+        assert(p.buttons == 0 && p.rightTrigger == 0 && m.Active());
+        p = PadIn{};
+        p.buttons = 0x1000;              // Q and C let go, Space still held
+        m.Apply(p);
+        assert(p.buttons == 0);
+        p = PadIn{};
+        m.Apply(p);
+        assert(!m.Active());
+        p.buttons = 0x8000;
+        p.rightTrigger = 200;
+        m.Apply(p);
+        assert(p.buttons == 0x8000 && p.rightTrigger == 200);  // a new press goes through
+    }
+
     std::cout << "replay tests passed\n";
     return 0;
 }

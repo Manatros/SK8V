@@ -105,7 +105,20 @@ float StickAxis(std::int16_t v) {
     return std::fabs(x) < 0.2f ? 0.0f : x;
 }
 
-Command Input::Update(const PadIn& pad, const KeysIn& keys, float dt) {
+void ExitMask::Apply(PadIn& pad) {
+    buttons_ &= pad.buttons;
+    lt_ = lt_ && pad.leftTrigger > 30;
+    rt_ = rt_ && pad.rightTrigger > 30;
+    pad.buttons &= static_cast<std::uint16_t>(~buttons_);
+    if (lt_) pad.leftTrigger = 0;
+    if (rt_) pad.rightTrigger = 0;
+}
+
+Command Input::Update(const PadIn& pad, const KeysIn& in, float dt) {
+    // Keys not read this frame (focus lost, a menu has them) keep their last
+    // state: a Backspace held into an alt-tab is no release.
+    KeysIn keys = in.read ? in : prevKeys_;
+    if (!in.read) keys.wheelUp = keys.wheelDown = false, keys.mouseX = keys.mouseY = 0.0f;
     if (std::exchange(fresh_, false)) prevPad_ = pad.buttons, prevKeys_ = keys;
     const std::uint16_t pressed = pad.buttons & ~prevPad_;
     const std::uint16_t released = prevPad_ & ~pad.buttons;
@@ -117,8 +130,8 @@ Command Input::Update(const PadIn& pad, const KeysIn& keys, float dt) {
     // reaches skating afterwards.
     c.leave = (released & (0x2000 | 0x0020)) || up(&KeysIn::leave);
     c.playPause = (pressed & 0x1000) || down(&KeysIn::play);
-    c.slower = (pressed & 0x0100) || down(&KeysIn::slower);
-    c.faster = (pressed & 0x0200) || down(&KeysIn::faster);
+    c.slower = (pressed & 0x0100) || down(&KeysIn::slower) || keys.wheelDown;
+    c.faster = (pressed & 0x0200) || down(&KeysIn::faster) || keys.wheelUp;
     c.nextCamera = (pressed & 0x8000) || down(&KeysIn::camera);
     c.reverse = pad.leftTrigger > 128 || keys.reverse;
     const float side = static_cast<float>(keys.right) - static_cast<float>(keys.left);

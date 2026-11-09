@@ -85,7 +85,9 @@ struct PadIn {                     // XInput layout
 };
 struct KeysIn {                    // held this frame
     bool play = false;             // Space
-    bool faster = false, slower = false;  // Up / Down arrow, or the mouse wheel (edges)
+    bool read = true;              // false: no focus or a menu has the keys (held state kept, no edges)
+    bool faster = false, slower = false;  // Up / Down arrow (held)
+    bool wheelUp = false, wheelDown = false;  // a mouse wheel notch this frame (one step each, no edge test)
     bool camera = false;           // C
     bool leave = false;            // Backspace
     bool reverse = false;          // R
@@ -111,6 +113,19 @@ private:
     bool fresh_ = true;
     std::uint16_t prevPad_ = 0;
     KeysIn prevKeys_{};
+};
+// Buttons and triggers held when the replay closes (keyboard: a held Q is Y,
+// C is RT, Space is A) stay out of skating until each is let go, so leaving
+// never steps off the board, grabs or pushes.
+class ExitMask {
+public:
+    void Start(const PadIn& held) { buttons_ = held.buttons, lt_ = held.leftTrigger > 30, rt_ = held.rightTrigger > 30; }
+    // Clears what was let go, then removes what is still masked from `pad`.
+    void Apply(PadIn& pad);
+    bool Active() const { return buttons_ || lt_ || rt_; }
+private:
+    std::uint16_t buttons_ = 0;
+    bool lt_ = false, rt_ = false;
 };
 // A stick axis with the 20 % dead zone, -1..1.
 float StickAxis(std::int16_t v);
