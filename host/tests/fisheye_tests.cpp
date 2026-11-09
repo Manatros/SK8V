@@ -65,7 +65,9 @@ int main() {
     ctx->RSSetViewports(1, &vp);
 
     fisheye::SetEnabled(true);
-    fisheye::SetHud("REPLAY  1x  Follow", 0.5f, true);
+    // The replay timeline as the replay sends it: dark bar, yellow fill to 0.5, a line of text.
+    fisheye::SetHudItems({{0.2f, 0.901f, 0.8f, 0.909f, 0.08f, 0.08f, 0.08f, 0.7f}, {0.2f, 0.901f, 0.5f, 0.909f, 1.0f, 0.78f, 0.16f, 0.9f}},
+                         {{"INSTANT REPLAY  1x  Follow", 0.5f, 0.918f, 0.34f, true}}, true);
     fisheye::Present(sc);
     assert(!fisheye::g_failed.load());
 
@@ -97,7 +99,7 @@ int main() {
     const std::uint32_t mid = px[72 * 256 + 120] & 0xFFFFFFu;
     assert((px[72 * 256 + 108] & 0xFFFFFFu) != mid && at(108, 72) == mid);
     // The HUD is drawn after the bend, unbent: the timeline's filled (yellow)
-    // part at y 0.905 (row 130), x 0.2-0.5, the empty (dark) part right of it.
+    // part at y 0.901-0.909 (row 130), x 0.2-0.5, the empty (dark) part right of it.
     const std::uint32_t bar = static_cast<const std::uint32_t*>(m.pData)[130 * (m.RowPitch / 4) + 60];
     const std::uint32_t r = bar & 0xFF, g = (bar >> 8) & 0xFF, b = (bar >> 16) & 0xFF;  // R8G8B8A8
     assert(r > 150 && g > 100 && b < 120);

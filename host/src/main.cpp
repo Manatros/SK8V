@@ -918,6 +918,22 @@ replay::KeysIn ReplayKeys() {
     k.stepForward = held(VK_OEM_PERIOD);
     k.zoomIn = held(VK_OEM_6);   // ]
     k.zoomOut = held(VK_OEM_4);  // [
+    // The editor (design 2026-11-09-skate-replay-editor); none of these is a GTA key left on in skating.
+    k.tab = held(VK_TAB);
+    k.backspace = held(VK_BACK);
+    k.enter = held(VK_RETURN);
+    k.del = held(VK_DELETE);
+    k.pageUp = held(VK_PRIOR);
+    k.pageDown = held(VK_NEXT);
+    k.keyT = held('T');
+    k.keyN = held('N');
+    k.keyI = held('I');
+    k.keyO = held('O');
+    k.keyU = held('U');
+    k.keyK = held('K');
+    k.keyJ = held('J');
+    k.keyZ = held('Z');
+    k.keyX = held('X');
     k.faster = held(VK_UP);
     k.slower = held(VK_DOWN);
     // The mouse: GTA's look normals and wheel, only while GTA says the mouse
@@ -3483,14 +3499,11 @@ void LifecycleFrame(Session& s, const Config& cfg, bool f6) {
             DisableSkateControls(pad.buttons, false);
             Call<void>(gta::ENABLE_CONTROL_ACTION, 0, 199, 1); // INPUT_FRONTEND_PAUSE
             Call<void>(gta::ENABLE_CONTROL_ACTION, 0, 200, 1); // INPUT_FRONTEND_PAUSE_ALTERNATE
+            replay::SetKeyboard(ReplayOnKeyboard());  // the help names the device in use
             const bool stop = dead || f6 || !cfg.replay || gta::FrontendActive() || Call<BOOL>(gta::NETWORK_IS_SESSION_STARTED) ||
                               !replay::Tick(s.ped, ReplayPad(pad), ReplayKeys(), dt);
             if (stop) s_replayClock.QuadPart = 0;
             if (!stop) {
-                // The status line: GTA's text, or unbent over the fisheye by its overlay; H hides it.
-                const std::string status = replay::Status(ReplayOnKeyboard());
-                replay::DrawHudOverlay(status);
-                if (replay::HudOnGta()) Text(status.c_str(), 0.5f, replay::StatusY(), 0.32f, 255, 255, 255, true);
                 s.watchSince = now, s.watchFrames = 0;
                 break;
             }

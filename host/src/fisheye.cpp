@@ -16,22 +16,20 @@ namespace {
 using d3dstate::SafeRelease;
 
 constexpr float kSourceFov = 120.0f;  // the replay camera's vertical FOV for the fisheye lens
-// The text band (fractions of the frame height), below the timeline at 0.905.
-constexpr float kBandTop = 0.915f, kBandBottom = 0.985f;
-constexpr float kTimelineY = 0.905f;
+// The two text bands (fractions of the frame height).
+constexpr float kBands[2][2] = {{0.0f, 0.2f}, {0.8f, 1.0f}};
 
 std::atomic<bool> g_enabled{false};
 std::atomic<bool> g_failed{false};
 std::atomic<std::uint64_t> g_drawnAt{0};  // GetTickCount64 of the last bent frame
-std::atomic<float> g_progress{0.0f};      // the timeline (every frame, no repaint)
 LogFn g_log = nullptr;
 
 // The HUD as the script thread last set it.
 struct Hud {
-    std::string text;
-    float progress = 0.0f;
+    std::vector<HudRect> rects;
+    std::vector<HudText> texts[2];  // per band
     bool show = false;
-    std::uint64_t serial = 0;
+    std::uint64_t serial[2] = {};   // per band: its texts changed
 };
 std::mutex g_hudLock;
 Hud g_hud;
@@ -54,10 +52,10 @@ struct Gpu {
     ID3D11ShaderResourceView* copySrv = nullptr;
     UINT copyW = 0, copyH = 0;
     DXGI_FORMAT copyFormat = DXGI_FORMAT_UNKNOWN;
-    ID3D11Texture2D* hud = nullptr;
-    ID3D11ShaderResourceView* hudSrv = nullptr;
-    UINT hudW = 0, hudH = 0;
-    std::uint64_t hudSerial = ~0ull;
+    ID3D11Texture2D* hud[2] = {};
+    ID3D11ShaderResourceView* hudSrv[2] = {};
+    UINT hudW = 0, hudH[2] = {};
+    std::uint64_t hudSerial[2] = {~0ull, ~0ull};
 } gpu;
 
 // Full-screen triangle; the pixel shader maps each output pixel to the point
@@ -156,10 +154,13 @@ void ReleaseCopy() {
 }
 
 void ReleaseHud() {
-    SafeRelease(gpu.hudSrv);
-    SafeRelease(gpu.hud);
-    gpu.hudW = gpu.hudH = 0;
-    gpu.hudSerial = ~0ull;
+    for (int i = 0; i < 2; ++i) {
+        SafeRelease(gpu.hudSrv[i]);
+        SafeRelease(gpu.hud[i]);
+        gpu.hudH[i] = 0;
+        gpu.hudSerial[i] = ~0ull;
+    }
+    gpu.hudW = 0;
 }
 
 bool Typed(DXGI_FORMAT f, DXGI_FORMAT& typeless, DXGI_FORMAT& unorm) {
@@ -273,9 +274,9 @@ bool EnsureCopy(UINT w, UINT h, DXGI_FORMAT typeless, DXGI_FORMAT unorm) {
     return true;
 }
 
-// The text band as premultiplied BGRA: white lines with a drop shadow (GDI),
-// each line shrunk to fit the width.
-void PaintHud(const Hud& h, UINT w, UINT bandH, std::vector<std::uint32_t>& out) {
+// One band as premultiplied BGRA: its white texts with a drop shadow (GDI),
+// each at its place; a line wider than 96 % of the screen is shrunk to fit.
+void PaintHud(const std::vector<HudText>& texts, float bandTop, UINT w, UINT bandH, float frameH, std::vector<std::uint32_t>& out) {
     out.assign(static_cast<std::size_t>(w) * bandH, 0u);
     BITMAPINFO bi{};
     bi.bmiHeader.biSize = sizeof(bi.bmiHeader);
@@ -287,37 +288,31 @@ void PaintHud(const Hud& h, UINT w, UINT bandH, std::vector<std::uint32_t>& out)
     void* bits = nullptr;
     HDC dc = CreateCompatibleDC(nullptr);
     HBITMAP bmp = dc ? CreateDIBSection(dc, &bi, DIB_RGB_COLORS, &bits, nullptr, 0) : nullptr;
-    const float frameH = static_cast<float>(bandH) / (kBandBottom - kBandTop);
     if (bmp && bits) {
         HGDIOBJ oldBmp = SelectObject(dc, bmp);
         std::memset(bits, 0, static_cast<std::size_t>(w) * bandH * 4);
         SetBkMode(dc, TRANSPARENT);
         SetTextColor(dc, RGB(255, 255, 255));
-        // Lines split at GTA's "~n~"; each centred in its half of the band, shrunk to 96 % of the width.
-        std::vector<std::wstring> lines;
-        for (std::size_t at = 0;;) {
-            const std::size_t next = h.text.find("~n~", at);
-            const std::string part = h.text.substr(at, next == std::string::npos ? std::string::npos : next - at);
-            lines.emplace_back(part.begin(), part.end());  // ASCII
-            if (next == std::string::npos) break;
-            at = next + 3;
-        }
-        const int rows = static_cast<int>(lines.size());
-        for (int i = 0; i < rows; ++i) {
-            int height = std::max(10, static_cast<int>(frameH * (i == 0 ? 0.024f : 0.019f)));
+        int top = static_cast<int>(bandH), bottom = 0;
+        for (const HudText& t : texts) {
+            const std::wstring line(t.text.begin(), t.text.end());  // ASCII
+            // GTA's text scale 1.0 is about 7 % of the screen height.
+            int height = std::max(10, static_cast<int>(frameH * 0.07f * t.scale));
             HFONT font = nullptr;
+            SIZE size{};
             for (int tries = 0; tries < 6; ++tries) {
-                if (font) DeleteObject(font);
+                if (font) SelectObject(dc, GetStockObject(SYSTEM_FONT)), DeleteObject(font);
                 font = CreateFontW(-height, 0, 0, 0, FW_SEMIBOLD, 0, 0, 0, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
                                    ANTIALIASED_QUALITY, DEFAULT_PITCH, L"Segoe UI");
                 SelectObject(dc, font);
-                SIZE size{};
-                GetTextExtentPoint32W(dc, lines[i].c_str(), static_cast<int>(lines[i].size()), &size);
+                GetTextExtentPoint32W(dc, line.c_str(), static_cast<int>(line.size()), &size);
                 if (size.cx <= static_cast<LONG>(w * 0.96f) || height <= 10) break;
                 height = std::max(10, static_cast<int>(height * w * 0.96f / size.cx));
             }
-            RECT r{0, static_cast<LONG>(bandH * i / rows), static_cast<LONG>(w), static_cast<LONG>(bandH * (i + 1) / rows)};
-            DrawTextW(dc, lines[i].c_str(), static_cast<int>(lines[i].size()), &r, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+            const int y = static_cast<int>((t.y - bandTop) * frameH);
+            const int x = t.centre ? static_cast<int>(t.x * w) - size.cx / 2 : static_cast<int>(t.x * w);
+            TextOutW(dc, x, y, line.c_str(), static_cast<int>(line.size()));
+            top = std::min(top, y), bottom = std::max(bottom, y + static_cast<int>(size.cy) + 3);
             SelectObject(dc, GetStockObject(SYSTEM_FONT));
             DeleteObject(font);
         }
@@ -328,7 +323,7 @@ void PaintHud(const Hud& h, UINT w, UINT bandH, std::vector<std::uint32_t>& out)
             const std::uint32_t p = src[static_cast<std::size_t>(y) * w + x];
             return static_cast<float>(std::max({p & 0xFFu, (p >> 8) & 0xFFu, (p >> 16) & 0xFFu})) / 255.0f;
         };
-        for (int y = 0; y < static_cast<int>(bandH); ++y)
+        for (int y = std::max(0, top); y < std::min(static_cast<int>(bandH), bottom); ++y)
             for (int x = 0; x < static_cast<int>(w); ++x) {
                 const float t = cover(x, y), sh = cover(x - 2, y - 2) * 0.75f;
                 const float a = t + sh * (1.0f - t);
@@ -342,17 +337,14 @@ void PaintHud(const Hud& h, UINT w, UINT bandH, std::vector<std::uint32_t>& out)
     if (dc) DeleteDC(dc);
 }
 
-// Uploads the HUD band when it changed; false: nothing to draw.
-bool UpdateHud(UINT w, UINT h) {
-    Hud hud;
-    {
-        std::lock_guard<std::mutex> lock(g_hudLock);
-        hud = g_hud;
-    }
-    if (!hud.show) return false;
-    const UINT bandH = std::max(8u, static_cast<UINT>(std::lround(kBandBottom * h) - std::lround(kBandTop * h)));
-    if (!gpu.hud || gpu.hudW != w || gpu.hudH != bandH) {
-        ReleaseHud();
+// Uploads a band's texture when its texts changed; false: nothing to draw.
+bool UpdateBand(int band, const Hud& hud, UINT w, UINT h) {
+    if (hud.texts[band].empty()) return false;
+    const UINT top = static_cast<UINT>(std::lround(kBands[band][0] * h));
+    const UINT bandH = std::max(8u, static_cast<UINT>(std::lround(kBands[band][1] * h)) - top);
+    if (!gpu.hud[band] || gpu.hudW != w || gpu.hudH[band] != bandH) {
+        SafeRelease(gpu.hudSrv[band]);
+        SafeRelease(gpu.hud[band]);
         D3D11_TEXTURE2D_DESC d{};
         d.Width = w;
         d.Height = bandH;
@@ -363,22 +355,24 @@ bool UpdateHud(UINT w, UINT h) {
         d.Usage = D3D11_USAGE_DYNAMIC;
         d.BindFlags = D3D11_BIND_SHADER_RESOURCE;
         d.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
-        if (FAILED(gpu.device->CreateTexture2D(&d, nullptr, &gpu.hud)) ||
-            FAILED(gpu.device->CreateShaderResourceView(gpu.hud, nullptr, &gpu.hudSrv))) {
-            ReleaseHud();
+        if (FAILED(gpu.device->CreateTexture2D(&d, nullptr, &gpu.hud[band])) ||
+            FAILED(gpu.device->CreateShaderResourceView(gpu.hud[band], nullptr, &gpu.hudSrv[band]))) {
+            SafeRelease(gpu.hudSrv[band]);
+            SafeRelease(gpu.hud[band]);
             return false;
         }
-        gpu.hudW = w, gpu.hudH = bandH;
+        gpu.hudW = w, gpu.hudH[band] = bandH;
+        gpu.hudSerial[band] = ~0ull;
     }
-    if (gpu.hudSerial != hud.serial) {
+    if (gpu.hudSerial[band] != hud.serial[band]) {
         static std::vector<std::uint32_t> pixels;
-        PaintHud(hud, w, bandH, pixels);
+        PaintHud(hud.texts[band], kBands[band][0], w, bandH, static_cast<float>(h), pixels);
         D3D11_MAPPED_SUBRESOURCE m{};
-        if (FAILED(gpu.ctx->Map(gpu.hud, 0, D3D11_MAP_WRITE_DISCARD, 0, &m))) return false;
+        if (FAILED(gpu.ctx->Map(gpu.hud[band], 0, D3D11_MAP_WRITE_DISCARD, 0, &m))) return false;
         for (UINT y = 0; y < bandH; ++y)
             std::memcpy(static_cast<std::uint8_t*>(m.pData) + static_cast<std::size_t>(y) * m.RowPitch, &pixels[static_cast<std::size_t>(y) * w], w * 4);
-        gpu.ctx->Unmap(gpu.hud, 0);
-        gpu.hudSerial = hud.serial;
+        gpu.ctx->Unmap(gpu.hud[band], 0);
+        gpu.hudSerial[band] = hud.serial[band];
     }
     return true;
 }
@@ -389,12 +383,14 @@ void SetLog(LogFn log) { g_log = log; }
 void SetEnabled(bool on) { g_enabled = on; }
 bool Enabled() { return g_enabled.load(); }
 
-void SetHud(const std::string& text, float progress, bool show) {
-    g_progress = progress;
+void SetHudItems(const std::vector<HudRect>& rects, const std::vector<HudText>& texts, bool show) {
+    std::vector<HudText> band[2];
+    for (const HudText& t : texts) band[t.y < 0.5f ? 0 : 1].push_back(t);
     std::lock_guard<std::mutex> lock(g_hudLock);
-    if (g_hud.text == text && g_hud.show == show) return;  // the text is painted again only when it changes
-    g_hud.text = text, g_hud.show = show;
-    ++g_hud.serial;
+    g_hud.rects = rects;
+    g_hud.show = show;
+    for (int i = 0; i < 2; ++i)
+        if (!(g_hud.texts[i] == band[i])) g_hud.texts[i] = std::move(band[i]), ++g_hud.serial[i];  // painted again only on change
 }
 
 bool Drawing() {
@@ -475,9 +471,13 @@ void Present(IDXGISwapChain* sc) {
     c->PSSetSamplers(0, 1, &gpu.linear);
     c->Draw(3, 0);
     g_drawnAt = GetTickCount64();
-    // The replay HUD, unbent, over the picture: the timeline as solid
-    // rectangles (as replay.cpp DrawTimeline: 0.2-0.8 wide, 0.8 % high), then the text band.
-    if (UpdateHud(bd.Width, bd.Height)) {
+    // The replay HUD, unbent, over the picture: rectangles, then the two text bands.
+    Hud hud;
+    {
+        std::lock_guard<std::mutex> lock(g_hudLock);
+        hud = g_hud;
+    }
+    if (hud.show) {
         const float H = static_cast<float>(bd.Height);
         auto clipX = [](float x) { return x * 2.0f - 1.0f; };
         auto clipY = [](float y) { return 1.0f - y * 2.0f; };
@@ -485,25 +485,24 @@ void Present(IDXGISwapChain* sc) {
         c->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP);
         c->VSSetShader(gpu.vsRect, nullptr, 0);
         c->PSSetShader(gpu.psColor, nullptr, 0);
-        const float f = std::clamp(g_progress.load(), 0.0f, 1.0f);
-        auto bar = [&](float x0, float x1, float hh, float r, float g, float b, float a) {
-            k.rect[0] = clipX(x0), k.rect[2] = clipX(x1);
-            k.rect[1] = clipY(std::round((kTimelineY - hh / 2) * H) / H), k.rect[3] = clipY(std::round((kTimelineY + hh / 2) * H) / H);
-            k.color[0] = r * a, k.color[1] = g * a, k.color[2] = b * a, k.color[3] = a;
+        for (const HudRect& r : hud.rects) {
+            k.rect[0] = clipX(r.x0), k.rect[2] = clipX(r.x1);
+            k.rect[1] = clipY(std::round(r.y0 * H) / H), k.rect[3] = clipY(std::max(std::round(r.y1 * H), std::round(r.y0 * H) + 1.0f) / H);
+            k.color[0] = r.r * r.a, k.color[1] = r.g * r.a, k.color[2] = r.b * r.a, k.color[3] = r.a;
             if (upload()) c->Draw(4, 0);
-        };
-        bar(0.2f, 0.8f, 0.008f, 0.08f, 0.08f, 0.08f, 0.7f);
-        bar(0.2f, 0.2f + 0.6f * f, 0.008f, 1.0f, 0.78f, 0.16f, 0.9f);
-        bar(0.2f + 0.6f * f - 0.0015f, 0.2f + 0.6f * f + 0.0015f, 0.02f, 1.0f, 1.0f, 1.0f, 1.0f);
-        // The text band on whole pixels, texel for pixel (no blur).
-        const float top = static_cast<float>(std::lround(kBandTop * H));
-        k.rect[0] = -1.0f, k.rect[1] = clipY(top / H);
-        k.rect[2] = 1.0f, k.rect[3] = clipY((top + gpu.hudH) / H);
-        k.texW = static_cast<float>(gpu.hudW), k.texH = static_cast<float>(gpu.hudH);
-        if (upload()) {
-            c->PSSetShader(gpu.psTex, nullptr, 0);
-            c->PSSetShaderResources(0, 1, &gpu.hudSrv);
-            c->Draw(4, 0);
+        }
+        for (int band = 0; band < 2; ++band) {
+            if (!UpdateBand(band, hud, bd.Width, bd.Height)) continue;
+            // On whole pixels, texel for pixel (no blur).
+            const float top = static_cast<float>(std::lround(kBands[band][0] * H));
+            k.rect[0] = -1.0f, k.rect[1] = clipY(top / H);
+            k.rect[2] = 1.0f, k.rect[3] = clipY((top + gpu.hudH[band]) / H);
+            k.texW = static_cast<float>(gpu.hudW), k.texH = static_cast<float>(gpu.hudH[band]);
+            if (upload()) {
+                c->PSSetShader(gpu.psTex, nullptr, 0);
+                c->PSSetShaderResources(0, 1, &gpu.hudSrv[band]);
+                c->Draw(4, 0);
+            }
         }
     }
     ID3D11ShaderResourceView* none = nullptr;

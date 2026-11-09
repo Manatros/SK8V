@@ -101,10 +101,16 @@ struct KeysIn {                    // held this frame
     bool hide = false;                    // H: hide or show the replay HUD
     bool stepBack = false, stepForward = false;  // , and . : one frame (pauses)
     bool zoomIn = false, zoomOut = false; // ] and [ held: zoom
+    // The editor (design 2026-11-09-skate-replay-editor); `leave` above is Tab or Backspace.
+    bool tab = false, backspace = false, enter = false, del = false;
+    bool pageUp = false, pageDown = false;
+    bool keyT = false, keyN = false, keyI = false, keyO = false, keyU = false;
+    bool keyK = false, keyJ = false, keyZ = false, keyX = false;
     float mouseX = 0.0f, mouseY = 0.0f;   // GTA's look normals this frame (0: mouse not in use)
 };
 struct Command {
     bool playPause = false, slower = false, faster = false, nextCamera = false, leave = false;
+    bool openEditor = false;           // L3 or T: Skate's "Edit timeline"
     int filterStep = 0, lensStep = 0;  // -1, 0, +1 this frame
     bool hideHud = false;              // H or the right stick's click
     int frameStep = 0;                 // -1, 0, +1: one frame back or on (pauses)
@@ -116,9 +122,17 @@ struct Command {
 };
 // Edges come from the previous frame; the first frame after Reset only
 // takes the held state, so keys and buttons held on entry do nothing.
+// The editor modes read presses only (each mode gives them its meaning).
+struct Edges {
+    std::uint16_t pad = 0;             // buttons pressed this frame
+    bool lt = false, rt = false;       // a trigger pressed past half this frame
+    KeysIn key;                        // keys pressed this frame (true on the press)
+};
 class Input {
 public:
     void Reset() { fresh_ = true; }
+    // Presses since the last frame (either Update or Edges keeps the history).
+    Edges Poll(const PadIn& pad, const KeysIn& keys);
     // `arrowsMove`: the Free and Orbit cameras, where the Up/Down arrows move
     // the camera up and down instead of changing the speed.
     // `paused`: LB/RB step one frame instead of changing the speed (as in Skate's editor).
@@ -126,6 +140,7 @@ public:
 private:
     bool fresh_ = true;
     std::uint16_t prevPad_ = 0;
+    bool prevLt_ = false, prevRt_ = false;
     KeysIn prevKeys_{};
 };
 // Buttons and triggers held when the replay closes (keyboard: a held Q is Y,

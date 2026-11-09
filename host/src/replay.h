@@ -39,16 +39,9 @@ bool Tick(int ped, const PadIn& pad, const KeysIn& keys, float dt);
 // its own camera render again), controls, Skate's sound. The caller puts the
 // ped back where play stopped.
 void Exit();
-// Status and help line ("1/2x  Follow  12.3 / 30.0 s  ..."), naming the
-// keyboard's keys or the controller's buttons.
-std::string Status(bool keyboard);
-// Where the caller draws the status line (screen 0-1).
-float StatusY();
-// The replay HUD (status line, timeline): the caller draws the status line
-// only when HudOnGta(); under the fisheye the overlay draws both unbent
-// (DrawHudOverlay). H / the right stick's click hides it.
-bool HudShown();
-bool HudOnGta();
-void DrawHudOverlay(const std::string& status);
+// Which keys the replay's help names (the device in use), every frame before Tick.
+// The replay draws its own HUD (Instant Replay's status, the editor's timeline,
+// lists and prompts): with GTA, or unbent over the fisheye by its overlay.
+void SetKeyboard(bool keyboard);
 
 }  // namespace replay

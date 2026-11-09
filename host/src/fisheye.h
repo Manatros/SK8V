@@ -12,6 +12,7 @@
 #include <d3d11.h>
 #include <dxgi.h>
 #include <string>
+#include <vector>
 
 namespace fisheye {
 using LogFn = void (*)(const char*);
@@ -22,12 +23,24 @@ bool Enabled();
 // Enabled, not failed, and a bent frame was drawn in the last half second:
 // only then is the replay HUD drawn by this overlay instead of by GTA.
 bool Drawing();
-// Script thread: the replay HUD drawn over the bent picture (only while
-// enabled): the status text (lines split by "~n~", GTA's newline) and the
-// timeline's filled fraction (0-1). `show` false: none (hidden HUD). The
-// text is painted again only when it changes; the timeline is drawn as
-// solid rectangles every frame.
-void SetHud(const std::string& text, float progress, bool show);
+// The replay HUD as items (screen 0-1, as GTA's DRAW_RECT and text): solid
+// rectangles (straight colour, 0-1) and white texts (`y` their top; `scale`
+// GTA's text scale). Texts are drawn in two bands, the top fifth and the
+// bottom fifth of the screen (the timeline strip and the status/keys).
+struct HudRect {
+    float x0, y0, x1, y1;
+    float r, g, b, a;
+};
+struct HudText {
+    std::string text;
+    float x, y, scale;
+    bool centre;
+    bool operator==(const HudText& o) const { return text == o.text && x == o.x && y == o.y && scale == o.scale && centre == o.centre; }
+};
+// Script thread, every replay frame: drawn over the bent picture while the
+// pass runs (`show` false: none). Each band's text is painted again only when
+// its texts change; rectangles are drawn every frame.
+void SetHudItems(const std::vector<HudRect>& rects, const std::vector<HudText>& texts, bool show);
 // Render thread: bends the backbuffer and draws the HUD when enabled. After a
 // lasting GPU failure it logs once and stays off (the plain wide view remains).
 void Present(IDXGISwapChain* swapChain);

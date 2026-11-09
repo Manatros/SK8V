@@ -139,6 +139,7 @@ Command Input::Update(const PadIn& pad, const KeysIn& in, float dt, bool arrowsM
     if ((paused && (pressed & 0x0200)) || down(&KeysIn::stepForward)) c.frameStep = 1;
     c.hideHud = (pressed & 0x0080) || down(&KeysIn::hide);
     c.zoom = static_cast<float>(keys.zoomIn) - static_cast<float>(keys.zoomOut);
+    c.openEditor = (pressed & 0x0040) || down(&KeysIn::keyT);
     // Filters: F (Shift+F back), X, D-pad left/right. Lenses: L (Shift+L back), D-pad up/down.
     if (down(&KeysIn::filter)) c.filterStep = keys.shift ? -1 : 1;
     if (pressed & 0x4000) c.filterStep = 1;
@@ -161,7 +162,33 @@ Command Input::Update(const PadIn& pad, const KeysIn& in, float dt, bool arrowsM
     c.lookPitch = StickAxis(pad.rightY) * 90.0f * dt - keys.mouseY * 6.0f;
     prevPad_ = pad.buttons;
     prevKeys_ = keys;
+    prevLt_ = pad.leftTrigger > 128, prevRt_ = pad.rightTrigger > 128;
     return c;
+}
+
+Edges Input::Poll(const PadIn& pad, const KeysIn& in) {
+    KeysIn keys = in.read ? in : prevKeys_;
+    if (!in.read) keys.wheelUp = keys.wheelDown = false, keys.mouseX = keys.mouseY = 0.0f;
+    const bool lt = pad.leftTrigger > 128, rt = pad.rightTrigger > 128;
+    if (std::exchange(fresh_, false)) prevPad_ = pad.buttons, prevKeys_ = keys, prevLt_ = lt, prevRt_ = rt;
+    Edges e;
+    e.pad = pad.buttons & ~prevPad_;
+    e.lt = lt && !prevLt_, e.rt = rt && !prevRt_;
+    const auto edge = [&](bool KeysIn::*k) { e.key.*k = keys.*k && !(prevKeys_.*k); };
+    for (bool KeysIn::*k : {&KeysIn::play, &KeysIn::faster, &KeysIn::slower, &KeysIn::camera, &KeysIn::leave, &KeysIn::reverse,
+                            &KeysIn::left, &KeysIn::right, &KeysIn::forward, &KeysIn::back, &KeysIn::up, &KeysIn::down,
+                            &KeysIn::plus, &KeysIn::minus, &KeysIn::filter, &KeysIn::lens, &KeysIn::hide, &KeysIn::stepBack,
+                            &KeysIn::stepForward, &KeysIn::zoomIn, &KeysIn::zoomOut, &KeysIn::tab, &KeysIn::backspace,
+                            &KeysIn::enter, &KeysIn::del, &KeysIn::pageUp, &KeysIn::pageDown, &KeysIn::keyT, &KeysIn::keyN,
+                            &KeysIn::keyI, &KeysIn::keyO, &KeysIn::keyU, &KeysIn::keyK, &KeysIn::keyJ, &KeysIn::keyZ,
+                            &KeysIn::keyX})
+        edge(k);
+    e.key.shift = keys.shift;
+    e.key.wheelUp = keys.wheelUp, e.key.wheelDown = keys.wheelDown;
+    prevPad_ = pad.buttons;
+    prevKeys_ = keys;
+    prevLt_ = lt, prevRt_ = rt;
+    return e;
 }
 
 const char* LensName(int lens) {

@@ -19,6 +19,7 @@ add_library(SkateVLegacy SHARED
   src/collectibles.cpp
   src/collectibles_logic.cpp
   src/replay_logic.cpp
+  src/replay_edit.cpp
   src/replay.cpp
   src/lifecycle.cpp
   src/runtime_bridge.cpp
