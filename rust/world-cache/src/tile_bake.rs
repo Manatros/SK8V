@@ -1370,6 +1370,7 @@ fn bake(
             let gta_area = world::build_area_tagged(at, gta_park.into_iter());
             let added = world::park_edge_lines(&mut area, &gta_area.rails);
             validation.park_edge_lines += added;
+            validation.ramp_rim_lines += world::ramp_rim_lines(&mut area, &|p| SkateVRuntime::parks::near_park(p.truncate(), 8.0), &SkateVRuntime::parks::at_park_floor);
         }
         if !with_boxes.is_empty() {
             let boxed_area = world::build_area_tagged(at, with_boxes.into_iter());
@@ -1691,6 +1692,8 @@ struct Validation {
     step_examples: Vec<Vec3>,
     /// Park edge lines taken from GTA's own park collision (world::park_edge_lines).
     park_edge_lines: usize,
+    /// Ramp side rims added in parks (world::ramp_rim_lines).
+    ramp_rim_lines: usize,
     /// Replaced railing boxes' top lines put on the visible bars (world::bar_top_lines).
     bar_top_lines: usize,
 }
@@ -1737,6 +1740,7 @@ impl Validation {
         self.treads += other.treads;
         self.risers += other.risers;
         self.park_edge_lines += other.park_edge_lines;
+        self.ramp_rim_lines += other.ramp_rim_lines;
         self.bar_top_lines += other.bar_top_lines;
         for p in other.track_examples {
             example(&mut self.track_examples, p);
@@ -1847,8 +1851,9 @@ impl Validation {
             self.handrail_examples,
             self.step_examples
         ) + &format!("Park edge lines from GTA's own park collision (visible folds of 30 deg or more): {}
+Ramp side rim lines in parks: {}
 Railing top lines from replaced boxes, on the visible bars: {}
-", self.park_edge_lines, self.bar_top_lines)
+", self.park_edge_lines, self.ramp_rim_lines, self.bar_top_lines)
     }
 }
 

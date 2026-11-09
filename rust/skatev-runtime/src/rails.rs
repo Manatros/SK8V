@@ -145,6 +145,24 @@ pub fn find_metres_reusing(tris: &[[Vec3; 3]], dirty: &crate::reuse::Dirty, cach
     )
 }
 
+/// Which edges the finder looks at.
+#[derive(Clone, Copy)]
+struct Limits { upward_z: f32, max_slope: f32, min_slope: f32, open_needs_support: bool }
+const LIPS: Limits = Limits { upward_z: UPWARD_Z, max_slope: MAX_SLOPE, min_slope: 0.0, open_needs_support: true };
+/// A ramp's side rim (design 2026-11-09-see-through; Manatros 2026-11-09, 1109-1/2:
+/// "the edge is missing at the rim"): edges of faces too steep to walk, running up the
+/// slope, too steep for an ordinary lip (`len` is 3D, so n.z decides how far up it runs:
+/// about 72 deg). Level edges stay with `LIPS`. A side panel flush
+/// with the rim shares no edge with it and stands under no probe: the drop decides.
+const RIMS: Limits = Limits { upward_z: 0.30, max_slope: 1.01, min_slope: 0.08, open_needs_support: false };
+
+/// The side rims of ramps and banks in `tris` (GTA space, metres).
+pub fn find_rims_metres(tris: &[[Vec3; 3]]) -> Vec<Vec<Vec3>> {
+    let inches: Vec<[Vec3; 3]> = tris.iter().map(|t| t.map(|v| v / INCH)).collect();
+    let (rails, _) = find_limited(&inches, &crate::reuse::Dirty::everything(), INCH, &mut RailCache::default(), RIMS);
+    rails.into_iter().map(|r| r.into_iter().map(|v| v * INCH).collect()).collect()
+}
+
 /// Rails over `tris` (map units, z up), each a polyline of two or more points.
 pub fn find(tris: &[[Vec3; 3]]) -> (Vec<Vec<Vec3>>, RailCensus) {
     find_reusing(tris, &crate::reuse::Dirty::everything(), 1.0, &mut RailCache::default())
@@ -152,6 +170,10 @@ pub fn find(tris: &[[Vec3; 3]]) -> (Vec<Vec<Vec3>>, RailCensus) {
 
 /// As `find`; `metres` converts map units to `dirty`'s metres.
 fn find_reusing(tris: &[[Vec3; 3]], dirty: &crate::reuse::Dirty, metres: f32, cache: &mut RailCache) -> (Vec<Vec<Vec3>>, RailCensus) {
+    find_limited(tris, dirty, metres, cache, LIPS)
+}
+
+fn find_limited(tris: &[[Vec3; 3]], dirty: &crate::reuse::Dirty, metres: f32, cache: &mut RailCache, limits: Limits) -> (Vec<Vec<Vec3>>, RailCensus) {
     let grid = Grid::build(tris);
     let mut probe = Probe {
         tris,
@@ -173,7 +195,7 @@ fn find_reusing(tris: &[[Vec3; 3]], dirty: &crate::reuse::Dirty, metres: f32, ca
     let mut edges: Vec<(([i32; 3], [i32; 3]), (Vec3, Vec3, Vec3, Vec3, u32))> = Vec::new();
     for (t, tri) in tris.iter().enumerate() {
         let normal = (tri[1] - tri[0]).cross(tri[2] - tri[0]).normalize_or_zero();
-        if normal.z <= UPWARD_Z {
+        if normal.z <= limits.upward_z {
             continue;
         }
         let centroid = (tri[0] + tri[1] + tri[2]) / 3.;
@@ -243,8 +265,8 @@ fn find_reusing(tris: &[[Vec3; 3]], dirty: &crate::reuse::Dirty, metres: f32, ca
                 Vec::new()
             };
             let across = |e: usize| across(e).chain(welded.iter().copied());
-            if len < 1. || along.z.abs() > MAX_SLOPE * len {
-                reject(focus, metres, a, b, if len < 1. { "edge under 1 inch" } else { "edge too steep" });
+            if len < 1. || along.z.abs() > limits.max_slope * len || along.z.abs() < limits.min_slope * len {
+                reject(focus, metres, a, b, if len < 1. { "edge under 1 inch" } else if along.z.abs() < limits.min_slope * len { "edge too level for a rim" } else { "edge too steep" });
                 break 'probe;
             }
             // SkateV: a lip is a convex edge. Where a face across the edge rises
@@ -284,7 +306,7 @@ fn find_reusing(tris: &[[Vec3; 3]], dirty: &crate::reuse::Dirty, metres: f32, ca
             // a loose panel or wedge laid over the ground) is a lip only with
             // a face right beneath it, as a ledge's or curb's side (Manatros
             // 2026-10-22 21:42: grindable edges need volume geometry).
-            if across(e).all(|(_, t)| t == own_t) && !probe.supported(mid, out) {
+            if limits.open_needs_support && across(e).all(|(_, t)| t == own_t) && !probe.supported(mid, out) {
                 reject(focus, metres, a, b, "open edge without a face beneath (mesh border, hole or seam)");
                 break 'probe;
             }
