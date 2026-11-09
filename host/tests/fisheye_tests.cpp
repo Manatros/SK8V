@@ -25,14 +25,6 @@ int main() {
             assert(sx >= -0.5f && sx <= 1920.5f && sy >= -0.5f && sy <= 1080.5f);
         }
 
-    // The replay's status line under the fisheye (replay::StatusY 0.68): GTA's
-    // y 0.68 in the middle column shows near the bottom (output y 0.90-0.96).
-    fisheye::SourcePoint(960, 1080 * 0.93f, 1920, 1080, 120, sx, sy);
-    assert(std::fabs(sy / 1080 - 0.68f) < 0.02f);
-    // A short line (source x 0.35-0.65 on that row) stays inside the picture.
-    fisheye::SourcePoint(0, 1080 * 0.93f, 1920, 1080, 120, sx, sy);
-    assert(sx / 1920 < 0.35f);
-
     // The pass on WARP with a swap chain on a hidden window.
     WNDCLASSW wc{};
     wc.lpfnWndProc = DefWindowProcW;
@@ -73,6 +65,7 @@ int main() {
     ctx->RSSetViewports(1, &vp);
 
     fisheye::SetEnabled(true);
+    fisheye::SetHud("REPLAY  1x  Follow", 0.5f, true);
     fisheye::Present(sc);
     assert(!fisheye::g_failed.load());
 
@@ -103,6 +96,13 @@ int main() {
     // so x 108 (black before: square 6 at row 4) is now still inside it.
     const std::uint32_t mid = px[72 * 256 + 120] & 0xFFFFFFu;
     assert((px[72 * 256 + 108] & 0xFFFFFFu) != mid && at(108, 72) == mid);
+    // The HUD is drawn after the bend, unbent: the timeline's filled (yellow)
+    // part at y 0.905 (row 130), x 0.2-0.5, the empty (dark) part right of it.
+    const std::uint32_t bar = static_cast<const std::uint32_t*>(m.pData)[130 * (m.RowPitch / 4) + 60];
+    const std::uint32_t r = bar & 0xFF, g = (bar >> 8) & 0xFF, b = (bar >> 16) & 0xFF;  // R8G8B8A8
+    assert(r > 150 && g > 100 && b < 120);
+    const std::uint32_t empty = static_cast<const std::uint32_t*>(m.pData)[130 * (m.RowPitch / 4) + 180];
+    assert((empty & 0xFF) < 120 && ((empty >> 8) & 0xFF) < 120);  // 70 % dark over at most white
     ctx->Unmap(staging, 0);
 
     fisheye::SetEnabled(false);

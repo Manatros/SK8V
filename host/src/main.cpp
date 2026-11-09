@@ -913,6 +913,11 @@ replay::KeysIn ReplayKeys() {
     k.shift = held(VK_SHIFT);
     k.plus = held(VK_OEM_PLUS) || held(VK_ADD);        // the = / + key, numpad +
     k.minus = held(VK_OEM_MINUS) || held(VK_SUBTRACT); // the - key, numpad -
+    k.hide = held('H');
+    k.stepBack = held(VK_OEM_COMMA);
+    k.stepForward = held(VK_OEM_PERIOD);
+    k.zoomIn = held(VK_OEM_6);   // ]
+    k.zoomOut = held(VK_OEM_4);  // [
     k.faster = held(VK_UP);
     k.slower = held(VK_DOWN);
     // The mouse: GTA's look normals and wheel, only while GTA says the mouse
@@ -3482,7 +3487,10 @@ void LifecycleFrame(Session& s, const Config& cfg, bool f6) {
                               !replay::Tick(s.ped, ReplayPad(pad), ReplayKeys(), dt);
             if (stop) s_replayClock.QuadPart = 0;
             if (!stop) {
-                Text(replay::Status(ReplayOnKeyboard()).c_str(), 0.5f, replay::StatusY(), 0.32f, 255, 255, 255, true);
+                // The status line: GTA's text, or unbent over the fisheye by its overlay; H hides it.
+                const std::string status = replay::Status(ReplayOnKeyboard());
+                replay::DrawHudOverlay(status);
+                if (replay::HudOnGta()) Text(status.c_str(), 0.5f, replay::StatusY(), 0.32f, 255, 255, 255, true);
                 s.watchSince = now, s.watchFrames = 0;
                 break;
             }

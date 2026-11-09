@@ -51,6 +51,8 @@ bool g_filterSet = false;    // the replay set a timecycle modifier (and clears 
 float g_height = 0.0f;       // Follow, Tripod, Filmer: metres above their own height
 float g_orbitYaw = 0.0f, g_orbitDist = 4.0f, g_orbitHeight = 1.2f;
 float g_staticRot[3] = {};
+bool g_hudHidden = false;    // H / right stick click
+float g_zoom = 1.0f;         // [ and ]: a factor on the field of view
 
 bool ArrowsMove() { return g_camera == Free || g_camera == Orbit; }
 
@@ -193,6 +195,7 @@ void Aim(const Recording::Sample& s, float dt, const Command& in) {
     }
     if (g_camera == Static) fov = 50.0f;
     fov = LensFov(g_lens, fov);
+    if (g_lens != kLensFisheye) fov *= g_zoom;  // the fisheye keeps its 120-degree source
     Call<void>(SET_CAM_COORD, g_cam, eye[0], eye[1], eye[2]);
     Call<void>(SET_CAM_ROT, g_cam, rot[0], rot[1], rot[2], 2);
     Call<void>(SET_CAM_FOV, g_cam, std::clamp(fov, 10.0f, 120.0f));
@@ -282,6 +285,8 @@ bool Enter(int ped) {
     std::memcpy(g_eye, last.camera, sizeof(g_eye));
     g_pitch = last.camera[3], g_yaw = last.camera[5];
     g_height = 0.0f;
+    g_hudHidden = false;  // every replay starts with its HUD and help
+    g_zoom = 1.0f;
     g_orbitYaw = last.camera[5], g_orbitDist = 4.0f, g_orbitHeight = 1.2f;
     std::memcpy(g_staticRot, last.camera + 3, sizeof(g_staticRot));
     g_cam = Call<int>(CREATE_CAM, "DEFAULT_SCRIPTED_CAMERA", 0);
@@ -316,7 +321,7 @@ bool Tick(int ped, const PadIn& pad, const KeysIn& keys, float dt) {
     Call<void>(HIDE_HUD_AND_RADAR_THIS_FRAME);
     // D-pad down is GTA's character wheel; the replay uses it for the lens.
     Call<void>(DISABLE_CONTROL_ACTION, 0, 19, 1);
-    const Command in = g_input.Update(pad, keys, dt, ArrowsMove());
+    const Command in = g_input.Update(pad, keys, dt, ArrowsMove(), !g_head.playing);
     // B, Back, Tab or Backspace leaves on the release, so the press never reaches
     // skating afterwards (a Back release there toggles the gun or opens the replay).
     if (in.leave) return false;
@@ -341,7 +346,13 @@ bool Tick(int ped, const PadIn& pad, const KeysIn& keys, float dt) {
         }
     }
     if (in.filterStep) g_filter = Cycle(g_filter, in.filterStep, kFilterCount), ApplyFilter();
-    if (in.lensStep) g_lens = Cycle(g_lens, in.lensStep, kLensCount), ApplyLens();
+    if (in.lensStep) g_lens = Cycle(g_lens, in.lensStep, kLensCount), g_zoom = 1.0f, ApplyLens();
+    if (in.hideHud) g_hudHidden = !g_hudHidden;
+    if (in.zoom != 0.0f) g_zoom = std::clamp(g_zoom * std::pow(2.0f, -in.zoom * dt), 0.25f, 1.6f);  // ] halves the FOV in a second
+    if (in.frameStep) {
+        g_head.playing = false;
+        g_head.time = std::clamp(g_head.time + in.frameStep * kTickSeconds, g_rec.Start(), g_rec.End());
+    }
     // Follow, Tripod and Filmer: E/Q and the right stick's up/down set the
     // camera height (LT stays "hold to play backwards").
     if (g_camera == Follow || g_camera == Tripod || g_camera == Filmer) {
@@ -363,7 +374,7 @@ bool Tick(int ped, const PadIn& pad, const KeysIn& keys, float dt) {
         Aim(s, dt, in);
     }
     gtaaudio::ReplaySoundAt(GameMsAt(s), SoundRate(g_head, scrubbing));
-    DrawTimeline();
+    if (HudOnGta()) DrawTimeline();  // else the fisheye overlay draws it
     g_applyCalls += posehook::TakeApplyTime().calls;
     return true;
 }
@@ -381,20 +392,19 @@ void Exit() {
     gtaaudio::SetReplayPaused(false);
     if (g_filterSet) Call<void>(CLEAR_TIMECYCLE_MODIFIER), g_filterSet = false;
     fisheye::SetEnabled(false);
+    fisheye::SetHud(std::string(), 0.0f, false);
     char text[160];
     std::snprintf(text, sizeof(text), "replay: left (pose writes during the replay: %u)", g_applyCalls);
     Log(text);
 }
 
 std::string Status(bool keyboard) {
-    char text[384];
+    char text[512];
     static const char* speeds[] = {"1/4x", "1/2x", "1x", "2x"};
     const bool height = g_camera == Follow || g_camera == Tripod || g_camera == Filmer;
     const char* help;
-    if (fisheye::Enabled()) {
-        // The fisheye shows only the middle of GTA's frame: a short line.
-        help = keyboard ? "F filter  L lens  C camera  Tab back" : "X filter  D-pad lens  Y camera  B back";
-    } else if (!keyboard) {
+    if (!keyboard) {
+        // Paused, LB/RB step one frame; the right stick's click hides this line.
         help = g_camera == Free    ? "A play/pause  LB/RB speed  Y camera  left stick move  RT/LT up/down  right stick look  X filter  D-pad lens  B back"
                : g_camera == Orbit ? "A play/pause  LB/RB speed  Y camera  right stick turn  left stick distance  RT/LT up/down  X filter  D-pad lens  B back"
                : height ? "A play/pause  left stick scrub  LB/RB speed  hold LT reverse  right stick up/down  Y camera  X filter  D-pad lens  B back"
@@ -405,13 +415,29 @@ std::string Status(bool keyboard) {
                : height ? "Space play/pause  A/D scrub  Up/Down, wheel or +/- speed  hold R reverse  E/Q up/down  C camera  F filter  L lens  Tab back"
                         : "Space play/pause  A/D scrub  Up/Down, wheel or +/- speed  hold R reverse  C camera  F filter  L lens  Tab back";
     }
-    std::snprintf(text, sizeof(text), "REPLAY  %s%s  %s  %s  %s  %.1f / %.1f s   %s", g_head.reverse ? "-" : "", speeds[g_head.speed],
-                  kCameraNames[g_camera], LensName(g_lens), FilterName(g_filter), g_head.time - g_rec.Start(), g_rec.Length(), help);
+    // Two lines (GTA's ~n~): the state, then the keys. Paused, LB/RB step frames.
+    std::string keys = help;
+    if (!keyboard && !g_head.playing) {
+        const std::size_t at = keys.find("LB/RB speed");
+        if (at != std::string::npos) keys.replace(at, 11, "LB/RB frame");
+    }
+    const char* more = keyboard ? "  , . frame  [ ] zoom  H hide" : "  R3 hide";
+    std::snprintf(text, sizeof(text), "REPLAY  %s%s  %s  %s  %s  %.1f / %.1f s~n~%s%s", g_head.reverse ? "-" : "", speeds[g_head.speed],
+                  kCameraNames[g_camera], LensName(g_lens), FilterName(g_filter), g_head.time - g_rec.Start(), g_rec.Length(), keys.c_str(), more);
     return text;
 }
 
-// Under the fisheye (full frame, the centre magnified about 2.7x) GTA's y
-// 0.68 near the middle column appears at about 0.93 (fisheye::SourcePoint).
-float StatusY() { return fisheye::Enabled() ? 0.68f : 0.94f; }
+float StatusY() { return 0.925f; }  // two lines
+
+bool HudShown() { return g_active && !g_hudHidden; }
+// GTA draws the HUD unless the fisheye pass is really drawing (it may have
+// failed, or the present callback may be missing): never no HUD at all.
+bool HudOnGta() { return HudShown() && !fisheye::Drawing(); }
+
+void DrawHudOverlay(const std::string& status) {
+    const double len = std::max(g_rec.Length(), 1e-3);
+    const float progress = static_cast<float>((g_head.time - g_rec.Start()) / len);
+    fisheye::SetHud(status, progress, HudShown() && fisheye::Enabled());  // drawn only while the pass runs
+}
 
 }  // namespace replay

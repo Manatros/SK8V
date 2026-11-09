@@ -42,8 +42,13 @@ void Exit();
 // Status and help line ("1/2x  Follow  12.3 / 30.0 s  ..."), naming the
 // keyboard's keys or the controller's buttons.
 std::string Status(bool keyboard);
-// Where the caller draws the status line (screen 0-1): higher while the
-// fisheye bends the bottom of the picture.
+// Where the caller draws the status line (screen 0-1).
 float StatusY();
+// The replay HUD (status line, timeline): the caller draws the status line
+// only when HudOnGta(); under the fisheye the overlay draws both unbent
+// (DrawHudOverlay). H / the right stick's click hides it.
+bool HudShown();
+bool HudOnGta();
+void DrawHudOverlay(const std::string& status);
 
 }  // namespace replay

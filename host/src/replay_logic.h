@@ -98,11 +98,17 @@ struct KeysIn {                    // held this frame
     bool plus = false, minus = false;     // + / - (main row and numpad): speed
     bool filter = false, lens = false;    // F / L
     bool shift = false;                   // Shift held: F and L step back
+    bool hide = false;                    // H: hide or show the replay HUD
+    bool stepBack = false, stepForward = false;  // , and . : one frame (pauses)
+    bool zoomIn = false, zoomOut = false; // ] and [ held: zoom
     float mouseX = 0.0f, mouseY = 0.0f;   // GTA's look normals this frame (0: mouse not in use)
 };
 struct Command {
     bool playPause = false, slower = false, faster = false, nextCamera = false, leave = false;
     int filterStep = 0, lensStep = 0;  // -1, 0, +1 this frame
+    bool hideHud = false;              // H or the right stick's click
+    int frameStep = 0;                 // -1, 0, +1: one frame back or on (pauses)
+    float zoom = 0.0f;                 // -1..1 held: zoom out / in
     bool reverse = false;          // held
     float scrub = 0.0f;            // -1..1, while paused
     float move[3] = {};            // free camera: right, forward, up, each -1..1
@@ -115,7 +121,8 @@ public:
     void Reset() { fresh_ = true; }
     // `arrowsMove`: the Free and Orbit cameras, where the Up/Down arrows move
     // the camera up and down instead of changing the speed.
-    Command Update(const PadIn& pad, const KeysIn& keys, float dt, bool arrowsMove = false);
+    // `paused`: LB/RB step one frame instead of changing the speed (as in Skate's editor).
+    Command Update(const PadIn& pad, const KeysIn& keys, float dt, bool arrowsMove = false, bool paused = false);
 private:
     bool fresh_ = true;
     std::uint16_t prevPad_ = 0;

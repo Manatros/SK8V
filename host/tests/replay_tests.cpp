@@ -291,6 +291,46 @@ int main() {
         assert(in.Update(p, k, 0.016f).lensStep == -1);
     }
     {
+        // Paused, LB/RB step one frame (no speed change); playing they are the speed.
+        Input in;
+        PadIn p;
+        KeysIn k;
+        in.Update(p, k, 0.016f, false, true);
+        p.buttons = 0x0200;  // RB
+        Command c = in.Update(p, k, 0.016f, false, true);
+        assert(c.frameStep == 1 && !c.faster);
+        p.buttons = 0;
+        in.Update(p, k, 0.016f, false, true);
+        p.buttons = 0x0100;  // LB
+        c = in.Update(p, k, 0.016f, false, true);
+        assert(c.frameStep == -1 && !c.slower);
+        p.buttons = 0;
+        in.Update(p, k, 0.016f, false, false);
+        p.buttons = 0x0200;
+        c = in.Update(p, k, 0.016f, false, false);
+        assert(c.faster && c.frameStep == 0);
+        // , and . step on the keyboard; H and the right stick's click hide the HUD; [ ] zoom.
+        p = PadIn{};
+        in.Update(p, k, 0.016f);
+        k.stepForward = true;
+        assert(in.Update(p, k, 0.016f).frameStep == 1);
+        k = KeysIn{};
+        in.Update(p, k, 0.016f);
+        k.hide = true;
+        assert(in.Update(p, k, 0.016f).hideHud);
+        assert(!in.Update(p, k, 0.016f).hideHud);  // held: once
+        k = KeysIn{};
+        in.Update(p, k, 0.016f);
+        p.buttons = 0x0080;
+        assert(in.Update(p, k, 0.016f).hideHud);
+        p = PadIn{};
+        k.zoomIn = true;
+        assert(in.Update(p, k, 0.016f).zoom == 1.0f);
+        k = KeysIn{};
+        k.zoomOut = true;
+        assert(in.Update(p, k, 0.016f).zoom == -1.0f);
+    }
+    {
         // Sound: game time between two frames; a gap (a menu was open) is silence.
         Recording s(30.0);
         s.Reserve(30.0, 60.0, 2);

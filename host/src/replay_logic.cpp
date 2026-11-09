@@ -114,7 +114,7 @@ void ExitMask::Apply(PadIn& pad) {
     if (rt_) pad.rightTrigger = 0;
 }
 
-Command Input::Update(const PadIn& pad, const KeysIn& in, float dt, bool arrowsMove) {
+Command Input::Update(const PadIn& pad, const KeysIn& in, float dt, bool arrowsMove, bool paused) {
     // Keys not read this frame (focus lost, a menu has them) keep their last
     // state: a Backspace held into an alt-tab is no release.
     KeysIn keys = in.read ? in : prevKeys_;
@@ -132,8 +132,13 @@ Command Input::Update(const PadIn& pad, const KeysIn& in, float dt, bool arrowsM
     c.playPause = (pressed & 0x1000) || down(&KeysIn::play);
     // Speed: LB/RB, the wheel, + and -; the Up/Down arrows too, except in the
     // Free and Orbit cameras, where they move the camera up and down.
-    c.slower = (pressed & 0x0100) || (!arrowsMove && down(&KeysIn::slower)) || down(&KeysIn::minus) || keys.wheelDown;
-    c.faster = (pressed & 0x0200) || (!arrowsMove && down(&KeysIn::faster)) || down(&KeysIn::plus) || keys.wheelUp;
+    // Paused, LB/RB step one frame instead (as Skate's editor does).
+    c.slower = (!paused && (pressed & 0x0100)) || (!arrowsMove && down(&KeysIn::slower)) || down(&KeysIn::minus) || keys.wheelDown;
+    c.faster = (!paused && (pressed & 0x0200)) || (!arrowsMove && down(&KeysIn::faster)) || down(&KeysIn::plus) || keys.wheelUp;
+    if ((paused && (pressed & 0x0100)) || down(&KeysIn::stepBack)) c.frameStep = -1;
+    if ((paused && (pressed & 0x0200)) || down(&KeysIn::stepForward)) c.frameStep = 1;
+    c.hideHud = (pressed & 0x0080) || down(&KeysIn::hide);
+    c.zoom = static_cast<float>(keys.zoomIn) - static_cast<float>(keys.zoomOut);
     // Filters: F (Shift+F back), X, D-pad left/right. Lenses: L (Shift+L back), D-pad up/down.
     if (down(&KeysIn::filter)) c.filterStep = keys.shift ? -1 : 1;
     if (pressed & 0x4000) c.filterStep = 1;
