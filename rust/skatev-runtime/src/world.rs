@@ -1406,6 +1406,63 @@ pub fn park_edge_lines(area: &mut Area, gta_rails: &[Vec<[f32; 3]>]) -> usize {
     added
 }
 
+/// A ramp's side rims in a park get a line from where they stand clear of the floor
+/// up to the coping (design 2026-11-09-see-through). `at_floor`: whether a rim's foot
+/// stands at a park's riding level (no roofs). A rim rising less than `RIM_RISE` is a
+/// curb's end. Returns how many.
+pub fn ramp_rim_lines(area: &mut Area, near_park: &dyn Fn(Vec3) -> bool, at_floor: &dyn Fn(Vec3) -> bool) -> usize {
+    const RIM_RISE: f32 = 0.50;
+    const RIM_COVERED: f32 = 0.15;
+    const RIM_STEP: f32 = 0.10;
+    const RIM_RUN: f32 = 0.50;
+    use crate::live::{RAMP_TAG, STEP_TAG, URAMP_TAG, USTEP_TAG, VISBAR_TAG};
+    let g = |p: [f32; 3]| coords::from_skate(Vec3::from_array(p));
+    // Stairs and railings keep their own rules (Goldfish 2026-11-09): no rim on them.
+    let not_ramp = skate_host::bridge::NO_GRIND_TAG | RAMP_TAG | STEP_TAG | URAMP_TAG | USTEP_TAG | VISBAR_TAG;
+    let tris: Vec<[Vec3; 3]> = area.triangles.iter().zip(&area.tags).filter(|(_, tag)| *tag & not_ramp == 0)
+        .map(|(t, _)| t.map(g)).filter(|t| near_park((t[0] + t[1] + t[2]) / 3.0)).collect();
+    if tris.is_empty() { return 0; }
+    let have: Vec<(Vec3, Vec3)> = area.rails.iter().flat_map(|r| r.windows(2).map(|w| (g(w[0]), g(w[1])))).collect();
+    let covered = |p: Vec3| have.iter().any(|&(a, b)| {
+        let d = b - a;
+        let t = ((p - a).dot(d) / d.length_squared().max(1e-9)).clamp(0.0, 1.0);
+        (a + d * t).distance(p) <= RIM_COVERED
+    });
+    let mut added: Vec<Vec<Vec3>> = Vec::new();
+    for rim in crate::rails::find_rims_metres(&tris) {
+        let rise = rim.iter().map(|p| p.z).fold(f32::MIN, f32::max) - rim.iter().map(|p| p.z).fold(f32::MAX, f32::min);
+        let foot = rim.iter().copied().min_by(|a, b| a.z.total_cmp(&b.z)).unwrap_or(Vec3::ZERO);
+        if rise < RIM_RISE || !at_floor(foot) { continue; }
+        // Only what no line has yet, every 10 cm: a lower stretch an ordinary lip
+        // already found must not be doubled (duplicates multiply the catches).
+        let mut run: Vec<Vec3> = Vec::new();
+        let mut runs: Vec<Vec<Vec3>> = Vec::new();
+        for w in rim.windows(2) {
+            let n = ((w[0].distance(w[1]) / RIM_STEP).ceil() as usize).max(1);
+            for k in 0..=n {
+                let p = w[0].lerp(w[1], k as f32 / n as f32);
+                if covered(p) {
+                    if !run.is_empty() { runs.push(std::mem::take(&mut run)); }
+                } else if run.last().is_none_or(|q| q.distance(p) > 1e-4) {
+                    run.push(p);
+                }
+            }
+        }
+        if !run.is_empty() { runs.push(run); }
+        for run in runs {
+            let length: f32 = run.windows(2).map(|w| w[0].distance(w[1])).sum();
+            if length < RIM_RUN { continue; }
+            added.push(run);
+        }
+    }
+    // Straight stretches as one segment, as the other park lines: 10 cm samples would
+    // spend the tile's segment budget.
+    crate::rails::straighten(&mut added, 0.01);
+    let count = added.len();
+    area.rails.extend(added.iter().map(|r| r.iter().map(|&p| coords::to_skate(p).to_array()).collect::<Vec<_>>()));
+    count
+}
+
 /// Visible railings (design 2026-10-25-visible-bar-collision, revision 8.3):
 /// GTA's railing box carried the finder's line on its top; with the box
 /// replaced by the visible bars, that line comes back on the bar's top
@@ -2572,6 +2629,73 @@ mod tests {
             .filter(|r| r.iter().any(|p| p.distance(at) < 3.0)) {
             println!("final {:.2} m from {:?} to {:?}", r.windows(2).map(|w| w[0].distance(w[1])).sum::<f32>(), r[0], r[r.len() - 1]);
         }
+    }
+
+    /// A quarter pipe 3 m wide along y: curved facets from the floor to 1.5 m, a flat deck
+    /// behind it, side panels flush with the rim but sharing no edge with it, and a floor.
+    fn ramp(z0: f32) -> Vec<[[f32; 3]; 3]> {
+        let v = Vec3::new;
+        let s = |t: [Vec3; 3]| t.map(|p| coords::to_skate(p).to_array());
+        let prof = |k: usize| { let x = k as f32 * 0.4; (x, z0 + 1.5 * (x / 2.4) * (x / 2.4)) };
+        let mut out = Vec::new();
+        for k in 0..6 {
+            let ((xa, za), (xb, zb)) = (prof(k), prof(k + 1));
+            out.push(s([v(xa, 0., za), v(xb, 0., zb), v(xb, 3., zb)]));
+            out.push(s([v(xa, 0., za), v(xb, 3., zb), v(xa, 3., za)]));
+            for y in [0.0, 3.0] {
+                // The panel's corners lie 1 mm in, so no edge is shared with the surface.
+                let y = if y == 0.0 { 0.001 } else { 2.999 };
+                out.push(s([v(xa, y, z0), v(xb, y, z0), v(xb, y, zb - 0.001)]));
+                out.push(s([v(xa, y, z0), v(xb, y, zb - 0.001), v(xa, y, za - 0.001)]));
+            }
+        }
+        // Deck and floor around it.
+        out.push(s([v(2.4, 0., z0 + 1.5), v(3.4, 0., z0 + 1.5), v(3.4, 3., z0 + 1.5)]));
+        out.push(s([v(2.4, 0., z0 + 1.5), v(3.4, 3., z0 + 1.5), v(2.4, 3., z0 + 1.5)]));
+        out.push(s([v(-4., -4., z0), v(8., -4., z0), v(8., 8., z0)]));
+        out.push(s([v(-4., -4., z0), v(8., 8., z0), v(-4., 8., z0)]));
+        out
+    }
+
+    fn area_of(triangles: Vec<[[f32; 3]; 3]>) -> Area {
+        Area { noses: Vec::new(), center: Vec3::ZERO, tags: vec![0; triangles.len()], triangles, rails: Vec::new(),
+            census: Default::default(), bevels: Default::default(), note: String::new(), bounds: Vec::new(), live_required: false,
+            changed: None, fixed: 0, options: 0, origins: Default::default() }
+    }
+
+    #[test]
+    fn a_ramp_gets_its_side_rims_at_a_park_floor_only() {
+        let mut area = area_of(ramp(0.0));
+        assert_eq!(ramp_rim_lines(&mut area, &|_| true, &|_| true), 2, "both sides");
+        let g = |p: [f32; 3]| coords::from_skate(Vec3::from_array(p));
+        for rail in &area.rails {
+            let z: Vec<f32> = rail.iter().map(|&p| g(p).z).collect();
+            let top = z.iter().copied().fold(f32::MIN, f32::max);
+            assert!(top > 1.4, "up to the coping: {top}");
+            assert!(rail.len() < 12, "no 10 cm samples left: {}", rail.len());
+            assert!(rail.iter().all(|&p| { let y = g(p).y; y.abs() < 0.01 || (y - 3.0).abs() < 0.01 }), "on the rim");
+        }
+        // A roof or a flat beside a park: nothing.
+        let mut roof = area_of(ramp(0.0));
+        assert_eq!(ramp_rim_lines(&mut roof, &|_| true, &|_| false), 0);
+    }
+
+    #[test]
+    fn a_rim_already_on_a_line_or_too_low_gets_none() {
+        let mut area = area_of(ramp(0.0));
+        ramp_rim_lines(&mut area, &|_| true, &|_| true);
+        let lines = area.rails.clone();
+        assert_eq!(ramp_rim_lines(&mut area, &|_| true, &|_| true), 0, "covered");
+        assert_eq!(area.rails.len(), lines.len());
+        // A wedge rising 30 cm: a curb's end.
+        let v = Vec3::new;
+        let s = |t: [Vec3; 3]| t.map(|p| coords::to_skate(p).to_array());
+        let low = vec![
+            s([v(0., 0., 0.), v(2., 0., 0.3), v(2., 3., 0.3)]), s([v(0., 0., 0.), v(2., 3., 0.3), v(0., 3., 0.)]),
+            s([v(-4., -4., 0.), v(8., -4., 0.), v(8., 8., 0.)]), s([v(-4., -4., 0.), v(8., 8., 0.), v(-4., 8., 0.)]),
+        ];
+        let mut area = area_of(low);
+        assert_eq!(ramp_rim_lines(&mut area, &|_| true, &|_| true), 0);
     }
 
     #[test]

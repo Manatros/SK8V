@@ -15,9 +15,9 @@ inline constexpr float kOutline[4][2] = {
 // The seller's default spot: behind the register, in the glass counter's U
 // (collision of vb_29_0.ybn, material 55, panes floor to 6.41 m, so the player
 // cannot walk in; measured 2026-11-08 with the bake probe). The register's arm
-// runs (-1225.75,-1438.35)..(-1224.55,-1437.55); 0.55 m in from its middle,
-// facing out over it.
-inline constexpr float kSeller[4] = {-1225.45f, -1437.49f, 3.34f, 213.5f};
+// runs (-1225.75,-1438.35)..(-1224.55,-1437.55); 0.85 m in from its middle,
+// facing out over it (0.55 m stood too far forward, Manatros 2026-11-09 03:51).
+inline constexpr float kSeller[4] = {-1225.62f, -1437.24f, 3.34f, 213.5f};
 inline constexpr float kCounter[4][2] = {
     {-1227.80f, -1437.00f}, {-1226.95f, -1438.20f}, {-1225.75f, -1438.35f}, {-1224.55f, -1437.55f}};
 inline constexpr float kBackWall[2][2] = {{-1230.0f, -1439.65f}, {-1222.5f, -1434.37f}};

@@ -234,9 +234,219 @@ pub fn replace(tris: &mut Vec<Tri>, stairs: &[Tri]) -> Replacement {
     let mut out = Replacement::default();
     for park in crate::parks::PARKS {
         let Some((_, visible)) = parks.iter().find(|(id, _)| id == park.id) else { continue };
-        replace_park(tris, stairs, visible, park.centre, park.radius, park.id, &mut out);
+        // See-through boxes first: their bars are taken, the rest of the park
+        // never sees them (design 2026-11-09-see-through).
+        let rest = see_through_boxes(tris, stairs, visible, park.centre, park.radius, park.id, &mut out);
+        replace_park(tris, stairs, rest.as_deref().unwrap_or(visible), park.centre, park.radius, park.id, &mut out);
     }
     out
+}
+
+/// A closed GTA box around see-through visible bars (a fence): at least this long
+/// and tall, at most this thick (m).
+const BOX_LENGTH: f32 = 1.0;
+const BOX_HEIGHT: f32 = 0.5;
+const BOX_THICK: f32 = 0.5;
+/// GTA's fence and railing materials measured at the parks (64 railing, 65 Strawberry's
+/// panels, 69 La Mesa's wood). Never concrete (1), default (0) or glass (55: its visible
+/// panes are not in the model, the box is the only collision).
+const BOX_MATERIALS: &[u8] = &[64, 65, 69];
+const GLASS: u8 = 55;
+/// Taller is a building's part, no fence.
+const BOX_MAX_HEIGHT: f32 = 3.0;
+/// Its broad side, as the visible faces inside it fill it: a solid wall fills
+/// nearly all of it (the model owns that the ordinary way), an empty box none.
+const BOX_FILL: (f32, f32) = (0.03, 0.70);
+/// Share of its length the bars must span (a box with a post at one end stays).
+const BOX_SPAN: f32 = 0.80;
+
+/// GTA's closed box around a see-through fence goes and the visible bars are its
+/// collision (Manatros 2026-11-09 09:10: "the handrail now has its own collision
+/// but additionally a box collision, and the box collision must be removed"). Cutting
+/// the box around the bars left hundreds of shards (Strawberry -287/-1574, 1107-2).
+/// Returns the park's visible faces without the bars taken here.
+fn see_through_boxes(tris: &mut Vec<Tri>, stairs: &[Tri], visible: &[[[f32; 3]; 3]], centre: Vec2, radius: f32, id: &'static str, out: &mut Replacement) -> Option<Vec<[[f32; 3]; 3]>> {
+    let mut park: Vec<usize> = (0..tris.len()).filter(|&i| centroid(&tris[i].v).truncate().distance(centre) <= radius).collect();
+    if park.is_empty() { return None; }
+    // A tile lists faces in its own order: the decision must not depend on it, or one tile
+    // keeps the box and the next removes it (peer review 2026-11-09).
+    let order = |t: &Tri| { let mut v = t.v.map(|p| p.map(f32::to_bits)); v.sort_unstable(); (v, t.material) };
+    park.sort_by_cached_key(|&i| order(&tris[i]));
+    // All measures are relative to the park's centre: at 1,950 m from the map's
+    // origin a tenth of a degree between two normals is 3.4 m (Goldfish 2026-11-09).
+    let origin = centre.extend(0.0);
+    let local = |p: [f32; 3]| v3(p) - origin;
+    // The box's broad sides: upright faces, one plane, joined corner to corner.
+    // A wall's mesh joins a fence on it at corners, so the box is found by its two
+    // sides, not by what its faces connect to (1107-2).
+    struct Side { n: Vec3, at: Vec3, faces: Vec<usize>, u: (f32, f32), z: (f32, f32) }
+    let mut planes: Vec<(Vec3, f32, Vec<usize>)> = Vec::new();
+    let mut plane_keys: HashMap<i32, Vec<usize>> = HashMap::default();
+    // Offsets through the park's centre differ by centimetres for normals 0.03 deg apart
+    // (float noise on a small face), so the key is coarse and the test is each corner's
+    // distance to the group's plane at the group's own first point.
+    let mut anchors: Vec<Vec3> = Vec::new();
+    for &i in &park {
+        let n = normal(&tris[i].v);
+        if n == Vec3::ZERO || n.z.abs() > 0.1 { continue; }
+        let n = n.with_z(0.0).normalize();
+        let d = local(tris[i].v[0]).dot(n);
+        let key = (d / 0.25).round() as i32;
+        let corners = tris[i].v.map(|p| local(p));
+        let found = (key - 1..=key + 1).filter_map(|k| plane_keys.get(&k)).flatten().copied().filter(|&g| {
+            planes[g].0.dot(n) > 0.9995 && corners.iter().all(|q| (*q - anchors[g]).dot(planes[g].0).abs() < 0.01)
+        }).min();
+        match found {
+            Some(g) => planes[g].2.push(i),
+            None => {
+                plane_keys.entry(key).or_default().push(planes.len());
+                planes.push((n, d, vec![i]));
+                anchors.push(corners[0]);
+            }
+        }
+    }
+    let mut sides: Vec<Side> = Vec::new();
+    for (n, _, faces) in &planes {
+        // Joined corner to corner within the plane (two collinear fences stay two).
+        let mut parent: Vec<usize> = (0..faces.len()).collect();
+        fn root(p: &mut [usize], mut i: usize) -> usize { while p[i] != i { p[i] = p[p[i]]; i = p[i]; } i }
+        let mut corner: HashMap<[i32; 3], usize> = HashMap::default();
+        for (k, &i) in faces.iter().enumerate() {
+            for q in tris[i].v {
+                let j = *corner.entry(q.map(|c| (c * 1e3).round() as i32)).or_insert(k);
+                let (a, b) = (root(&mut parent, k), root(&mut parent, j));
+                parent[a] = b;
+            }
+        }
+        let u = Vec3::new(-n.y, n.x, 0.0);
+        // Panels of one straight fence touch end to end, on each side with different
+        // shared corners (Strawberry: 7.93 m of panels opposite 3.96 m): touching along
+        // the side at the same height is one side too.
+        let span = |i: usize| {
+            let q = tris[i].v.map(|p| local(p));
+            let (a, b, c) = (q[0], q[1], q[2]);
+            ((a.dot(u).min(b.dot(u)).min(c.dot(u)), a.dot(u).max(b.dot(u)).max(c.dot(u))), (a.z.min(b.z).min(c.z), a.z.max(b.z).max(c.z)))
+        };
+        let spans: Vec<_> = faces.iter().map(|&i| span(i)).collect();
+        for k in 0..faces.len() {
+            for j in k + 1..faces.len() {
+                let ((ka, ke), (kl, kh)) = spans[k];
+                let ((ja, je), (jl, jh)) = spans[j];
+                let (kz, jz) = (kh - kl, jh - jl);
+                if ka - je <= 0.05 && ja - ke <= 0.05 && kh.min(jh) - kl.max(jl) >= 0.5 * kz.min(jz) && kz > 0.0 && jz > 0.0 {
+                    let (a, b) = (root(&mut parent, k), root(&mut parent, j));
+                    parent[a] = b;
+                }
+            }
+        }
+        let mut parts: std::collections::BTreeMap<usize, Vec<usize>> = std::collections::BTreeMap::new();
+        for (k, &i) in faces.iter().enumerate() { let r = root(&mut parent, k); parts.entry(r).or_default().push(i); }
+        for part in parts.into_values() {
+            let (mut ul, mut zl) = ((f32::MAX, f32::MIN), (f32::MAX, f32::MIN));
+            for &i in &part { for q in tris[i].v.map(|p| local(p)) { ul = (ul.0.min(q.dot(u)), ul.1.max(q.dot(u))); zl = (zl.0.min(q.z), zl.1.max(q.z)); } }
+            if ul.1 - ul.0 < BOX_LENGTH || zl.1 - zl.0 < BOX_HEIGHT || zl.1 - zl.0 > BOX_MAX_HEIGHT { continue; }
+            sides.push(Side { n: *n, at: local(tris[part[0]].v[0]), faces: part, u: ul, z: zl });
+        }
+    }
+    sides.sort_by_cached_key(|s| order(&tris[s.faces.iter().copied().min_by_key(|&i| order(&tris[i])).unwrap_or(0)]));
+    let stair_grid = Grid::new(stairs.iter().map(|t| &t.v), MATCH);
+    let mut taken = vec![false; visible.len()];
+    let mut gone = vec![false; tris.len()];
+    let probe = std::env::var_os("SKATEV_BOX_PROBE").is_some();
+    for (a, s) in sides.iter().enumerate() {
+        if s.faces.iter().any(|&i| gone[i]) { continue; }
+        for h in sides.iter().skip(a + 1) {
+            if s.n.dot(h.n) > -0.9995 || h.faces.iter().any(|&i| gone[i]) { continue; }
+            // h measured on s's axes, corner by corner.
+            let u = Vec3::new(-s.n.y, s.n.x, 0.0);
+            let plane = s.at.dot(s.n);
+            let (mut hu, mut gap) = ((f32::MAX, f32::MIN), (f32::MAX, f32::MIN));
+            for &i in &h.faces { for q in tris[i].v.map(|p| local(p)) {
+                hu = (hu.0.min(q.dot(u)), hu.1.max(q.dot(u)));
+                gap = (gap.0.min(plane - q.dot(s.n)), gap.1.max(plane - q.dot(s.n)));
+            } }
+            // The box lies behind both sides: h stands on s's back, all along it.
+            if gap.0 < 0.01 || gap.1 > BOX_THICK { continue; }
+            // Both sides of one box: the shared stretch is 80 % of the longer one, so a
+            // short panel opposite a long wall is no box (Goldfish 2026-11-09).
+            let over_u = (s.u.1.min(hu.1) - s.u.0.max(hu.0)) / (s.u.1 - s.u.0).max(hu.1 - hu.0);
+            let over_z = (s.z.1.min(h.z.1) - s.z.0.max(h.z.0)) / (s.z.1 - s.z.0).max(h.z.1 - h.z.0);
+            if over_u < 0.8 || over_z < 0.8 { continue; }
+            let ul = (s.u.0.min(hu.0), s.u.1.max(hu.1));
+            let zl = (s.z.0.min(h.z.0), s.z.1.max(h.z.1));
+            let wl = (plane - gap.1, plane);
+            let (len, height) = (ul.1 - ul.0, zl.1 - zl.0);
+            if len < 3.0 * gap.1 { continue; }
+            // All faces of the volume: sides, ends, top.
+            let faces: Vec<usize> = park.iter().copied().filter(|&i| !gone[i] && tris[i].v.map(|p| local(p)).iter().all(|q| {
+                let (cu, cw) = (q.dot(u), q.dot(s.n));
+                cu >= ul.0 - 0.03 && cu <= ul.1 + 0.03 && cw >= wl.0 - 0.03 && cw <= wl.1 + 0.03 && q.z >= zl.0 - 0.03 && q.z <= zl.1 + 0.03
+            })).collect();
+            // Both sides wholly of a fence's material. Glass in the volume keeps the box; a
+            // wall's top flush under the fence is in the volume's margin and simply stays.
+            if !s.faces.iter().chain(&h.faces).all(|&i| BOX_MATERIALS.contains(&tris[i].material)) { continue; }
+            if faces.iter().any(|&i| tris[i].material == GLASS) { continue; }
+            let faces: Vec<usize> = faces.into_iter().filter(|&i| BOX_MATERIALS.contains(&tris[i].material)).collect();
+            if faces.len() < 8 { continue; }
+            // The visible faces inside, and how they fill the broad side (4 cm grid).
+            const CELL: f32 = 0.04;
+            let (nu, nz) = (((len / CELL).ceil() as usize).max(1), ((height / CELL).ceil() as usize).max(1));
+            let mut fill = vec![false; nu * nz];
+            let mut inside: Vec<usize> = Vec::new();
+            let mut solid = false;
+            for (k, t) in visible.iter().enumerate() {
+                if taken[k] { continue; }
+                let lt = t.map(|p| local(p));
+                let c = (lt[0] + lt[1] + lt[2]) / 3.0;
+                let (cu, cw) = (c.dot(u), c.dot(s.n));
+                if cu < ul.0 - 0.05 || cu > ul.1 + 0.05 || cw < wl.0 - 0.05 || cw > wl.1 + 0.05 || c.z < zl.0 - 0.05 || c.z > zl.1 + 0.05 { continue; }
+                // A floor triangle with its centroid here is no bar; a big panel along the
+                // box's side running past it is a solid wall the fill would miss.
+                if !lt.iter().all(|q| q.dot(u) >= ul.0 - 0.2 && q.dot(u) <= ul.1 + 0.2 && q.dot(s.n) >= wl.0 - 0.2 && q.dot(s.n) <= wl.1 + 0.2 && q.z >= zl.0 - 0.2 && q.z <= zl.1 + 0.2) {
+                    if normal(t).dot(s.n).abs() > 0.9 { solid = true; }
+                    continue;
+                }
+                inside.push(k);
+                let q = lt.map(|q| Vec2::new(q.dot(u) - ul.0, q.z - zl.0));
+                let (lo, hi) = (q[0].min(q[1]).min(q[2]), q[0].max(q[1]).max(q[2]));
+                for x in ((lo.x / CELL).floor().max(0.0) as usize)..(((hi.x / CELL).ceil().max(0.0) as usize).min(nu)) {
+                    for y in ((lo.y / CELL).floor().max(0.0) as usize)..(((hi.y / CELL).ceil().max(0.0) as usize).min(nz)) {
+                        let p = Vec2::new((x as f32 + 0.5) * CELL, (y as f32 + 0.5) * CELL);
+                        let e = |a: Vec2, b: Vec2| (b - a).perp_dot(p - a);
+                        let (d0, d1, d2) = (e(q[0], q[1]), e(q[1], q[2]), e(q[2], q[0]));
+                        if (d0 >= 0.0 && d1 >= 0.0 && d2 >= 0.0) || (d0 <= 0.0 && d1 <= 0.0 && d2 <= 0.0) { fill[x + y * nu] = true; }
+                    }
+                }
+            }
+            let filled = fill.iter().filter(|&&b| b).count() as f32 / fill.len() as f32;
+            let span = (0..nu).filter(|&x| (0..nz).any(|y| fill[x + y * nu])).count() as f32 / nu as f32;
+            if solid || !(BOX_FILL.0..=BOX_FILL.1).contains(&filled) || span < BOX_SPAN { continue; }
+            if faces.iter().any(|&i| samples(&tris[i].v).into_iter().any(|p| stair_grid.at(p).iter().any(|&k| distance(p, &stairs[k as usize].v) <= MATCH))) { continue; }
+            if probe {
+                let m = (u * (ul.0 + ul.1) * 0.5 + s.n * (wl.0 + wl.1) * 0.5 + origin).with_z((zl.0 + zl.1) * 0.5);
+                eprintln!("BOX {id} at {:.2} {:.2} {:.2} len {len:.2} thick {:.2} height {height:.2} faces {} material {} visible {} filled {filled:.2} span {span:.2}", m.x, m.y, m.z, gap.1, faces.len(), tris[s.faces[0]].material, inside.len());
+            }
+            let (material, key) = (tris[s.faces[0]].material, svwc::surfaces::key(&tris[s.faces[0]].v));
+            for k in inside {
+                taken[k] = true;
+                out.added.push(Tri { v: visible[k], material });
+                out.surface_from.push(key);
+                out.cut.push(false);
+                out.park.push(id);
+            }
+            for i in faces { gone[i] = true; }
+            break;
+        }
+    }
+    if !gone.iter().any(|&g| g) { return None; }
+    let mut index = 0;
+    tris.retain(|t| {
+        let drop = gone[index];
+        index += 1;
+        if drop { out.removed.push(*t); }
+        !drop
+    });
+    Some(visible.iter().zip(&taken).filter(|(_, t)| !**t).map(|(v, _)| *v).collect())
 }
 
 /// A visible strip narrower than this (m) beside an owned face is collision too
@@ -548,9 +758,10 @@ fn replace_park(tris: &mut Vec<Tri>, stairs: &[Tri], visible: &[[[f32; 3]; 3]], 
         if is_sliver(&u.v) || raised_top(u, chord) { continue; }
         *e = e.max(u.limit - PARTNER_SLACK);
     }
-    // Rescue upward bowl facets only. Admitting small sidewall details
-    // exposes old cut/snap remnants as sloping phantom surfaces (native
-    // witnesses in the design); their boundary ownership needs its own fix.
+    // Rescue upward bowl facets, and the small faces of the same visible surface:
+    // a bowl's rim strips (GTA's small chords there hover 3-20 cm in front of the
+    // visible faces, 1103-4..8, M21) are joined edge to edge to the owned bowl; a
+    // rail or a post is a mesh of its own and stays GTA's (design 2026-11-09-see-through).
     let small_ok = |u: &Used, chord: usize, support: &mut Option<SurfaceSupport>| {
         if u.partner != chord { return true; }
         let gta = tris[u.partner].v.map(v3);
@@ -558,6 +769,38 @@ fn replace_park(tris: &mut Vec<Tri>, stairs: &[Tri], visible: &[[[f32; 3]; 3]], 
         area >= SURFACE || (normal(&tris[u.partner].v).z > 0.5 && normal(&u.v).z > 0.5
             && support.get_or_insert_with(|| SurfaceSupport::new(tris, &park)).qualifies(u.partner, centroid(&u.v)))
     };
+    let mut same_surface: Vec<bool> = candidates.iter().map(|(u, chord)| small_ok(u, *chord, &mut support)).collect();
+    {
+        let quant = |p: [f32; 3]| p.map(|c| (c * 1e3).round() as i32);
+        let edge = |a: [f32; 3], b: [f32; 3]| { let (x, y) = (quant(a), quant(b)); if x <= y { (x, y) } else { (y, x) } };
+        let mut by_edge: std::collections::BTreeMap<([i32; 3], [i32; 3]), Vec<usize>> = std::collections::BTreeMap::new();
+        for (k, (u, _)) in candidates.iter().enumerate() {
+            for e in [edge(u.v[0], u.v[1]), edge(u.v[1], u.v[2]), edge(u.v[2], u.v[0])] { by_edge.entry(e).or_default().push(k); }
+        }
+        // Whole connected surfaces: a rail's tube near a big wall chord has a seed too, but
+        // it is no surface of this size, so its other faces stay GTA's (Goldfish 2026-11-09).
+        let mut seen = vec![false; candidates.len()];
+        for start in 0..candidates.len() {
+            if seen[start] || !same_surface[start] { continue; }
+            seen[start] = true;
+            let (mut members, mut stack, mut area) = (vec![start], vec![start], 0.0f32);
+            while let Some(k) = stack.pop() {
+                let v = candidates[k].0.v;
+                let p = v.map(v3);
+                area += (p[1] - p[0]).cross(p[2] - p[0]).length() / 2.0;
+                for e in [edge(v[0], v[1]), edge(v[1], v[2]), edge(v[2], v[0])] {
+                    for &j in &by_edge[&e] {
+                        if !seen[j] && normal(&candidates[j].0.v).dot(normal(&v)) >= 0.0 {
+                            seen[j] = true;
+                            members.push(j);
+                            stack.push(j);
+                        }
+                    }
+                }
+            }
+            if area >= SAME_SURFACE_AREA { for k in members { same_surface[k] = true; } }
+        }
+    }
     let deviation = |u: &Used, chord: usize| deviates[&chord].max(deviates.get(&u.partner).copied().unwrap_or(0.0));
     // A chord just under CURVE beside a replaced curve chord facing the same
     // way is part of that curve (design 2026-11-02-bowl-wall-owner): one hop
@@ -565,8 +808,8 @@ fn replace_park(tris: &mut Vec<Tri>, stairs: &[Tri], visible: &[[[f32; 3]; 3]], 
     // further; floors and decks (CURVE_NEIGHBOUR_MAX_Z) never.
     let quant = |p: [f32; 3]| p.map(|c| (c * 1e4).round() as i32);
     let mut seeds: Vec<usize> = Vec::new();
-    for (u, chord) in &candidates {
-        if deviation(u, *chord) >= CURVE && small_ok(u, *chord, &mut support) {
+    for (k, (u, chord)) in candidates.iter().enumerate() {
+        if deviation(u, *chord) >= CURVE && same_surface[k] {
             seeds.extend([*chord, u.partner].into_iter().filter(|k| deviates.get(k).is_some_and(|&d| d >= CURVE)));
         }
     }
@@ -602,10 +845,10 @@ fn replace_park(tris: &mut Vec<Tri>, stairs: &[Tri], visible: &[[[f32; 3]; 3]], 
     // are cut narrowly (design 2026-11-09-visible-owner 1).
     let mut curve_chords: std::collections::HashSet<usize> = std::collections::HashSet::new();
     let mut curve_partners: std::collections::HashSet<usize> = std::collections::HashSet::new();
-    let used: Vec<Used> = candidates.into_iter().filter_map(|(u, chord)| {
+    let used: Vec<Used> = candidates.into_iter().zip(same_surface).filter_map(|((u, chord), same)| {
+        if !same { return None; }
         let d = deviation(&u, chord);
         let curve = d >= CURVE || (d >= CURVE_NEIGHBOUR && (beside_curve(chord) || beside_curve(u.partner)));
-        if !small_ok(&u, chord, &mut support) { return None; }
         // The visible model owns every surface it covers (Manatros 2026-11-08
         // 05:36; A50 as updated 2026-10-27; box gates in the design), except a
         // raised top with no GTA top (the deck under it must stay: no lid over
@@ -904,6 +1147,38 @@ fn replace_park(tris: &mut Vec<Tri>, stairs: &[Tri], visible: &[[[f32; 3]; 3]], 
         if pinned.len() == before { break; }
     }
     let place = |q: [f32; 3]| if pinned.contains(&quant(q)) { q } else { snap(q, &used, &vis_grid) };
+    // A small cut piece off every visible face, on the side a board comes from,
+    // is a fragment: nothing is there to see (design 2026-11-09-see-through).
+    let near_grid = Grid::new(near.iter().copied(), HOVER_REACH);
+    // Or a small piece standing up to HOVER_REACH in front of owned faces at every point:
+    // those faces are there, so dropping it leaves no hole (1105-2: 11-14 cm over the
+    // bowl's owned floor, its corners on it).
+    let over_grid = Grid::new(used.iter().map(|u| &u.v), HOVER_REACH);
+    let over_owned = |piece: &[[f32; 3]; 3], n: Vec3| {
+        let mut most = 0.0f32;
+        let all = piece_points(piece).iter().all(|&q| over_grid.at(q).iter().any(|&k| {
+            let u = &used[k as usize];
+            if normal(&u.v).dot(n) < FACING || is_sliver(&u.v) { return false; }
+            match stands_over(q, &u.v) {
+                Some(d) => { most = most.max(d); true }
+                None => false,
+            }
+        }));
+        all && most > HOVER_OFF
+    };
+    let hovering = |piece: &[[f32; 3]; 3], n: Vec3| {
+        let p = piece.map(v3);
+        if (p[1] - p[0]).cross(p[2] - p[0]).length() / 2.0 >= HOVER_AREA { return false; }
+        over_owned(piece, n) || piece_points(piece).iter().all(|&q| {
+            let mut best: Option<(f32, usize)> = None;
+            for &k in near_grid.at(q) {
+                let d = distance(q, near[k as usize]);
+                if best.is_none_or(|b| d < b.0) { best = Some((d, k as usize)); }
+            }
+            let Some((d, k)) = best else { return false };
+            d > HOVER_OFF && d <= HOVER_REACH && (q - v3(near[k][0])).dot(normal(near[k])) > 0.0
+        })
+    };
     // Snapping can squeeze a piece into a sliver: those go too (they broke the
     // lip test of a park curb, 2026-10-26).
     let changed: Vec<(usize, Vec<[[f32; 3]; 3]>)> = changed.into_iter().map(|(i, pieces)| {
@@ -915,7 +1190,7 @@ fn replace_park(tris: &mut Vec<Tri>, stairs: &[Tri], visible: &[[[f32; 3]; 3]], 
                 let longest = p[0].distance(p[1]).max(p[1].distance(p[2])).max(p[2].distance(p[0]));
                 // A piece lying on an owned visible face is a second owner; a
                 // remnant under 2 cm wide beside one stands off it as a shard.
-                area >= PIECE_AREA && area / longest >= PIECE_WIDTH && !on_owned(t, chord_n, true)
+                area >= PIECE_AREA && area / longest >= PIECE_WIDTH && !on_owned(t, chord_n, true) && !hovering(t, chord_n)
                     && !(2.0 * area / longest < REMNANT_WIDTH && on_owned(t, chord_n, false))
             })
             .collect();
@@ -949,6 +1224,17 @@ fn replace_park(tris: &mut Vec<Tri>, stairs: &[Tri], visible: &[[[f32; 3]; 3]], 
         if drop { out.removed.push(*t); }
         !drop
     });
+}
+
+/// How far `q` stands in front of face `v`, when it projects inside the face along its
+/// normal, from just behind it (`HOVER_OFF`) to `HOVER_REACH`.
+fn stands_over(q: Vec3, v: &[[f32; 3]; 3]) -> Option<f32> {
+    let n = normal(v);
+    let (a, b, e) = (v3(v[0]), v3(v[1]), v3(v[2]));
+    let d = (q - a).dot(n);
+    if !(-HOVER_OFF..=HOVER_REACH).contains(&d) { return None; }
+    let s = q - n * d;
+    [(a, b), (b, e), (e, a)].iter().all(|&(g, h)| (h - g).cross(s - g).dot(n) >= -1e-4).then_some(d)
 }
 
 fn bounds(t: &[[f32; 3]; 3], widen: f32) -> (Vec3, Vec3) {
@@ -1168,6 +1454,14 @@ fn clip64(poly: &[bevy_math::DVec2], f: impl Fn(bevy_math::DVec2) -> f64) -> Vec
 /// Narrowest cut remnant kept (m): a strip below this beside the visible
 /// surface is a gap no wheel can catch, not a surface to ride.
 const REMNANT_WIDTH: f32 = 0.02;
+/// A cut piece under this area (m2), every point more than `HOVER_OFF` (m) and
+/// at most `HOVER_REACH` (m) off the visible model, in front of it, is a fragment.
+const HOVER_AREA: f32 = 0.05;
+const HOVER_OFF: f32 = 0.03;
+const HOVER_REACH: f32 = 0.60;
+/// A connected visible surface of at least this much (m2) owns its small faces too; a
+/// long handrail's tube has about 5.
+const SAME_SURFACE_AREA: f32 = 10.0;
 /// ... and that is at most this share of its original face's area.
 const REMNANT_SHARE: f32 = 0.25;
 /// Corners closer than this to a neighbour or to the line through their
@@ -2058,5 +2352,215 @@ mod tests {
         let strip = if normal(&strip).z < 0.0 { [strip[0], strip[2], strip[1]] } else { strip };
         let out = run(&mut gta, &[], &[strip]);
         assert!(out.added.is_empty());
+    }
+
+    /// A closed box along x (12 triangles, facing out).
+    fn closed_box(x0: f32, x1: f32, y0: f32, y1: f32, z0: f32, z1: f32, material: u8) -> Vec<Tri> {
+        let q = |a: [f32; 3], b: [f32; 3], c: [f32; 3], d: [f32; 3]| [[a, b, c], [a, c, d]];
+        [
+            q([x0, y0, z0], [x1, y0, z0], [x1, y0, z1], [x0, y0, z1]), // -y side
+            q([x1, y1, z0], [x0, y1, z0], [x0, y1, z1], [x1, y1, z1]), // +y side
+            q([x0, y1, z0], [x0, y0, z0], [x0, y0, z1], [x0, y1, z1]), // -x end
+            q([x1, y0, z0], [x1, y1, z0], [x1, y1, z1], [x1, y0, z1]), // +x end
+            q([x0, y0, z1], [x1, y0, z1], [x1, y1, z1], [x0, y1, z1]), // top
+            q([x0, y1, z0], [x1, y1, z0], [x1, y0, z0], [x0, y0, z0]), // bottom
+        ].into_iter().flatten().map(|v| Tri { v, material }).collect()
+    }
+
+    /// Bars inside a 6 m box: a post every metre and a top rail.
+    fn fence_bars(x0: f32, y: f32, z0: f32, z1: f32) -> Vec<[[f32; 3]; 3]> {
+        let mut bars = Vec::new();
+        for k in 0..7 {
+            let x = x0 + k as f32;
+            bars.push([[x, y, z0], [x + 0.05, y, z0], [x + 0.05, y, z1]]);
+            bars.push([[x, y, z0], [x + 0.05, y, z1], [x, y, z1]]);
+        }
+        bars.push([[x0, y, z1 - 0.06], [x0 + 6., y, z1 - 0.06], [x0 + 6., y, z1]]);
+        bars.push([[x0, y, z1 - 0.06], [x0 + 6., y, z1], [x0, y, z1]]);
+        bars
+    }
+
+    fn lengths_match(out: &Replacement) {
+        assert!(out.added.len() == out.surface_from.len() && out.added.len() == out.cut.len() && out.added.len() == out.park.len());
+    }
+
+    #[test]
+    fn a_fence_box_goes_and_its_bars_are_its_collision() {
+        let (x0, y0) = (-1360.0f32, -1400.0f32);
+        let mut gta = closed_box(x0, x0 + 6., y0, y0 + 0.1, 1.0, 2.2, 69);
+        gta.extend(square(x0 + 20., x0 + 22., y0, y0 + 2., 0.).into_iter().map(|v| Tri { v, material: 1 }));
+        let bars = fence_bars(x0, y0 + 0.05, 1.0, 2.2);
+        let mut out = Replacement::default();
+        let rest = see_through_boxes(&mut gta, &[], &bars, AT, 60., "vespucci", &mut out);
+        assert_eq!(gta.len(), 2, "only the box goes");
+        assert!(rest.is_some_and(|r| r.is_empty()), "its bars are taken");
+        assert_eq!(out.added.len(), bars.len());
+        assert_eq!(out.removed.len(), 12);
+        assert!(out.cut.iter().all(|c| !c));
+        lengths_match(&out);
+    }
+
+    #[test]
+    fn solid_concrete_glass_empty_and_stair_boxes_stay() {
+        let (x0, y0) = (-1360.0f32, -1400.0f32);
+        let bars = fence_bars(x0, y0 + 0.05, 1.0, 2.2);
+        let keeps = |gta: &mut Vec<Tri>, stairs: &[Tri], visible: &[[[f32; 3]; 3]], why: &str| {
+            let before = gta.len();
+            let mut out = Replacement::default();
+            let rest = see_through_boxes(gta, stairs, visible, AT, 60., "vespucci", &mut out);
+            assert_eq!(gta.len(), before, "{why}");
+            assert!(rest.is_none(), "{why}");
+            assert!(out.added.is_empty(), "{why}");
+        };
+        // A solid wall: the visible face fills the whole side.
+        let panel = [[[x0, y0 + 0.05, 1.0], [x0 + 6., y0 + 0.05, 1.0], [x0 + 6., y0 + 0.05, 2.2]],
+                     [[x0, y0 + 0.05, 1.0], [x0 + 6., y0 + 0.05, 2.2], [x0, y0 + 0.05, 2.2]]];
+        keeps(&mut closed_box(x0, x0 + 6., y0, y0 + 0.1, 1.0, 2.2, 69), &[], &panel, "solid");
+        keeps(&mut closed_box(x0, x0 + 6., y0, y0 + 0.1, 1.0, 2.2, 1), &[], &bars, "concrete");
+        keeps(&mut closed_box(x0, x0 + 6., y0, y0 + 0.1, 1.0, 2.2, 55), &[], &bars, "glass: its panes are not in the model");
+        keeps(&mut closed_box(x0, x0 + 6., y0, y0 + 0.1, 1.0, 2.2, 69), &[], &[], "nothing to see inside: an invisible wall stays");
+        // Bars at one end only do not span it.
+        let few: Vec<_> = bars.iter().copied().filter(|t| t[0][0] < x0 + 2.0 && t[1][0] < x0 + 2.0).collect();
+        keeps(&mut closed_box(x0, x0 + 6., y0, y0 + 0.1, 1.0, 2.2, 69), &[], &few, "bars at one end");
+        let stairs: Vec<Tri> = square(x0 + 2., x0 + 3., y0 - 0.05, y0 + 0.2, 1.5).into_iter().map(|v| Tri { v, material: 1 }).collect();
+        keeps(&mut closed_box(x0, x0 + 6., y0, y0 + 0.1, 1.0, 2.2, 69), &stairs, &bars, "stairs");
+        // A pane of glass in the fence's volume keeps it.
+        let mut with_glass = closed_box(x0, x0 + 6., y0, y0 + 0.1, 1.0, 2.2, 69);
+        with_glass.push(Tri { v: [[x0 + 1., y0 + 0.05, 1.2], [x0 + 2., y0 + 0.05, 1.2], [x0 + 2., y0 + 0.05, 2.0]], material: 55 });
+        keeps(&mut with_glass, &[], &bars, "glass inside");
+        // A 6 m panel opposite a 40 m wall is no box: the wall's +y side lies behind the -y side.
+        let mut far_side: Vec<Tri> = closed_box(x0, x0 + 6., y0, y0 + 0.1, 1.0, 2.2, 69).into_iter().filter(|t| normal(&t.v).y < -0.5 || normal(&t.v).x.abs() > 0.5 || normal(&t.v).z.abs() > 0.5).collect();
+        far_side.extend(closed_box(x0 - 17., x0 + 23., y0 - 0.3, y0 + 0.1, 1.0, 2.2, 69).into_iter().filter(|t| normal(&t.v).y > 0.5));
+        assert!(far_side.iter().any(|t| normal(&t.v).y > 0.5) && far_side.iter().any(|t| normal(&t.v).y < -0.5), "an opposite pair exists");
+        keeps(&mut far_side, &[], &bars, "short panel opposite a long side");
+        // A solid panel running past the box beside the posts: fill alone would miss it.
+        let mut with_panel = bars.clone();
+        with_panel.push([[x0 - 3., y0 + 0.05, 1.0], [x0 + 9., y0 + 0.05, 1.6], [x0 + 3., y0 + 0.05, 2.0]]);
+        keeps(&mut closed_box(x0, x0 + 6., y0, y0 + 0.1, 1.0, 2.2, 69), &[], &with_panel, "solid panel past the box");
+    }
+
+    #[test]
+    fn a_fence_box_is_decided_the_same_in_any_face_order() {
+        // Two collinear boxes sharing posts at their joint.
+        let (x0, y0) = (-1360.0f32, -1400.0f32);
+        let mut gta = closed_box(x0, x0 + 6., y0, y0 + 0.1, 1.0, 2.2, 69);
+        gta.extend(closed_box(x0 + 6.02, x0 + 12.02, y0, y0 + 0.1, 1.0, 2.2, 69));
+        let mut bars = fence_bars(x0, y0 + 0.05, 1.0, 2.2);
+        bars.extend(fence_bars(x0 + 6.02, y0 + 0.05, 1.0, 2.2));
+        let result = |gta: &[Tri]| {
+            let mut left = gta.to_vec();
+            let mut out = Replacement::default();
+            see_through_boxes(&mut left, &[], &bars, AT, 60., "vespucci", &mut out);
+            let mut added: Vec<_> = out.added.iter().map(|t| t.v.map(|p| p.map(f32::to_bits))).collect();
+            added.sort_unstable();
+            (left.len(), added)
+        };
+        let forward = result(&gta);
+        assert_eq!(forward.0, 0);
+        let mut turned = gta.clone();
+        turned.reverse();
+        assert_eq!(forward, result(&turned));
+        turned.rotate_left(7);
+        assert_eq!(forward, result(&turned));
+    }
+
+    #[test]
+    fn a_fence_far_from_the_origin_with_a_slightly_turned_side_is_still_one_box() {
+        // Normals 0.1 deg apart, 1,950 m from the map's origin: 3.4 m of lever arm.
+        let (x0, y0) = (-1360.0f32, -1400.0f32);
+        let mut gta = closed_box(x0, x0 + 6., y0, y0 + 0.1, 1.0, 2.2, 69);
+        for t in gta.iter_mut() { for p in t.v.iter_mut() { if p[1] > y0 + 0.05 { p[1] += (p[0] - x0) * 0.00175; } } }
+        let bars = fence_bars(x0, y0 + 0.05, 1.0, 2.2);
+        let mut out = Replacement::default();
+        assert!(see_through_boxes(&mut gta, &[], &bars, AT, 60., "vespucci", &mut out).is_some());
+        assert!(gta.is_empty());
+    }
+
+    /// A round tube along x at height z, y offset, in `n` facets, joined edge to edge.
+    fn tube(x0: f32, x1: f32, y: f32, z: f32, r: f32) -> Vec<[[f32; 3]; 3]> {
+        let mut out = Vec::new();
+        for k in 0..8 {
+            let (a, e) = (k as f32 * std::f32::consts::FRAC_PI_4, (k + 1) as f32 * std::f32::consts::FRAC_PI_4);
+            let p = |t: f32, x: f32| [x, y + r * t.cos(), z + r * t.sin()];
+            for f in [[p(a, x0), p(e, x1), p(e, x0)], [p(a, x0), p(a, x1), p(e, x1)]] {
+                // Outward, as a model's tube.
+                let c = centroid(&f);
+                let out_dir = Vec3::new(0., c.y - y, c.z - z);
+                out.push(if normal(&f).dot(out_dir) < 0.0 { [f[0], f[2], f[1]] } else { f });
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn a_rail_beside_a_big_wall_stays_gta_s() {
+        // A big wall chord facing -y, a tube 15 cm in front: the facets facing the same way
+        // pass the old test (seeds), the rest of the tube must not follow them.
+        let (x0, y0) = (-1360.0f32, -1400.0f32);
+        let wall = [[x0, y0, 0.], [x0 + 6., y0, 0.], [x0 + 6., y0, 3.]];
+        let wall2 = [[x0, y0, 0.], [x0 + 6., y0, 3.], [x0, y0, 3.]];
+        assert!(normal(&wall).y < -0.9 && normal(&wall2).y < -0.9);
+        let mut gta = vec![Tri { v: wall, material: 1 }, Tri { v: wall2, material: 1 }];
+        let rail = tube(x0 + 1., x0 + 5., y0 - 0.19, 1.5, 0.04);
+        let out = run(&mut gta, &[], &rail);
+        let n = out.added.iter().zip(&out.cut).filter(|(_, c)| !**c).count();
+        assert!(n >= 1, "a facet is a seed, or this test proves nothing");
+        assert!(n < rail.len() / 2, "the tube's other facets stay out: {n} of {}", rail.len());
+        // The same mesh as a surface of 10 m2 or more is owned whole: a wide curved panel.
+        let mut gta = vec![Tri { v: wall, material: 1 }, Tri { v: wall2, material: 1 }];
+        let mut panel = Vec::new();
+        for k in 0..12 {
+            let (a, e) = (k as f32 * 0.25, (k + 1) as f32 * 0.25);
+            let turn = |s: f32| 0.03 * (s - 1.5) * (s - 1.5);
+            let q = |x: f32, s: f32| [x, y0 - 0.1 - turn(s), s];
+            panel.push([q(x0, a), q(x0 + 6., a), q(x0 + 6., e)]);
+            panel.push([q(x0, a), q(x0 + 6., e), q(x0, e)]);
+        }
+        let out = run(&mut gta, &[], &panel);
+        assert_eq!(out.added.iter().zip(&out.cut).filter(|(_, c)| !**c).count(), panel.len());
+    }
+
+    #[test]
+    fn a_small_rim_strip_joined_to_the_owned_surface_is_owned_and_a_loose_one_stays_gta_s() {
+        // A narrow deck the visible model owns, a small rim wall joined to it, and the same
+        // wall loose, as a rail's or post's mesh would be.
+        let (x0, y0) = (-1360.0f32, -1400.0f32);
+        let x1 = x0 + 4.;
+        // A fan, so the deck has a 30 cm edge at (x1, y0..y0 + 0.3) on a surface of 12 m2.
+        let z = 0.10;
+        let deck: Vec<[[f32; 3]; 3]> = vec![
+            [[x0, y0, z], [x1, y0, z], [x1, y0 + 0.3, z]],
+            [[x0, y0, z], [x1, y0 + 0.3, z], [x1, y0 + 3., z]],
+            [[x0, y0, z], [x1, y0 + 3., z], [x0, y0 + 3., z]],
+        ];
+        let rim = |y: f32, z: f32, off: f32| -> [[f32; 3]; 3] {
+            let t = [[x1 + off, y, z], [x1 + off + 0.1, y + 0.15, z + 0.5], [x1 + off, y + 0.3, z]];
+            if normal(&t).z < 0.0 { [t[0], t[2], t[1]] } else { t }
+        };
+        let joined_rim = {
+            let t = [[x1, y0, z], [x1 + 0.1, y0 + 0.15, 0.6], [x1, y0 + 0.3, z]];
+            if normal(&t).z < 0.0 { [t[0], t[2], t[1]] } else { t }
+        };
+        let loose_rim = rim(y0 + 5.0, 0.10, 0.0);
+        let chord = |t: &[[f32; 3]; 3]| { let n = normal(t); t.map(|p| [p[0] + n.x * 0.05, p[1] + n.y * 0.05, p[2] + n.z * 0.05]) };
+        let mut gta: Vec<Tri> = square(x0, x1, y0, y0 + 3., 0.0).into_iter().map(|v| Tri { v, material: 3 }).collect();
+        gta.push(Tri { v: chord(&joined_rim), material: 3 });
+        gta.push(Tri { v: chord(&loose_rim), material: 3 });
+        let mut visible = deck.clone();
+        visible.extend([joined_rim, loose_rim]);
+        let out = run(&mut gta, &[], &visible);
+        let has = |t: &[[f32; 3]; 3]| out.added.iter().zip(&out.cut).any(|(a, c)| !c && a.v == *t);
+        assert!(has(&joined_rim), "joined to the owned deck");
+        assert!(!has(&loose_rim), "a mesh of its own stays GTA's");
+    }
+
+    #[test]
+    fn a_point_stands_over_a_face_only_in_front_and_inside() {
+        let face = [[0., 0., 0.], [2., 0., 0.], [0., 2., 0.]];
+        assert_eq!(stands_over(Vec3::new(0.5, 0.5, 0.12), &face), Some(0.12));
+        assert!(stands_over(Vec3::new(0.5, 0.5, -0.02), &face).is_some(), "just behind counts: a corner on the surface");
+        assert_eq!(stands_over(Vec3::new(0.5, 0.5, -0.10), &face), None, "under it: another surface");
+        assert_eq!(stands_over(Vec3::new(0.5, 0.5, 0.70), &face), None, "too far: another surface");
+        assert_eq!(stands_over(Vec3::new(1.5, 1.5, 0.10), &face), None, "past its edge");
     }
 }
