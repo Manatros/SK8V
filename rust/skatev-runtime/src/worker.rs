@@ -48,6 +48,7 @@ pub enum Job {
     Track {
         at: Vec3,
         heading: f32,
+        in_vehicle: bool,
     },
     Step {
         dt: f32,
@@ -720,6 +721,7 @@ fn run(
     let mut requested_at = std::time::Instant::now();
     // Lifecycle: the GTA player's position while Skate is inactive.
     let mut tracked: Option<Vec3> = None;
+    let mut tracked_in_vehicle = false;
     // GTA's collision in the area changed: rebuild the working set in place.
     let mut rebuild_area = false;
     let mut options_version = world::options_version();
@@ -885,7 +887,7 @@ fn run(
         let mut dynamic: Option<Vec<([[f32; 3]; 3], u32, u32)>> = None;
         let mut host_bodies: Option<Vec<skate_host::bridge::HostBody>> = None;
         let mut grab_lines: Option<Vec<skate_host::bridge::GrabLine>> = None;
-        let mut track: Option<(Vec3, f32)> = None;
+        let mut track: Option<(Vec3, f32, bool)> = None;
         let last_dyn = batch.iter().rposition(|j| matches!(j, Job::DynamicBodies(_)));
         let last_ped = batch.iter().rposition(|j| matches!(j, Job::PedParts(_)));
         for (job_idx, job) in batch.into_iter().enumerate() {
@@ -896,7 +898,7 @@ fn run(
                 continue;
             }
             match job {
-                Job::Track { at, heading } => track = Some((at, heading)),
+                Job::Track { at, heading, in_vehicle } => track = Some((at, heading, in_vehicle)),
                 Job::Activate {
                     spawn,
                     heading,
@@ -1437,8 +1439,9 @@ fn run(
         }
         // Lifecycle: background preparation, then the working set follows
         // the GTA player (on foot or driving) while Skate is inactive.
-        if let Some((at, heading)) = track.filter(|_| !active) {
+        if let Some((at, heading, in_veh)) = track.filter(|_| !active) {
             tracked = Some(at);
+            tracked_in_vehicle = in_veh;
             // A failed preparation (no cached collision under the player:
             // open sea, an uncached interior) is retried once the player has
             // moved on; it never takes the worker down.
@@ -1683,7 +1686,8 @@ fn run(
                 }
             }
         }
-        if let (Some(level), Some(t), Some((jobs, _))) = (live_level, target, stream_check.as_ref())
+        if active
+            && let (Some(level), Some(t), Some((jobs, _))) = (live_level, target, stream_check.as_ref())
             && !checking
             && (!crate::BAKED_WORLD.load(std::sync::atomic::Ordering::Relaxed)
                 || installed_area.as_ref().is_some_and(world::Area::needs_live_watch))
@@ -1702,16 +1706,22 @@ fn run(
         let velocity = if active { skater_velocity } else { Vec3::ZERO };
         if let Some(t) = target
             && pending_centre.is_none()
-            && (world::needs_recentre_moving(built_at, t, velocity, build_secs) || rebuild_area)
+            && (if active {
+                world::needs_recentre_moving(built_at, t, velocity, build_secs) || rebuild_area
+            } else if tracked_in_vehicle {
+                false
+            } else {
+                built_at == PRELOAD_AT || (t - built_at).truncate().length() > 60.0 || rebuild_area
+            })
             && stream_failed_at.is_none_or(|f| world::needs_recentre(f, t) || rebuild_area)
         {
             // Streaming alone rebuilds in place while the area still covers
             // the player: only what GTA streamed changes, and the rest is
             // reused (`reuse`).
-            let centre = if world::needs_recentre_moving(built_at, t, velocity, build_secs) {
+            let centre = if active && world::needs_recentre_moving(built_at, t, velocity, build_secs) {
                 world::lead_centre(t, velocity, build_secs)
             } else {
-                Vec3::new(built_at.x, built_at.y, t.z)
+                Vec3::new(t.x, t.y, t.z)
             };
             if builder_jobs.as_ref().is_some_and(|b| b.send(BuildRequest { centre, at: t, lead: world::lead_centre(t, velocity, build_secs) - t }).is_ok()) {
                 pending_centre = Some(centre);

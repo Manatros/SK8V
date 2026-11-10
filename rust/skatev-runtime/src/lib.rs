@@ -1168,6 +1168,7 @@ pub unsafe extern "C" fn sv_lifecycle_track(
             .send(Job::Track {
                 at,
                 heading: t.heading_degrees,
+                in_vehicle: (t.flags & 1) != 0,
             })
             .is_ok() as u32
     })

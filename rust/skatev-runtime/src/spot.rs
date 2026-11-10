@@ -6,7 +6,7 @@
 //! MARK-INFO block.
 use bevy_math::Vec3;
 use rustc_hash::FxHashMap as HashMap;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 /// Per triangle an index into `names` (area level: "tile x_y: file").
 #[derive(Default, Clone)]
@@ -34,9 +34,19 @@ impl Origins {
 }
 
 struct Installed {
-    /// GTA space, with tag and origin name.
-    faces: Vec<([Vec3; 3], u32, String)>,
+    /// GTA space, with tag and origin index.
+    faces: Vec<([Vec3; 3], u32, u32)>,
+    origins: Arc<Vec<String>>,
     rails: Vec<Vec<Vec3>>,
+}
+
+impl Installed {
+    fn origin_name(&self, id: u32) -> &str {
+        self.origins
+            .get(id as usize)
+            .map(|s| s.as_str())
+            .unwrap_or("live GTA collision (no baked tile here, or plain GTA compare)")
+    }
 }
 
 /// A moving body near the player as the last dynamic update had it.
@@ -83,7 +93,10 @@ pub fn record_hits(tick: u64, hits: Vec<(usize, [f32; 3], [f32; 3], String)>) {
             body,
             point: crate::coords::from_skate(Vec3::from_array(point)),
             normal: crate::coords::basis() * Vec3::from_array(normal),
-            face: installed.as_ref().and_then(|a| a.faces.get(index)).cloned(),
+            face: installed.as_ref().and_then(|a| {
+                let (t, tag, orig_id) = *a.faces.get(index)?;
+                Some((t, tag, a.origin_name(orig_id).to_owned()))
+            }),
         }).collect()
     };
     let mut kept = HITS.lock().unwrap();
@@ -171,13 +184,22 @@ fn kind(t: &[Vec3; 3]) -> &'static str {
 /// The area just installed into Skate (Skate space, as `world::Area`).
 pub fn install(area: &crate::world::Area) {
     let g = |p: [f32; 3]| crate::coords::from_skate(Vec3::from_array(p));
+    let mut names = area.origins.names.clone();
+    let fallback = "live GTA collision (no baked tile here, or plain GTA compare)".to_owned();
+    let fallback_idx = if let Some(i) = names.iter().position(|n| n == &fallback) {
+        i as u32
+    } else {
+        let i = names.len() as u32;
+        names.push(fallback);
+        i
+    };
+    let origins = Arc::new(names);
     let faces = area.triangles.iter().zip(&area.tags).enumerate().map(|(i, (t, &tag))| {
-        let name = area.origins.per.get(i).and_then(|&k| area.origins.names.get(k as usize)).cloned()
-            .unwrap_or_else(|| "live GTA collision (no baked tile here, or plain GTA compare)".to_owned());
-        (t.map(g), tag, name)
+        let origin_idx = area.origins.per.get(i).copied().unwrap_or(fallback_idx);
+        (t.map(g), tag, origin_idx)
     }).collect();
     let rails = area.rails.iter().map(|r| r.iter().map(|&p| g(p)).collect()).collect();
-    *INSTALLED.lock().unwrap() = Some(Installed { faces, rails });
+    *INSTALLED.lock().unwrap() = Some(Installed { faces, origins, rails });
 }
 
 pub fn set_bodies(bodies: Vec<Body>) {
@@ -213,11 +235,12 @@ pub fn describe(centre: Vec3, radius: f32) -> (String, usize) {
         out.push_str("  no collision area installed\n");
         return (out, 0);
     };
-    let near: Vec<&([Vec3; 3], u32, String)> = area.faces.iter().filter(|(t, _, _)| face_distance(centre, t) <= radius).collect();
+    let near: Vec<&([Vec3; 3], u32, u32)> = area.faces.iter().filter(|(t, _, _)| face_distance(centre, t) <= radius).collect();
     // Grouped by origin, kind and tags.
     let mut groups: std::collections::BTreeMap<(String, &str, String), usize> = Default::default();
-    for (t, tag, origin) in &near {
-        *groups.entry((origin.clone(), kind(t), tag_names(*tag))).or_default() += 1;
+    for (t, tag, orig_idx) in &near {
+        let origin = area.origin_name(*orig_idx).to_owned();
+        *groups.entry((origin, kind(t), tag_names(*tag))).or_default() += 1;
     }
     out.push_str(&format!("  {} faces:\n", near.len()));
     for ((origin, kind, tags), n) in groups.iter().take(60) {
@@ -226,7 +249,8 @@ pub fn describe(centre: Vec3, radius: f32) -> (String, usize) {
     // The nearest faces one by one (what the board touches).
     let mut nearest: Vec<_> = near.iter().map(|f| (face_distance(centre, &f.0), *f)).collect();
     nearest.sort_by(|a, b| a.0.total_cmp(&b.0));
-    for (d, (t, tag, origin)) in nearest.iter().take(12) {
+    for (d, (t, tag, orig_idx)) in nearest.iter().take(12) {
+        let origin = area.origin_name(*orig_idx);
         let c = (t[0] + t[1] + t[2]) / 3.0;
         out.push_str(&format!("    face {d:.2} m: {} centre {:.2} {:.2} {:.2} tags {} from {origin}\n", kind(t), c.x, c.y, c.z, tag_names(*tag)));
     }
