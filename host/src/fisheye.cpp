@@ -31,6 +31,7 @@ std::atomic<std::uint64_t> g_presents{0};
 std::atomic<int> g_detailPhase{0};
 std::atomic<std::uint64_t> g_detailAt{0}, g_liveAt{0};
 std::atomic<bool> g_centerCaptured{false};
+std::atomic<bool> g_filtered{false};
 // The photo: requested by the script thread, taken by the render thread, written by a worker.
 std::atomic<int> g_photoState{0};
 std::atomic<std::uint64_t> g_photoAt{0};
@@ -166,7 +167,23 @@ float4 ps_main(V i) : SV_Target {
         float2 qc = q * centerScale;
         float edge = max(abs(qc.x) / aspect, abs(qc.y));
         float w = 1.0 - smoothstep(0.82, 0.97, edge);
-        if (w > 0.0) colour = lerp(colour, CatmullRomOf(centerTex, (qc / float2(aspect, 1)) * 0.5 + 0.5), w);
+        if (w > 0.0) {
+            float2 uvc = (qc / float2(aspect, 1)) * 0.5 + 0.5;
+            float3 sharp = CatmullRomOf(centerTex, uvc);
+            if (detail > 1.5) {
+                // Filtered view: keep the 120-degree frame's low-frequency colour and
+                // vignette, and add only the 60-degree view's fine detail.
+                float2 d = centerScale * 0.5 / texSize;
+                float3 low = 0.25 * centerTex.SampleLevel(smp, uvc, 0).rgb
+                    + 0.1875 * (centerTex.SampleLevel(smp, uvc + float2(-d.x, -d.y), 0).rgb
+                              + centerTex.SampleLevel(smp, uvc + float2( d.x, -d.y), 0).rgb
+                              + centerTex.SampleLevel(smp, uvc + float2(-d.x,  d.y), 0).rgb
+                              + centerTex.SampleLevel(smp, uvc + float2( d.x,  d.y), 0).rgb);
+                colour = saturate(colour + (sharp - low) * w);
+            } else {
+                colour = lerp(colour, sharp, w);
+            }
+        }
     }
     return float4(colour * shade, 1);
 }
@@ -440,7 +457,12 @@ bool UpdateBand(int band, const Hud& hud, UINT w, UINT h) {
 }  // namespace
 
 void SetLog(LogFn log) { g_log = log; }
-void SetEnabled(bool on) { g_enabled = on; }
+void SetEnabled(bool on) {
+    if (g_enabled.exchange(on) != on) {
+        if (on) g_liveAt = std::max(g_liveAt.load(), g_presents.load() + 1);
+        else g_drawnAt = 0, gpu.baseValid = false;
+    }
+}
 bool Enabled() { return g_enabled.load(); }
 
 void SetHudItems(const std::vector<HudRect>& rects, const std::vector<HudText>& texts, bool show) {
@@ -533,7 +555,7 @@ void Bend(IDXGISwapChain* sc) {
     }
     if (!hold || !gpu.baseValid) c->CopyResource(gpu.copy, back), gpu.baseValid = true;
     Constants k = Make(static_cast<float>(bd.Width), static_cast<float>(bd.Height), kSourceFov);
-    k.detail = phase == 2 && g_centerCaptured.load() ? 1.0f : 0.0f;  // phase 3 holds without it
+    k.detail = phase == 2 && g_centerCaptured.load() ? (g_filtered.load() ? 2.0f : 1.0f) : 0.0f;  // phase 3 holds without it
     auto upload = [&] {
         D3D11_MAPPED_SUBRESOURCE m{};
         if (FAILED(c->Map(gpu.cb, 0, D3D11_MAP_WRITE_DISCARD, 0, &m))) return false;
@@ -684,6 +706,11 @@ void RequestPhoto(const std::wstring& path) {
 
 int PhotoState() { return g_photoState.load(); }
 
+void SetFiltered(bool on) {
+    g_filtered = on;
+    g_liveAt = std::max(g_liveAt.load(), g_presents.load() + 1);
+}
+bool DetailIdle() { return g_detailPhase.load() == 0 && g_presents.load() >= g_liveAt.load(); }
 void BeginDetail() {
     g_centerCaptured = false;
     g_detailAt = ~0ull;  // armed once GTA is seen rendering the detail view (ArmDetail)
@@ -737,6 +764,7 @@ bool WritePng(const std::wstring& path, const unsigned char* bgr, unsigned width
 }
 
 void Release() {
+    g_filtered = false;
     ReleaseCopy();
     ReleaseHud();
     SafeRelease(gpu.vs);

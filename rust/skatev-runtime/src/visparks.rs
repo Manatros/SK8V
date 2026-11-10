@@ -960,7 +960,7 @@ fn replace_park(tris: &mut Vec<Tri>, stairs: &[Tri], visible: &[[[f32; 3]; 3]], 
             for e in edges_of(&u.v) { let o = owner_edges.entry(e).or_insert(k); *o = (*o).min(k); }
         }
         let mut hop1: Vec<bool> = vec![false; thin.len()];
-        let mut first_edges: HashMap<([i32; 3], [i32; 3]), usize> = HashMap::default();
+        let mut first_edges: HashMap<([i32; 3], [i32; 3]), (usize, f32)> = HashMap::default();
         for (k, t) in thin.iter().enumerate() {
             let owner = edges_of(t).iter().filter_map(|e| owner_edges.get(e).copied()).min()
                 .filter(|&o| {
@@ -969,19 +969,20 @@ fn replace_park(tris: &mut Vec<Tri>, stairs: &[Tri], visible: &[[[f32; 3]; 3]], 
                 });
             if let Some(o) = owner {
                 hop1[k] = true;
-                let partner = used[o].partner;
-                chamfers.push(Used { v: **t, partner, limit: 0.0 });
-                for e in edges_of(t) { first_edges.entry(e).or_insert(partner); }
+                let (partner, limit) = (used[o].partner, used[o].limit);
+                chamfers.push(Used { v: **t, partner, limit });
+                for e in edges_of(t) { first_edges.entry(e).or_insert((partner, limit)); }
             }
         }
         for (k, t) in thin.iter().enumerate() {
             if hop1[k] { continue; }
-            if let Some(&partner) = edges_of(t).iter().find_map(|e| first_edges.get(e)) {
-                chamfers.push(Used { v: **t, partner, limit: 0.0 });
+            if let Some(&(partner, limit)) = edges_of(t).iter().find_map(|e| first_edges.get(e)) {
+                chamfers.push(Used { v: **t, partner, limit });
             }
         }
     }
     let vis_grid = Grid::new(used.iter().map(|u| &u.v), MATCH);
+    let chamfer_grid = Grid::new(chamfers.iter().map(|u| &u.v), MATCH);
     // 1.2/1.4: GTA triangles near a used visible one facing the same way are
     // cut by the visible footprints, and the vertices on the footprints'
     // edges move onto them.
@@ -999,19 +1000,31 @@ fn replace_park(tris: &mut Vec<Tri>, stairs: &[Tri], visible: &[[[f32; 3]; 3]], 
         let c = (p[0] + p[1] + p[2]) / 3.0;
         [c, p[0], p[1], p[2], (p[0] + p[1]) * 0.5, (p[1] + p[2]) * 0.5, (p[2] + p[0]) * 0.5].map(|q| q + (c - q) * 0.02)
     };
-    let on_owned = |piece: &[[f32; 3]; 3], n: Vec3, inside: bool| piece_points(piece).iter().all(|&q| vis_grid.at(q).iter().any(|&k| {
-        let u = &used[k as usize];
-        let un = normal(&u.v);
-        if un.dot(n) < FACING || is_sliver(&u.v) { return false; }
-        // A remnant under 2 cm wide: dropping it leaves at most that slit, so
-        // the reach is MATCH (standing slivers came back with the limit).
-        if !inside { return distance(q, &u.v) <= MATCH; }
-        let (a, b, e) = (v3(u.v[0]), v3(u.v[1]), v3(u.v[2]));
-        let d = (q - a).dot(un);
-        if d.abs() > u.limit { return false; }
-        let s = q - un * d;
-        [(a, b), (b, e), (e, a)].iter().all(|&(g, h)| (h - g).cross(s - g).dot(un) >= -1e-4)
-    }));
+    let on_owned = |piece: &[[f32; 3]; 3], n: Vec3, inside: bool| piece_points(piece).iter().all(|&q| {
+        vis_grid.at(q).iter().any(|&k| {
+            let u = &used[k as usize];
+            let un = normal(&u.v);
+            if un.dot(n) < FACING || is_sliver(&u.v) { return false; }
+            // A remnant under 2 cm wide: dropping it leaves at most that slit, so
+            // the reach is MATCH (standing slivers came back with the limit).
+            if !inside { return distance(q, &u.v) <= MATCH; }
+            let (a, b, e) = (v3(u.v[0]), v3(u.v[1]), v3(u.v[2]));
+            let d = (q - a).dot(un);
+            if d.abs() > u.limit { return false; }
+            let s = q - un * d;
+            [(a, b), (b, e), (e, a)].iter().all(|&(g, h)| (h - g).cross(s - g).dot(un) >= -1e-4)
+        }) || chamfer_grid.at(q).iter().any(|&k| {
+            let u = &chamfers[k as usize];
+            let un = normal(&u.v);
+            if un.dot(n) < 0.5 { return false; }
+            if !inside { return distance(q, &u.v) <= MATCH; }
+            let (a, b, e) = (v3(u.v[0]), v3(u.v[1]), v3(u.v[2]));
+            let d = (q - a).dot(un);
+            if d.abs() > u.limit { return false; }
+            let s = q - un * d;
+            [(a, b), (b, e), (e, a)].iter().all(|&(g, h)| (h - g).cross(s - g).dot(un) >= -0.02 * (h - g).length())
+        })
+    });
     for i in 0..tris.len() {
         let t = tris[i].v;
         let n = normal(&t);
@@ -1077,7 +1090,26 @@ fn replace_park(tris: &mut Vec<Tri>, stairs: &[Tri], visible: &[[[f32; 3]; 3]], 
             if subtract_along(&t, wide.iter(), true, false).raw_covered {
                 Vec::new()
             } else {
-                let pieces = cut_along(&t, wide.iter(), true);
+                let mut pieces = cut_along(&t, wide.iter(), true);
+                if n.z.abs() < 0.2 {
+                    let wide_min_z = wide.iter().flat_map(|u| u.v).map(|q| q[2]).fold(f32::MAX, f32::min);
+                    pieces.retain(|p| {
+                        let p_max_z = p.iter().map(|q| q[2]).fold(f32::MIN, f32::max);
+                        if p_max_z > wide_min_z + 0.02 { return true; }
+                        // Only a flat floor at the skirt's own top, right over it, buries
+                        // it: a deck high above a deeper pocket's wall does not (peer review
+                        // 2026-11-10, finding 1).
+                        let c = centroid(p);
+                        let top = Vec3::new(c.x, c.y, p_max_z);
+                        !gta_grid.at(c).iter().any(|&k| {
+                            let j = park[k as usize];
+                            let z_hi = tris[j].v.iter().map(|q| q[2]).fold(f32::MIN, f32::max);
+                            normal(&tris[j].v).z >= CURVE_NEIGHBOUR_MAX_Z
+                                && (p_max_z - 0.02..=wide_min_z + 0.05).contains(&z_hi)
+                                && distance(top, &tris[j].v) <= MATCH
+                        })
+                    });
+                }
                 // A piece snapping collapses to nothing is dropped later, no fold.
                 let folds = pieces.iter().any(|p| {
                     let s = normal(&p.map(|q| snap(q, &used, &vis_grid)));
@@ -1154,6 +1186,34 @@ fn replace_park(tris: &mut Vec<Tri>, stairs: &[Tri], visible: &[[[f32; 3]; 3]], 
     // those faces are there, so dropping it leaves no hole (1105-2: 11-14 cm over the
     // bowl's owned floor, its corners on it).
     let over_grid = Grid::new(used.iter().map(|u| &u.v), HOVER_REACH);
+    // A lid under a sloped owned top: every point under or on such a face, and at
+    // least one point well beneath one, inside it. A floor strip at a ramp's foot
+    // lies in front of the face, never beneath it (peer review 2026-11-10, finding 2).
+    let under_sloped_top = |piece: &[[f32; 3]; 3], n: Vec3| {
+        if n.z < CURVE_NEIGHBOUR_MAX_Z { return false; }
+        let mut deep = false;
+        let all = piece_points(piece).iter().all(|&q| {
+            over_grid.at(q).iter().any(|&k| {
+                let u = &used[k as usize];
+                let un = normal(&u.v);
+                if !(0.5..CURVE_NEIGHBOUR_MAX_Z).contains(&un.z) || is_sliver(&u.v) { return false; }
+                let (a, b, e) = (v3(u.v[0]), v3(u.v[1]), v3(u.v[2]));
+                let d = (q - a).dot(un);
+                if !(-HOVER_REACH..=HOVER_OFF).contains(&d) { return false; }
+                let s = q - un * d;
+                let edge = |slack: f32| [(a, b), (b, e), (e, a)].iter().all(|&(g, h)| (h - g).cross(s - g).dot(un) >= -slack * (h - g).length());
+                if !edge(CHAMFER_WIDTH) { return false; }
+                if d < -HOVER_OFF && edge(1e-4) { deep = true; }
+                true
+            })
+        });
+        all && deep
+    };
+    for &i in &park {
+        if !done.contains(&i) && under_sloped_top(&tris[i].v, normal(&tris[i].v)) {
+            changed.push((i, Vec::new()));
+        }
+    }
     let over_owned = |piece: &[[f32; 3]; 3], n: Vec3| {
         let mut most = 0.0f32;
         let all = piece_points(piece).iter().all(|&q| over_grid.at(q).iter().any(|&k| {
@@ -1191,6 +1251,7 @@ fn replace_park(tris: &mut Vec<Tri>, stairs: &[Tri], visible: &[[[f32; 3]; 3]], 
                 // A piece lying on an owned visible face is a second owner; a
                 // remnant under 2 cm wide beside one stands off it as a shard.
                 area >= PIECE_AREA && area / longest >= PIECE_WIDTH && !on_owned(t, chord_n, true) && !hovering(t, chord_n)
+                    && !under_sloped_top(t, chord_n)
                     && !(2.0 * area / longest < REMNANT_WIDTH && on_owned(t, chord_n, false))
             })
             .collect();
@@ -1461,7 +1522,7 @@ const HOVER_OFF: f32 = 0.03;
 const HOVER_REACH: f32 = 0.60;
 /// A connected visible surface of at least this much (m2) owns its small faces too; a
 /// long handrail's tube has about 5.
-const SAME_SURFACE_AREA: f32 = 10.0;
+const SAME_SURFACE_AREA: f32 = 8.0;
 /// ... and that is at most this share of its original face's area.
 const REMNANT_SHARE: f32 = 0.25;
 /// Corners closer than this to a neighbour or to the line through their
@@ -2562,5 +2623,33 @@ mod tests {
         assert_eq!(stands_over(Vec3::new(0.5, 0.5, -0.10), &face), None, "under it: another surface");
         assert_eq!(stands_over(Vec3::new(0.5, 0.5, 0.70), &face), None, "too far: another surface");
         assert_eq!(stands_over(Vec3::new(1.5, 1.5, 0.10), &face), None, "past its edge");
+    }
+
+    #[test]
+    fn buried_wall_skirts_do_not_fold_floor_and_chamfers_cut_overlapping_strips() {
+        let (x0, y0) = (-1360.0f32, -1400.0f32);
+        // A 9 m2 visible deck at z=0.40 over a GTA deck at z=0.38 extending 2.5 cm past y0 over
+        // the visible 45 deg chamfer (1110-7,8), plus a flat z=0 floor over a buried skirt (1110-3..6).
+        let floor: Vec<Tri> = square(x0 - 2.0, x0 + 5.0, y0 - 2.0, y0 + 5.0, 0.0)
+            .into_iter()
+            .map(|v| Tri { v, material: 1 })
+            .collect();
+        let mut gta = floor.clone();
+        gta.extend(square(x0, x0 + 3.0, y0 - 0.025, y0 + 3.0, 0.38).into_iter().map(|v| Tri { v, material: 1 }));
+        let mut vis = square(x0, x0 + 3.0, y0, y0 + 3.0, 0.40);
+        // 45 deg chamfer (width 4.2 cm < CHAMFER_WIDTH) descending from y0 (z=0.40) to y0-0.03 (z=0.37).
+        let c1 = [[x0, y0 - 0.03, 0.37], [x0 + 3.0, y0 - 0.03, 0.37], [x0 + 3.0, y0, 0.40]];
+        let c2 = [[x0, y0 - 0.03, 0.37], [x0 + 3.0, y0, 0.40], [x0, y0, 0.40]];
+        vis.extend([c1, c2]);
+        // Underground vertical skirt hanging from z=0 down to z=-0.30 beneath the flat GTA floor.
+        let s1 = [[x0, y0 - 0.50, -0.30], [x0 + 3.0, y0 - 0.50, -0.30], [x0 + 3.0, y0 - 0.50, 0.0]];
+        let s2 = [[x0, y0 - 0.50, -0.30], [x0 + 3.0, y0 - 0.50, 0.0], [x0, y0 - 0.50, 0.0]];
+        vis.extend([s1, s2]);
+        let out = run(&mut gta, &[], &vis);
+        let cut_remnants: Vec<_> = out.added.iter().zip(&out.cut).filter(|(_, c)| **c).collect();
+        assert!(cut_remnants.is_empty(), "2.5 cm GTA overhang strip on the visible 45 deg chamfer is dropped: {cut_remnants:?}");
+        for f in &floor {
+            assert!(gta.iter().any(|t| t.v == f.v), "flat floor over buried skirt stays whole: {:?}", f.v);
+        }
     }
 }

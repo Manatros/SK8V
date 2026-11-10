@@ -154,9 +154,17 @@ void ApplyLook(int filter, bool fisheyeWanted, int shake) {
             Call<void>(SET_TIMECYCLE_MODIFIER_STRENGTH, std::clamp(g_filterStrength, 0.0f, 1.0f));
         }
         g_appliedFilter = FilterModifier(filter) ? filter : 0;
+        fisheye::SetFiltered(g_appliedFilter != 0);
+        if (g_detailState) fisheye::DropDetail(), g_detailState = 0;
+        g_stableSince = g_clock;
     }
     const bool fish = g_active && fisheyeWanted && g_fisheyeOk;
-    if (fish != g_appliedFisheye) fisheye::SetEnabled(fish), g_appliedFisheye = fish;
+    if (fish != g_appliedFisheye) {
+        fisheye::SetEnabled(fish);
+        g_appliedFisheye = fish;
+        if (g_detailState) fisheye::DropDetail(), g_detailState = 0;
+        g_stableSince = g_clock;
+    }
     if (shake != g_appliedShake && g_cam) {
         if (shake > 0) Call<void>(SHAKE_CAM, g_cam, "HAND_SHAKE", ShakeAmplitude(shake));
         else Call<void>(STOP_CAM_SHAKING, g_cam, 1);
@@ -377,12 +385,12 @@ void SetCam(float* eye, float* rot, float fov, Clear clear, const float* chest, 
         g_stableSince = g_clock;
         if (g_detailState) fisheye::DropDetail(), g_detailState = 0;
     }
-    // Only a truly still picture: no shake, no filter (its vignette would ring the
-    // middle), no world moving, and the fisheye really drawn this frame.
-    const bool fish = g_appliedFisheye && fisheye::Drawing() && fov >= 119.0f && g_appliedShake == 0 && g_appliedFilter == 0 &&
+    // Only a truly still picture: no shake, no world moving, and the fisheye
+    // really drawn this frame (filtered shots transfer high-frequency detail only).
+    const bool fish = g_appliedFisheye && fisheye::Drawing() && fov >= 119.0f && g_appliedShake == 0 &&
                       g_worldScale <= 0.0f;
     if (!fish && g_detailState) fisheye::DropDetail(), g_detailState = 0;
-    if (fish && still && g_detailState == 0 && g_clock - g_stableSince > 0.3) fisheye::BeginDetail(), g_detailState = 1;
+    if (fish && still && g_detailState == 0 && fisheye::DetailIdle() && g_clock - g_stableSince > 0.3) fisheye::BeginDetail(), g_detailState = 1;
     // GTA says which field of view it rendered: the capture waits for the detail view,
     // the hold ends only once it is back at 120 degrees.
     const float rendered = Call<float>(GET_FINAL_RENDERED_CAM_FOV);
@@ -1271,6 +1279,8 @@ bool EditorTick(int ped, const PadIn& pad, const KeysIn& keys, float dt) {
                       g_mode == Mode::Reel || g_mode == Mode::Loading;
     const int clipIndex = g_mode == Mode::CameraEdit ? g_editClip : g_edit.ClipAt(g_head.time);
     const Clip& clip = g_edit.ClipRef(clipIndex);
+    // The clip's look; no fisheye under a list or prompt (they stay straight).
+    ApplyLook(clip.filter, clip.lens == kLensFisheye && !menu, clip.shake);
     if (s.a) {
         Present(ped, s);
         if (g_mode == Mode::CameraEdit) {
@@ -1284,8 +1294,6 @@ bool EditorTick(int ped, const PadIn& pad, const KeysIn& keys, float dt) {
             AimEdited(s, f.camera, f.p, clip.lens, dt);
         }
     }
-    // The clip's look; no fisheye under a list or prompt (they stay straight).
-    ApplyLook(clip.filter, clip.lens == kLensFisheye && !menu, clip.shake);
     gtaaudio::ReplaySoundAt(GameMsAt(s), g_head.playing ? g_edit.Evaluate(g_head.time).speed : 0.0);
 
     // HUD
@@ -1475,6 +1483,7 @@ bool Enter(int ped) {
     }
     gtaaudio::SetReplayPaused(true);
     g_appliedFilter = 0, g_appliedFisheye = false, g_appliedShake = 0;
+    fisheye::SetFiltered(false);
     ApplyLook(g_filter, g_lens == kLensFisheye, 0);
     g_input.Reset();
     posehook::TakeApplyTime();
@@ -1566,12 +1575,12 @@ bool Tick(int ped, const PadIn& pad, const KeysIn& keys, float dt) {
         }
     }
     g_head.Advance(dt, g_rec.Start(), g_rec.End());
+    ApplyLook(g_filter, g_lens == kLensFisheye, 0);
     const Recording::Sample s = g_rec.At(g_head.time);
     if (s.a) {
         Present(ped, s);
         Aim(s, dt, in);
     }
-    ApplyLook(g_filter, g_lens == kLensFisheye, 0);
     gtaaudio::ReplaySoundAt(GameMsAt(s), SoundRate(g_head, scrubbing));
     InstantHud();
     FlushHud();
@@ -1605,6 +1614,7 @@ void Exit() {
     if (g_appliedShake && g_cam) Call<void>(STOP_CAM_SHAKING, g_cam, 1);
     if (g_appliedFilter) Call<void>(CLEAR_TIMECYCLE_MODIFIER);
     g_appliedFilter = 0, g_appliedShake = 0, g_appliedFisheye = false;
+    fisheye::SetFiltered(false);
     g_active = false;
     g_mode = Mode::Instant;
     Call<void>(SET_TIME_SCALE, 1.0f);

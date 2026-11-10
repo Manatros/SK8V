@@ -1511,9 +1511,35 @@ pub fn bar_top_lines(area: &mut Area, slab_rails: &[Vec<[f32; 3]>], slabs: &[[[f
         let q = a + ab * ((p - a).dot(ab) / ab.length_squared().max(1e-12)).clamp(0.0, 1.0);
         q.distance(p) <= 0.15
     });
+    let mut top_lines: Vec<Vec<Vec3>> = {
+        let quant = |p: Vec3| p.to_array().map(|c| (c * 1e3).round() as i32);
+        let mut counts: rustc_hash::FxHashMap<([i32; 3], [i32; 3]), (usize, Vec3, Vec3)> = Default::default();
+        for t in &tops {
+            for k in 0..3 {
+                let (a, b) = (t[k], t[(k + 1) % 3]);
+                let (qa, qb) = (quant(a), quant(b));
+                let key = if qa <= qb { (qa, qb) } else { (qb, qa) };
+                counts.entry(key).and_modify(|e| e.0 += 1).or_insert((1, a, b));
+            }
+        }
+        // Every open edge of 35 cm or more joins, so a short cap segment continues an
+        // adjacent long one; only lines holding a short segment (which `find_metres`
+        // dropped) are added here, long slabs stay with `slab_rails` (peer review
+        // 2026-11-10, finding 6).
+        let mut lines: Vec<Vec<Vec3>> = counts.into_values()
+            .filter_map(|(n, a, b)| (n == 1 && a.distance(b) >= 0.35).then(|| vec![a, b]))
+            .collect();
+        crate::rails::trim_overlaps(&mut lines);
+        crate::rails::join_ends(&mut lines);
+        crate::rails::dedupe_metres(&mut lines);
+        lines.retain(|r| r.windows(2).map(|w| w[0].distance(w[1])).sum::<f32>() >= 0.61
+            && r.windows(2).any(|w| w[0].distance(w[1]) < 0.61));
+        lines
+    };
+    let mut candidates: Vec<Vec<Vec3>> = slab_rails.iter().map(|r| r.iter().map(|&p| g(p)).collect()).collect();
+    candidates.append(&mut top_lines);
     let mut added: Vec<Vec<Vec3>> = Vec::new();
-    for r in slab_rails {
-        let r: Vec<Vec3> = r.iter().map(|&p| g(p)).collect();
+    for r in candidates {
         let mut run: Vec<Vec3> = Vec::new();
         let mut flush = |run: &mut Vec<Vec3>, have: &mut Vec<(Vec3, Vec3)>| {
             if run.windows(2).map(|w| w[0].distance(w[1])).sum::<f32>() >= 0.5 {
@@ -1595,23 +1621,25 @@ const STACK_TURN: f32 = 20.0 * std::f32::consts::PI / 180.0;
 /// stretches with another rail right above them go.
 fn off_stacked(rails: Vec<Vec<Vec3>>) -> Vec<Vec<Vec3>> {
     let upper = rails.clone();
-    stacked_under(rails, &upper, true)
+    stacked_under(rails, &upper, true, STACK_SIDE, STACK_BELOW)
 }
 
-/// `off_stacked` for `rails` under the separate set `upper` only.
+/// `off_stacked` for `rails` under the separate set `upper` only; reaches
+/// wider and deeper so a leaning guardrail's middle bar and deck lip under
+/// its top bar go too (Vespucci peninsula guardrail, 1110-9).
 fn off_stacked_under(rails: Vec<Vec<Vec3>>, upper: &[Vec<Vec3>]) -> Vec<Vec<Vec3>> {
-    stacked_under(rails, upper, false)
+    stacked_under(rails, upper, false, 0.25, 0.1..=1.2)
 }
 
 /// `same`: `upper` is `rails` itself (a rail never stacks under itself).
-fn stacked_under(rails: Vec<Vec<Vec3>>, upper: &[Vec<Vec3>], same: bool) -> Vec<Vec<Vec3>> {
+fn stacked_under(rails: Vec<Vec<Vec3>>, upper: &[Vec<Vec3>], same: bool, side: f32, below: std::ops::RangeInclusive<f32>) -> Vec<Vec<Vec3>> {
     // Every segment by 1 m cell, with its rail.
     let mut cells: rustc_hash::FxHashMap<(i32, i32), Vec<(usize, Vec3, Vec3)>> = Default::default();
     for (k, r) in upper.iter().enumerate() {
         for w in r.windows(2) {
             let (lo, hi) = (w[0].min(w[1]), w[0].max(w[1]));
-            for x in (lo.x - STACK_SIDE).floor() as i32..=(hi.x + STACK_SIDE).floor() as i32 {
-                for y in (lo.y - STACK_SIDE).floor() as i32..=(hi.y + STACK_SIDE).floor() as i32 {
+            for x in (lo.x - side).floor() as i32..=(hi.x + side).floor() as i32 {
+                for y in (lo.y - side).floor() as i32..=(hi.y + side).floor() as i32 {
                     cells.entry((x, y)).or_default().push((k, w[0], w[1]));
                 }
             }
@@ -1628,7 +1656,7 @@ fn stacked_under(rails: Vec<Vec<Vec3>>, upper: &[Vec<Vec3>], same: bool) -> Vec<
             if d != bevy_math::Vec2::ZERO && e != bevy_math::Vec2::ZERO && d.dot(e).abs() < STACK_TURN.cos() { return false; }
             let t = if ab.length_squared() < 1e-8 { 0.0 } else { ((p.truncate() - a.truncate()).dot(ab) / ab.length_squared()).clamp(0.0, 1.0) };
             let q = a.lerp(b, t);
-            q.truncate().distance(p.truncate()) <= STACK_SIDE && STACK_BELOW.contains(&(q.z - p.z))
+            q.truncate().distance(p.truncate()) <= side && below.contains(&(q.z - p.z))
         }));
         out.extend(cut_where(vec![rail], under));
     }
@@ -3945,5 +3973,36 @@ mod baked_tile_tests {
         assert!(live.triangles.iter().flatten().all(|p| p[0]>=0.));
         assert_eq!(live.rails.len(),1);
         assert_eq!(live.rails[0],[[0.,1.,0.],[1.,1.,0.]]);
+    }
+
+    #[test]
+    fn segmented_guardrail_box_caps_project_onto_bar_top_and_cut_leaning_lower_bars() {
+        let v = Vec3::new;
+        let s = |t: [Vec3; 3]| t.map(|p| coords::to_skate(p).to_array());
+        let k = |p: Vec3| coords::to_skate(p).to_array();
+        let bar = vec![
+            s([v(0., -0.01, 1.0), v(2., -0.01, 1.0), v(2., 0.01, 1.0)]),
+            s([v(0., -0.01, 1.0), v(2., 0.01, 1.0), v(0., 0.01, 1.0)]),
+        ];
+        let mut slabs = Vec::new();
+        // Four 0.50 m box cap segments (< MIN_RAIL = 0.61 m individually, 2.0 m joined, 1110-9).
+        for i in 0..4 {
+            let (x0, x1) = (i as f32 * 0.50, (i + 1) as f32 * 0.50);
+            slabs.extend([
+                [[x0, -0.04, 1.06], [x1, -0.04, 1.06], [x1, 0.04, 1.06]],
+                [[x0, -0.04, 1.06], [x1, 0.04, 1.06], [x0, 0.04, 1.06]],
+            ]);
+        }
+        // A middle bar leaning 0.20 m to the side and 0.40 m below the top bar.
+        let middle = vec![vec![k(v(0., 0.20, 0.60)), k(v(2., 0.20, 0.60))]];
+        let mut a = Area {
+            noses: Vec::new(), center: Vec3::ZERO, triangles: bar.clone(),
+            tags: vec![crate::live::VISBAR_TAG; bar.len()], rails: middle,
+            census: Default::default(), bevels: Default::default(), note: String::new(),
+            bounds: Vec::new(), live_required: false, changed: None, fixed: 0, options: 0,
+            origins: Default::default(),
+        };
+        assert_eq!(bar_top_lines(&mut a, &[], &slabs), 1, "joined 0.50 m cap segments project onto bar_top");
+        assert_eq!(a.rails.len(), 1, "outward-leaning middle bar 0.20 m to the side is cut: {:?}", a.rails);
     }
 }

@@ -154,7 +154,7 @@ const LIPS: Limits = Limits { upward_z: UPWARD_Z, max_slope: MAX_SLOPE, min_slop
 /// slope, too steep for an ordinary lip (`len` is 3D, so n.z decides how far up it runs:
 /// about 72 deg). Level edges stay with `LIPS`. A side panel flush
 /// with the rim shares no edge with it and stands under no probe: the drop decides.
-const RIMS: Limits = Limits { upward_z: 0.30, max_slope: 1.01, min_slope: 0.08, open_needs_support: false };
+const RIMS: Limits = Limits { upward_z: 0.02, max_slope: 1.01, min_slope: 0.08, open_needs_support: false };
 
 /// The side rims of ramps and banks in `tris` (GTA space, metres).
 pub fn find_rims_metres(tris: &[[Vec3; 3]]) -> Vec<Vec<Vec3>> {
@@ -276,7 +276,7 @@ fn find_limited(tris: &[[Vec3; 3]], dirty: &crate::reuse::Dirty, metres: f32, ca
             let rises = across(e).any(|(far, t)| {
                 let from = far - a;
                 let off_edge = from - along * (from.dot(along) / (len * len));
-                t != own_t && off_edge.length() > 1e-3 && from.dot(normal) > CONCAVE_SIN * off_edge.length()
+                t != own_t && off_edge.length() > 1e-3 && from.dot(normal) > 0.75 && from.dot(normal) > CONCAVE_SIN * off_edge.length()
             });
             if rises {
                 reject(focus, metres, a, b, "not convex (ground rises across the edge)");
@@ -291,7 +291,9 @@ fn find_limited(tris: &[[Vec3; 3]], dirty: &crate::reuse::Dirty, metres: f32, ca
                 let other = (tri[1] - tri[0]).cross(tri[2] - tri[0]).normalize_or_zero();
                 t != own_t
                     && along.cross(far - a).dot(along.cross(centroid - a)) < 0.
-                    && normal.z >= 0.35 && other.z >= 0.35
+                    // RIMS reach down to 0.02 (1110-1): the seam test follows, so a
+                    // steep curved wall's facet seam is no rim (peer review 2026-11-10, finding 3).
+                    && normal.z >= limits.upward_z.min(0.35) && other.z >= limits.upward_z.min(0.35)
                     && normal.dot(other) > SEAM_COS
             }) {
                 reject(focus, metres, a, b, "continuous surface facet seam or rounded edge (under 45 degrees)");
@@ -319,16 +321,28 @@ fn find_limited(tris: &[[Vec3; 3]], dirty: &crate::reuse::Dirty, metres: f32, ca
             faces.extend(across(e).map(|(_, t)| t));
             // Two thirds of the samples must pass: stop once that is decided.
             let need = (samples.len() * 2).div_ceil(3);
-            let (mut passing, mut failing) = (0, 0);
-            for &s in samples {
-                if passing >= need || failing > samples.len() - need {
+            let mut passing = 0;
+            let mut passed = [false; 3];
+            for (k, &s) in samples.iter().enumerate() {
+                if passing >= need {
                     break;
                 }
                 if probe.is_lip(a + along * s, out, &faces) {
                     passing += 1;
-                } else {
-                    failing += 1;
+                    passed[k] = true;
                 }
+            }
+            // A tapered curb (1110-11): its drop pinches out toward one end. One
+            // outer sample passing is checked once more just inside it, toward the
+            // middle; the middle sample alone never qualifies (peer review 2026-11-10,
+            // finding 5).
+            if passing == 1 && samples.len() == 3 && len >= MIN_RAIL && across(e).any(|(_, t)| {
+                let tri = tris[t as usize];
+                let other = (tri[1] - tri[0]).cross(tri[2] - tri[0]).normalize_or_zero();
+                t != own_t && other.z.abs() <= 0.2 && a.z.min(b.z) - tri[0].z.min(tri[1].z).min(tri[2].z) >= MIN_DROP
+            }) && ((passed[0] && probe.is_lip(a + along * 0.45, out, &faces))
+                || (passed[2] && probe.is_lip(a + along * 0.55, out, &faces))) {
+                passing = need;
             }
             if passing >= need {
                 let before = lips.len();
@@ -356,7 +370,7 @@ fn find_limited(tris: &[[Vec3; 3]], dirty: &crate::reuse::Dirty, metres: f32, ca
         }
         long
     });
-    let duplicates = dedupe(&mut rails);
+    let duplicates = dedupe_within(&mut rails, CAP_SPAN);
     if rails.len() > MAX_RAILS {
         rails.sort_by(|a, b| polyline_len(b).total_cmp(&polyline_len(a)));
         rails.truncate(MAX_RAILS);
@@ -473,10 +487,14 @@ pub fn dedupe_metres(rails: &mut Vec<Vec<Vec3>>) -> usize {
 }
 
 fn dedupe(rails: &mut Vec<Vec<Vec3>>) -> usize {
+    dedupe_within(rails, DUPLICATE_SPAN)
+}
+
+fn dedupe_within(rails: &mut Vec<Vec<Vec3>>, span: f32) -> usize {
     // GTAxSkate: at least 9 cm (3.5 inches). A faceted tube or a narrow top
     // gave lines 7 cm apart that all survived (2026-10-19 Vespucci drops:
     // three lines per placed rail); trucks span them all.
-    let radius = (2.0 * skate_core::physics::board::RETAIL_WHEEL_RADIUS / INCH).max(DUPLICATE_SPAN);
+    let radius = (2.0 * skate_core::physics::board::RETAIL_WHEEL_RADIUS / INCH).max(span);
     let mut order: Vec<usize> = (0..rails.len()).collect();
     order.sort_by(|&a, &b| polyline_len(&rails[b]).total_cmp(&polyline_len(&rails[a])));
     // Kept segments by grid cell (every cell a segment's padded box touches).
@@ -581,6 +599,10 @@ fn dedupe(rails: &mut Vec<Vec<Vec3>>) -> usize {
 const TAIL_MIN: f32 = 11.8;
 /// Duplicate lines closer than this (inches) are one rail (`dedupe`).
 const DUPLICATE_SPAN: f32 = 3.5;
+/// Both edges of a narrow wall cap found on `tris` collapse to one crown line: the
+/// 1110-14 planter cap's lips lie 10.09 cm (3.97 in) apart in the finder's input,
+/// so 4.1 in (10.4 cm). Lines 4.0 in apart and more stay apart in `dedupe`.
+const CAP_SPAN: f32 = 4.1;
 /// Share of a line (percent) on a kept rail that makes it a duplicate.
 const COVERED_PERCENT: usize = 75;
 
@@ -1159,6 +1181,11 @@ impl Probe<'_> {
                         && f <= t1
                         && t[0].z.max(t[1].z).max(t[2].z) >= origin.z
                         && t[0].z.min(t[1].z).min(t[2].z) <= origin.z + BURIED_CLEARANCE
+                        && !(k > 0 && {
+                            let mut n = (t[1] - t[0]).cross(t[2] - t[0]).normalize_or_zero();
+                            if n.z < 0.0 { n = -n; }
+                            n.z >= UPWARD_Z && (p + Vec3::Z * 0.5 - t[0]).dot(n) >= 0.0
+                        })
                         && ray_triangle(origin, Vec3::Z, BURIED_CLEARANCE, t)
                 })
             })
@@ -2006,6 +2033,58 @@ mod tests {
         dedupe_metres(&mut ledge);
         assert_eq!(ledge.len(), 2);
         assert!(ledge.iter().any(|r| r.iter().all(|p| p.y.abs() < 1e-4)));
+    }
+
+    #[test]
+    fn steep_quarterpipe_rim_and_sloped_walkable_curb_keep_their_rails() {
+        // Steep upper transition facet (n.z ~ 0.16, 81 deg) whose skewed hip rim rises from z=0.40 to 1.20 (1110-1).
+        let mut qp: Vec<[Vec3; 3]> = level(-5., -5., 5., 5., 0.).to_vec();
+        let a0 = Vec3::new(-1.0, 0.0, 0.40);
+        let b0 = Vec3::new(-0.15, -0.13, 1.20);
+        let a1 = Vec3::new(1.0, 0.0, 0.40);
+        let b1 = Vec3::new(1.85, -0.13, 1.20);
+        qp.extend([[a0, b1, a1], [a0, b0, b1]]);
+        let rim = find_rims_metres(&qp);
+        assert!(!rim.is_empty(), "steep quarterpipe side rim keeps its rail: {rim:?}");
+
+        // A 10 cm (3.94 in) planter wall cap with a 15% longitudinal slope (1110-12, 1110-14):
+        // its rising walkable top must not self-bury on side rays, and its two lips collapse to one.
+        let mut cap: Vec<[Vec3; 3]> = level(-5., -5., 5., 5., 0.).to_vec();
+        let (z0, z1) = (0.35, 0.80);
+        let (tl0, tr0, tl1, tr1) = (
+            Vec3::new(-1.5, 0.0, z0), Vec3::new(-1.5, 0.10, z0),
+            Vec3::new(1.5, 0.0, z1), Vec3::new(1.5, 0.10, z1),
+        );
+        let (bl0, br0, bl1, br1) = (
+            Vec3::new(-1.5, 0.0, 0.0), Vec3::new(-1.5, 0.10, 0.0),
+            Vec3::new(1.5, 0.0, 0.0), Vec3::new(1.5, 0.10, 0.0),
+        );
+        cap.extend([[tl0, tr1, tr0], [tl0, tl1, tr1]]);
+        cap.extend([[bl0, tl0, tl1], [bl0, tl1, bl1]]);
+        cap.extend([[tr0, br0, br1], [tr0, br1, tr1]]);
+        let (rails, _) = find_metres(&cap);
+        assert_eq!(rails.len(), 1, "10 cm sloped wall cap collapses to one unburied crown line: {rails:?}");
+    }
+
+    #[test]
+    fn sub_inch_t_junction_bow_and_tapered_curb_pinch_keep_their_curb_lips() {
+        // A curb top chord from x=-1.5 to 1.5 whose split riser bows 1 cm in front at x=0 (1110-13).
+        let mut bowed: Vec<[Vec3; 3]> = level(-5., -5., 5., 5., 0.).to_vec();
+        let (a, b, c, d) = (
+            Vec3::new(-1.5, 0.0, 0.25), Vec3::new(1.5, 0.0, 0.25),
+            Vec3::new(1.5, 1.0, 0.25), Vec3::new(-1.5, 1.0, 0.25),
+        );
+        bowed.extend([[a, b, c], [a, c, d]]);
+        let mid_top = Vec3::new(0.0, -0.01, 0.25);
+        let mid_bot = Vec3::new(0.0, -0.01, 0.0);
+        let (a_bot, b_bot) = (Vec3::new(-1.5, 0.0, 0.0), Vec3::new(1.5, 0.0, 0.0));
+        bowed.extend([
+            [a_bot, mid_bot, mid_top], [a_bot, mid_top, a],
+            [mid_bot, b_bot, b], [mid_bot, b, mid_top],
+        ]);
+        let (rails, _) = find_metres(&bowed);
+        assert!(rails.iter().any(|r| polyline_len(r) > 2.5 && r.iter().all(|p| p.y.abs() < 0.02)),
+            "1 cm T-junction bow keeps its curb lip: {rails:?}");
     }
 
 }

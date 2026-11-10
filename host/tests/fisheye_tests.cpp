@@ -154,6 +154,47 @@ int main() {
         assert(!fisheye::DetailReady());
     }
 
+    {
+        // Filtered detail render: the 120-degree view supplies the low-frequency colour
+        // and vignette (here uniform mid-grey 128), while the 60-degree view has a dark
+        // vignette offset (base 60) plus a sharp bright stripe at the centre (x = 128).
+        // With SetFiltered(true), a smooth region inside the detail window keeps the
+        // 120-degree grey (~128, not 60), while the centre stripe transfers its contrast.
+        fisheye::SetFiltered(true);
+        assert(!fisheye::DetailIdle());
+        std::vector<std::uint32_t> wideGrey(256 * 144, 0xFF808080u);
+        ctx->UpdateSubresource(back, 0, nullptr, wideGrey.data(), 256 * 4, 0);
+        fisheye::Present(sc);
+        assert(fisheye::DetailIdle());
+
+        std::vector<std::uint32_t> detailFiltered(256 * 144, 0xFF3C3C3Cu);  // darker base (60)
+        for (int y = 0; y < 144; ++y) detailFiltered[y * 256 + 128] = 0xFFDCDCDCu;  // bright 1 px stripe (220)
+        fisheye::BeginDetail();
+        fisheye::ArmDetail();
+        for (int i = 0; i < 6 && !fisheye::DetailCaptured(); ++i) {
+            ctx->UpdateSubresource(back, 0, nullptr, detailFiltered.data(), 256 * 4, 0);
+            fisheye::Present(sc);
+        }
+        assert(fisheye::DetailCaptured());
+        fisheye::UseDetail();
+        for (int i = 0; i < 5; ++i) {
+            ctx->UpdateSubresource(back, 0, nullptr, wideGrey.data(), 256 * 4, 0);
+            fisheye::Present(sc);
+        }
+        assert(fisheye::DetailReady());
+        ctx->CopyResource(staging, back);
+        D3D11_MAPPED_SUBRESOURCE d3{};
+        ctx->Map(staging, 0, D3D11_MAP_READ, 0, &d3);
+        const auto* q = static_cast<const std::uint32_t*>(d3.pData);
+        const int smooth = static_cast<int>(q[72 * (d3.RowPitch / 4) + 110] & 0xFFu);
+        const int stripe = static_cast<int>(q[72 * (d3.RowPitch / 4) + 128] & 0xFFu);
+        ctx->Unmap(staging, 0);
+        assert(smooth >= 118 && smooth <= 138);  // keeps the 120-degree frame's 128 level, not 60
+        assert(stripe > smooth + 40);            // transfers the sharp stripe from the 60-degree view
+        fisheye::DropDetail();
+        fisheye::SetFiltered(false);
+    }
+
     fisheye::SetEnabled(false);
     fisheye::Release();
     staging->Release();

@@ -59,6 +59,8 @@ void Release();
 // the camera back to 120 and calls Use; Drop forgets the detail (the camera
 // moved, play resumed). Ready: the sharp middle is shown.
 constexpr float kDetailFov = 60.0f;
+void SetFiltered(bool on);
+bool DetailIdle();
 void BeginDetail();
 // The script saw GTA render at kDetailFov (GET_FINAL_RENDERED_CAM_FOV): take the next-but-two frame.
 void ArmDetail();
