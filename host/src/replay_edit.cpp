@@ -62,6 +62,20 @@ void Edit::Reset(double start, double end) {
     edited_ = false;
 }
 
+void Edit::Restore(double start, double end, double in, double out, const std::vector<double>& markers,
+                   const std::vector<Clip>& clips) {
+    Reset(start, end);
+    bool ok = in >= start - 1e-9 && out <= end + 1e-9 && out - in >= kMinGap && clips.size() == markers.size() + 1 &&
+              static_cast<int>(markers.size()) <= kMaxMarkers;
+    for (std::size_t i = 0; ok && i < markers.size(); ++i)
+        ok = markers[i] > in && markers[i] < out && (i == 0 || markers[i] > markers[i - 1]);
+    if (!ok) return;
+    in_ = in, out_ = out;
+    markers_ = markers;
+    clips_ = clips;
+    edited_ = true;
+}
+
 EditResult Edit::SetIn(double t) {
     t = std::clamp(t, start_, out_ - kMinGap);
     // Markers at or before the new In go, with the clips left of them.

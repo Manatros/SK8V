@@ -43,5 +43,9 @@ void Exit();
 // The replay draws its own HUD (Instant Replay's status, the editor's timeline,
 // lists and prompts): with GTA, or unbent over the fisheye by its overlay.
 void SetKeyboard(bool keyboard);
+// F10 "Saved replays": the next replay opens on the list (design 2026-11-09-skate-replay-editor P3).
+void OpenSavedReplaysOnEnter();
+// Skate's replay editor texts (tools/prepare-replay-text.py); missing: short English.
+void LoadTexts(const std::wstring& path);
 
 }  // namespace replay

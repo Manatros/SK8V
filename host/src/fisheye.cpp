@@ -6,7 +6,11 @@
 #include <cstdint>
 #include <cstring>
 #include <mutex>
+#include <thread>
 #include <vector>
+
+#include <objbase.h>
+#include <wincodec.h>
 
 #include "d3d11_saved_state.h"
 #include "host_util.h"
@@ -22,6 +26,12 @@ constexpr float kBands[2][2] = {{0.0f, 0.2f}, {0.8f, 1.0f}};
 std::atomic<bool> g_enabled{false};
 std::atomic<bool> g_failed{false};
 std::atomic<std::uint64_t> g_drawnAt{0};  // GetTickCount64 of the last bent frame
+std::atomic<std::uint64_t> g_presents{0};
+// The photo: requested by the script thread, taken by the render thread, written by a worker.
+std::atomic<int> g_photoState{0};
+std::atomic<std::uint64_t> g_photoAt{0};
+std::mutex g_photoLock;
+std::wstring g_photoPath;
 LogFn g_log = nullptr;
 
 // The HUD as the script thread last set it.
@@ -411,8 +421,21 @@ void SourcePoint(float x, float y, float w, float h, float vfov, float& sx, floa
     sy = (qy * 0.5f + 0.5f) * h;
 }
 
+namespace {
+void Bend(IDXGISwapChain* sc);
+void Capture(IDXGISwapChain* sc);
+}  // namespace
+
 void Present(IDXGISwapChain* sc) {
-    if (!g_enabled.load() || g_failed.load() || !sc) return;
+    if (!sc) return;
+    const std::uint64_t n = ++g_presents;
+    if (g_enabled.load() && !g_failed.load()) Bend(sc);
+    if (g_photoState.load() == 1 && g_photoAt.load() && n >= g_photoAt.load()) Capture(sc);
+}
+
+namespace {
+
+void Bend(IDXGISwapChain* sc) {
     ID3D11Device* device = nullptr;
     if (FAILED(sc->GetDevice(__uuidof(ID3D11Device), reinterpret_cast<void**>(&device)))) return;
     const bool ready = Init(device);
@@ -510,6 +533,117 @@ void Present(IDXGISwapChain* sc) {
     saved.Restore(c);
     rtv->Release();
     back->Release();
+}
+
+// The presented frame into a PNG on a worker thread (the render thread only copies it).
+void Capture(IDXGISwapChain* sc) {
+    g_photoAt = 0;
+    auto fail = [](const char* why) {
+        util::Logf(g_log, "photo: %s", why);
+        g_photoState = 3;
+    };
+    ID3D11Device* device = nullptr;
+    if (FAILED(sc->GetDevice(__uuidof(ID3D11Device), reinterpret_cast<void**>(&device)))) return fail("no device");
+    const bool ready = Init(device);
+    device->Release();
+    if (!ready) return fail("no GPU objects");
+    ID3D11Texture2D* back = nullptr;
+    if (FAILED(sc->GetBuffer(0, __uuidof(ID3D11Texture2D), reinterpret_cast<void**>(&back)))) return fail("no backbuffer");
+    D3D11_TEXTURE2D_DESC d{};
+    back->GetDesc(&d);
+    DXGI_FORMAT typeless, unorm;
+    if (d.SampleDesc.Count != 1 || !Typed(d.Format, typeless, unorm)) {
+        back->Release();
+        return fail("the backbuffer format is not supported");
+    }
+    d.Usage = D3D11_USAGE_STAGING;
+    d.BindFlags = 0;
+    d.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+    d.MiscFlags = 0;
+    d.Format = unorm;
+    ID3D11Texture2D* staging = nullptr;
+    if (FAILED(gpu.device->CreateTexture2D(&d, nullptr, &staging))) {
+        back->Release();
+        return fail("no staging texture");
+    }
+    gpu.ctx->CopyResource(staging, back);
+    back->Release();
+    D3D11_MAPPED_SUBRESOURCE m{};
+    if (FAILED(gpu.ctx->Map(staging, 0, D3D11_MAP_READ, 0, &m))) {
+        staging->Release();
+        return fail("could not read the frame");
+    }
+    // Only the raw rows here (render thread); the worker converts them.
+    std::vector<std::uint32_t> raw(static_cast<std::size_t>(d.Width) * d.Height);
+    for (UINT y = 0; y < d.Height; ++y)
+        std::memcpy(&raw[static_cast<std::size_t>(y) * d.Width], static_cast<const std::uint8_t*>(m.pData) + static_cast<std::size_t>(y) * m.RowPitch,
+                    static_cast<std::size_t>(d.Width) * 4);
+    gpu.ctx->Unmap(staging, 0);
+    staging->Release();
+    std::wstring path;
+    {
+        std::lock_guard<std::mutex> lock(g_photoLock);
+        path = g_photoPath;
+    }
+    const UINT w = d.Width, h = d.Height;
+    std::thread([raw = std::move(raw), w, h, path, unorm] {
+        std::vector<unsigned char> pixels(static_cast<std::size_t>(w) * h * 3);
+        unsigned char* o = pixels.data();
+        for (std::uint32_t p : raw) {
+            if (unorm == DXGI_FORMAT_B8G8R8A8_UNORM) o[0] = p & 0xFF, o[1] = (p >> 8) & 0xFF, o[2] = (p >> 16) & 0xFF;
+            else if (unorm == DXGI_FORMAT_R8G8B8A8_UNORM) o[0] = (p >> 16) & 0xFF, o[1] = (p >> 8) & 0xFF, o[2] = p & 0xFF;
+            else o[0] = static_cast<unsigned char>(((p >> 20) & 0x3FF) >> 2), o[1] = static_cast<unsigned char>(((p >> 10) & 0x3FF) >> 2),
+                 o[2] = static_cast<unsigned char>((p & 0x3FF) >> 2);  // 10-bit
+            o += 3;
+        }
+        const bool ok = WritePng(path, pixels.data(), w, h);
+        util::Logf(g_log, ok ? "photo: saved %ls" : "photo: could not write %ls", path.c_str());
+        g_photoState = ok ? 2 : 3;
+    }).detach();
+}
+
+}  // namespace
+
+void RequestPhoto(const std::wstring& path) {
+    {
+        std::lock_guard<std::mutex> lock(g_photoLock);
+        g_photoPath = path;
+    }
+    g_photoState = 1;
+    g_photoAt = g_presents.load() + 3;  // GTA presents a frame or two after the script drew it
+}
+
+int PhotoState() { return g_photoState.load(); }
+void CancelPhoto() {
+    if (g_photoState.load() == 1 && g_photoAt.exchange(0)) g_photoState = 0;  // not taken yet (taken: the writer finishes it)
+}
+void ResetPhoto() {
+    if (g_photoState.load() != 1) g_photoState = 0;
+}
+
+bool WritePng(const std::wstring& path, const unsigned char* bgr, unsigned width, unsigned height) {
+    const HRESULT init = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+    bool ok = false;
+    IWICImagingFactory* factory = nullptr;
+    IWICStream* stream = nullptr;
+    IWICBitmapEncoder* encoder = nullptr;
+    IWICBitmapFrameEncode* frame = nullptr;
+    WICPixelFormatGUID format = GUID_WICPixelFormat24bppBGR;
+    if (SUCCEEDED(CoCreateInstance(CLSID_WICImagingFactory, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&factory))) &&
+        SUCCEEDED(factory->CreateStream(&stream)) && SUCCEEDED(stream->InitializeFromFilename(path.c_str(), GENERIC_WRITE)) &&
+        SUCCEEDED(factory->CreateEncoder(GUID_ContainerFormatPng, nullptr, &encoder)) &&
+        SUCCEEDED(encoder->Initialize(stream, WICBitmapEncoderNoCache)) && SUCCEEDED(encoder->CreateNewFrame(&frame, nullptr)) &&
+        SUCCEEDED(frame->Initialize(nullptr)) && SUCCEEDED(frame->SetSize(width, height)) &&
+        SUCCEEDED(frame->SetPixelFormat(&format)) && format == GUID_WICPixelFormat24bppBGR &&
+        SUCCEEDED(frame->WritePixels(height, width * 3, width * 3 * height, const_cast<BYTE*>(bgr))) && SUCCEEDED(frame->Commit()) &&
+        SUCCEEDED(encoder->Commit()))
+        ok = true;
+    if (frame) frame->Release();
+    if (encoder) encoder->Release();
+    if (stream) stream->Release();
+    if (factory) factory->Release();
+    if (SUCCEEDED(init)) CoUninitialize();
+    return ok;
 }
 
 void Release() {

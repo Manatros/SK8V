@@ -33,7 +33,7 @@ RPF = 'sk8v-rpf.exe'
 STEPS = {'disc': (20, 'Reading the Skate 3 disc'), 'convert': (17, 'Converting Skate 3 data'),
          'audio': (17, 'Converting Skate 3 audio'), 'audio-tuning': (1, 'Reading audio tuning'),
          'hom-hud': (5, 'Preparing the Hall of Meat HUD'), 'hom-xray': (1, 'Preparing the x-ray view'),
-         'board': (1, 'Preparing the board'), 'trick-analyser': (1, 'Preparing the Trick Analyzer'), 'gta-vehicles': (3, 'Reading GTA V vehicles'),
+         'board': (1, 'Preparing the board'), 'trick-analyser': (1, 'Preparing the Trick Analyzer'), 'replay-text': (1, 'Reading the replay editor texts'), 'gta-vehicles': (3, 'Reading GTA V vehicles'),
          'world': (30, 'Building world collision'), 'peds': (5, 'Reading GTA V characters'), 'live-clip': (4, 'Building the board animation pack'),
          'wheel-icon': (2, 'Adding the weapon wheel icon'), 'board-native': (3, 'Building the GTA board model'),
          'ped-colliders': (2, 'Building character collision'), 'verify': (1, 'Checking the prepared data'),
@@ -100,6 +100,7 @@ class Prepare:
             ('trick-analyser', 'skate', ['prepare-hom-hud.py'], lambda: py(
                 'prepare-hom-hud.py', '--game', self.disc, '--assets', self.assets, '--movie', 'trickanalyser')),
             ('central-hud', 'skate', ['prepare-hom-hud.py'], self.stage_central_hud),
+            ('replay-text', 'skate', ['prepare-replay-text.py'], self.stage_replay_text),
             ('board-native', 'join', ['prepare-board-native.py'], self.stage_board_native),
             ('ped-colliders', 'join', ['prepare-ped-colliders.py', 'ped_collider_templates.py'], self.stage_ped_colliders),
             ('gta-vehicles', 'gta', ['gta_extract.py', 'build-vehicle-masses.py'], self.stage_vehicles),
@@ -144,6 +145,14 @@ class Prepare:
             py('prepare-hom-hud.py', '--game', self.disc, '--assets', self.assets, '--movie', 'hudcentral')
         except Exception as e:
             print(f'centre popups skipped (GTA notices stay): {e}')
+
+    def stage_replay_text(self):
+        # Skate's replay editor texts (help, prompts): a failure keeps the
+        # replay's own short English instead of stopping the setup.
+        try:
+            py('prepare-replay-text.py', '--game', self.disc, '--assets', self.assets)
+        except Exception as e:
+            print(f'replay editor texts skipped (short English stays): {e}')
 
     def stage_ped_colliders(self):
         src = self.work / 'ped-colliders'

@@ -4,7 +4,16 @@
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <atomic>
+#include <ctime>
+#include <fstream>
+#include <iterator>
+#include <map>
+#include <thread>
 #include <utility>
+
+#include <windows.h>
+#include <shlobj.h>
 
 #include "board_native.h"
 #include "board_parts.h"
@@ -15,6 +24,7 @@
 #include "pose_math.h"
 #include "replay_edit.h"
 #include "replay_logic.h"
+#include "replay_store.h"
 
 namespace replay {
 namespace {
@@ -29,8 +39,8 @@ enum Camera { Recorded, Follow, Tripod, Free, Filmer, Orbit, Static, kCameras };
 constexpr const char* kCameraNames[kCameras] = {"Recorded", "Follow", "Tripod", "Free", "Filmer", "Orbit", "Static"};
 
 // Skate 3's editor (design 2026-11-09-skate-replay-editor).
-enum class Mode { Instant, Timeline, EditMenu, CameraEdit, Finished, Prompt };
-enum class PromptAction { None, DeleteMarker, ResetTimeline, ChangeCamera, CancelCameraEdit };
+enum class Mode { Instant, Timeline, EditMenu, CameraEdit, Finished, Prompt, Help, Reel, Loading };
+enum class PromptAction { None, PlaceMarker, DeleteMarker, DeleteKey, ResetTimeline, ChangeCamera, CancelCameraEdit, SavePhoto, SaveReplay, DeleteSaved };
 
 void (*g_log)(const char*) = nullptr;
 bool g_enabled = true;
@@ -87,6 +97,34 @@ std::string g_notice;        // Skate's short messages ("Too close ..."), shown 
 double g_noticeUntil = 0.0;
 double g_clock = 0.0;        // real seconds in the replay
 bool g_leaveBlock = false;   // Instant Replay ignores the leave buttons until they are let go
+int g_promptPed = 0;         // the ped for actions a prompt starts
+// Skate's texts, prepared from the player's game (replay-text.txt); our short English otherwise.
+std::map<std::string, std::string> g_textTable;
+// Photos and saved replays (P2c, P3).
+bool g_photoTaking = false;
+double g_photoSince = 0.0;
+std::atomic<int> g_saveState{0};  // 0 idle, 1 writing, 2 saved, 3 failed
+std::vector<SavedInfo> g_reel;
+int g_reelSel = 0;
+Mode g_reelBack = Mode::Finished;
+bool g_openReel = false;          // F10 "Saved replays": the replay opens on the list
+DWORD g_openReelAt = 0;           // ... when the replay opens within 10 s of the request
+bool g_exitAfterLoad = false;     // "Exit replay" from a saved replay: leave once the skater's area is back
+DWORD g_graceUntil = 0;           // after a forced exit from a saved replay: invincible while the area streams in
+bool g_graceInvincible = false;
+bool g_loaded = false;            // a saved replay plays; the live recording waits in g_liveRec
+Recording g_liveRec;
+Edit g_liveEdit;
+bool g_liveEditValid = false;
+double g_liveTime = 0.0;
+bool g_invincibleWas = false;
+int g_loadStep = 0;               // Loading: 0 fade out, 1 scene loading
+double g_loadUntil = 0.0;
+float g_loadAt[3] = {};
+Mode g_afterLoad = Mode::Timeline;
+std::vector<std::pair<std::string, std::string>> g_help;  // pages: title, text
+int g_helpPage = 0;
+Mode g_helpBack = Mode::Timeline;
 bool g_exitPending = false;  // "Exit replay" chosen: leave once A/Enter is let go
 bool g_camChanged = false;   // camera mode: something was set (Cancel asks only then)
 float g_followHeading = 0.0f;  // the editor's Follow cameras: a steady heading (radians)
@@ -151,7 +189,32 @@ std::string Clock(double s) {
     return t;
 }
 
-void Notice(const char* text) { g_notice = text, g_noticeUntil = g_clock + 2.5; }
+void Notice(const std::string& text) { g_notice = text, g_noticeUntil = g_clock + 3.0; }
+
+std::string T(const char* id, const char* fallback) {
+    const auto it = g_textTable.find(id);
+    return it != g_textTable.end() ? it->second : fallback;
+}
+
+// Documents\GTAxSkate\<sub>\ (made when missing); empty when Documents is unknown.
+std::wstring Folder(const wchar_t* sub) {
+    wchar_t docs[MAX_PATH]{};
+    if (FAILED(SHGetFolderPathW(nullptr, CSIDL_PERSONAL, nullptr, 0, docs))) return {};
+    std::wstring dir = std::wstring(docs) + L"\\GTAxSkate\\";
+    CreateDirectoryW(dir.c_str(), nullptr);
+    dir += sub;
+    dir += L"\\";
+    CreateDirectoryW(dir.c_str(), nullptr);
+    return dir;
+}
+
+std::wstring Stamp(const wchar_t* ext) {
+    SYSTEMTIME t;
+    GetLocalTime(&t);
+    wchar_t name[64];
+    swprintf(name, 64, L"GTAxSkate-%04u%02u%02u-%02u%02u%02u-%03u%s", t.wYear, t.wMonth, t.wDay, t.wHour, t.wMinute, t.wSecond, t.wMilliseconds, ext);
+    return name;
+}
 
 // ---- presentation -----------------------------------------------------------
 
@@ -476,13 +539,255 @@ void PromptBox() {
     Txt(g_keyboard ? "Enter yes   Backspace no" : "A yes   B no", 0.5f, 0.585f, 0.32f, true);
 }
 
+// ---- help, photos, saved replays ------------------------------------------------
+
+// Skate's help pages ("^" line breaks) for the timeline, the Edit Menu and each camera.
+void OpenHelp(const std::vector<std::pair<const char*, const char*>>& ids, Mode back) {
+    g_help.clear();
+    for (const auto& [title, text] : ids) {
+        const std::string fallbackTitle = "Help";
+        g_help.emplace_back(T(title, fallbackTitle.c_str()), T(text, "Skate's help text is prepared at setup (Reading the replay editor texts)."));
+    }
+    g_helpPage = 0;
+    g_helpBack = back;
+    g_hudHidden = false;
+    g_mode = Mode::Help;
+}
+
+void HelpForTimeline() {
+    OpenHelp({{"ID_REPLAYEDITOR_HELP_TEXT_INSTANTREPLAY_TITLE", "ID_REPLAYEDITOR_HELP_TEXT_INSTANTREPLAY1"},
+              {"ID_REPLAYEDITOR_HELP_TEXT_INSTANTREPLAY_TITLE", "ID_REPLAYEDITOR_HELP_TEXT_INSTANTREPLAY2"},
+              {"ID_REPLAYEDITOR_HELP_TEXT_MAINTIMELINE_TITLE", "ID_REPLAYEDITOR_HELP_TEXT_MAINTIMELINE1"},
+              {"ID_REPLAYEDITOR_HELP_TEXT_MAINTIMELINE_TITLE", "ID_REPLAYEDITOR_HELP_TEXT_MAINTIMELINE2"}},
+             Mode::Finished);
+}
+
+void HelpForCamera(CameraKind k, Mode back) {
+    std::vector<std::pair<const char*, const char*>> ids = {{"ID_REPLAYEDITOR_HELP_TEXT_EDITMENU_TITLE", "ID_REPLAYEDITOR_HELP_TEXT_EDITMENU1"},
+                                                            {"ID_REPLAYEDITOR_HELP_TEXT_EDITMENU_TITLE", "ID_REPLAYEDITOR_HELP_TEXT_EDITMENU2"}};
+    switch (k) {
+    case CameraKind::Game: ids.push_back({"ID_REPLAYEDITOR_HELP_TEXT_GAMECAMERA_TITLE", "ID_REPLAYEDITOR_HELP_TEXT_GAMECAMERA"}); break;
+    case CameraKind::Follow: ids.push_back({"ID_REPLAYEDITOR_HELP_TEXT_FOLLOWCAMERA_TITLE", "ID_REPLAYEDITOR_HELP_TEXT_FOLLOWCAMERA"}); break;
+    case CameraKind::Tripod: ids.push_back({"ID_REPLAYEDITOR_HELP_TEXT_TRIPODCAMERA_TITLE", "ID_REPLAYEDITOR_HELP_TEXT_TRIPODCAMERA"}); break;
+    case CameraKind::Free: ids.push_back({"ID_REPLAYEDITOR_HELP_TEXT_FREECAMERA_TITLE", "ID_REPLAYEDITOR_HELP_TEXT_FREECAMERA"}); break;
+    case CameraKind::AdvFollow:
+        ids.push_back({"ID_REPLAYEDITOR_HELP_TEXT_FOLLOWCAMERA_ADVANCED_TITLE", "ID_REPLAYEDITOR_HELP_TEXT_FOLLOWCAMERA_ADVANCED1"});
+        ids.push_back({"ID_REPLAYEDITOR_HELP_TEXT_FOLLOWCAMERA_ADVANCED_TITLE", "ID_REPLAYEDITOR_HELP_TEXT_FOLLOWCAMERA_ADVANCED2"});
+        break;
+    case CameraKind::AdvTripod:
+        ids.push_back({"ID_REPLAYEDITOR_HELP_TEXT_TRIPODCAMERA_ADVANCED_TITLE", "ID_REPLAYEDITOR_HELP_TEXT_TRIPODCAMERA_ADVANCED1"});
+        ids.push_back({"ID_REPLAYEDITOR_HELP_TEXT_TRIPODCAMERA_ADVANCED_TITLE", "ID_REPLAYEDITOR_HELP_TEXT_TRIPODCAMERA_ADVANCED2"});
+        break;
+    default:
+        ids.push_back({"ID_REPLAYEDITOR_HELP_TEXT_FREECAMERA_ADVANCED_TITLE", "ID_REPLAYEDITOR_HELP_TEXT_FREECAMERA_ADVANCED1"});
+        ids.push_back({"ID_REPLAYEDITOR_HELP_TEXT_FREECAMERA_ADVANCED_TITLE", "ID_REPLAYEDITOR_HELP_TEXT_FREECAMERA_ADVANCED2"});
+        break;
+    }
+    OpenHelp(ids, back);
+}
+
+void HelpBox() {
+    Rect(0.12f, 0.14f, 0.88f, 0.86f, 0.0f, 0.0f, 0.0f, 0.9f);
+    Rect(0.12f, 0.14f, 0.88f, 0.145f, 1.0f, 0.85f, 0.1f, 1.0f);
+    if (g_help.empty()) return;
+    const auto& [title, text] = g_help[static_cast<std::size_t>(g_helpPage)];
+    Txt(title, 0.5f, 0.155f, 0.45f, true);
+    std::vector<std::string> lines;
+    std::string cur;
+    for (std::size_t i = 0; i <= text.size(); ++i) {
+        const char ch = i < text.size() ? text[i] : '^';
+        if (ch == '^' || (ch == ' ' && cur.size() > 92)) {
+            lines.push_back(cur);
+            cur.clear();
+            continue;
+        }
+        cur += ch;
+    }
+    for (std::size_t i = 0; i < lines.size() && i < 18; ++i) Txt(lines[i], 0.14f, 0.2f + 0.034f * static_cast<float>(i), 0.3f);
+    char foot[96];
+    std::snprintf(foot, sizeof(foot), "%d / %d     %s", g_helpPage + 1, static_cast<int>(g_help.size()),
+                  g_keyboard ? "Enter next page   Backspace close" : "A next page   B close");
+    Txt(foot, 0.5f, 0.82f, 0.32f, true);
+}
+
+void TakePhoto() {
+    const std::wstring dir = Folder(L"Photos");
+    if (dir.empty()) return Notice("The photo could not be saved (no Documents folder).");
+    fisheye::RequestPhoto(dir + Stamp(L".png"));
+    g_photoTaking = true;
+    g_photoSince = g_clock;
+    g_head.playing = false;
+}
+
+void PollPhoto() {
+    if (!g_photoTaking) return;
+    const int state = fisheye::PhotoState();
+    if (state == 2) Notice(T("ID_REPLAY_EDITOR_SAVE_PHOTO_COMPLETE", "Your photograph has been saved successfully.") + " (Documents\\GTAxSkate\\Photos)");
+    else if (state == 3 || g_clock - g_photoSince > 6.0) fisheye::CancelPhoto(), Notice("The photo could not be saved.");
+    else return;
+    fisheye::ResetPhoto();
+    g_photoTaking = false;
+}
+
+// Skate's "Save Replay": In..Out (and half a second around it), the edit and the sound.
+void SaveReplay(int ped) {
+    if (g_saveState.load() == 1) return Notice("A replay is still being saved.");
+    const std::wstring dir = Folder(L"Replays");
+    if (dir.empty()) return Notice("The replay could not be saved (no Documents folder).");
+    SavedReplay s;
+    s.modelHash = static_cast<std::uint32_t>(Call<int>(GET_ENTITY_MODEL, ped));
+    s.savedUnix = static_cast<std::uint64_t>(std::time(nullptr));
+    const double from = std::max(g_rec.Start(), g_edit.In() - 0.5), to = std::min(g_rec.End(), g_edit.Out() + 0.5);
+    double t0 = -1.0;
+    for (std::size_t i = 0; i < g_rec.Size(); ++i) {
+        const Frame& f = g_rec.Get(i);
+        if (f.time < from - 1e-9 || f.time > to + 1e-9) continue;
+        if (t0 < 0.0) t0 = f.time;
+        s.frames.push_back(f);
+        s.frames.back().time = f.time - t0;
+    }
+    if (s.frames.size() < 2) return Notice("Nothing to save.");
+    s.in = g_edit.In() - t0, s.out = g_edit.Out() - t0;
+    for (double m : g_edit.Markers()) s.markers.push_back(m - t0);
+    s.clips = g_edit.Clips();
+    for (Clip& c : s.clips)
+        for (Key& k : c.keys) k.time -= t0;
+    gtaaudio::ReplaySoundCopy(s.frames.front().gameMs, s.frames.back().gameMs + 50, s.pcm, s.soundStartMs);
+    std::vector<std::uint8_t> bytes = Serialize(s);
+    const std::wstring path = dir + Stamp(L".svreplay");
+    g_saveState = 1;
+    std::thread([bytes = std::move(bytes), path] {
+        const std::wstring part = path + L".part";
+        bool ok = false;
+        {
+            std::ofstream f(part, std::ios::binary);
+            ok = f.write(reinterpret_cast<const char*>(bytes.data()), static_cast<std::streamsize>(bytes.size())).good();
+        }
+        ok = ok && MoveFileExW(part.c_str(), path.c_str(), MOVEFILE_REPLACE_EXISTING);
+        if (!ok) DeleteFileW(part.c_str());
+        g_saveState = ok ? 2 : 3;
+    }).detach();
+}
+
+void PollSave() {
+    const int state = g_saveState.load();
+    if (state == 2) Notice("Save successful. Open it from Saved Replays (Documents\\GTAxSkate\\Replays).");
+    if (state == 3) Notice("The replay could not be saved.");
+    if (state >= 2) g_saveState = 0;
+}
+
+void LoadReel() {
+    g_reel.clear();
+    const std::wstring dir = Folder(L"Replays");
+    WIN32_FIND_DATAW fd;
+    HANDLE find = dir.empty() ? INVALID_HANDLE_VALUE : FindFirstFileW((dir + L"*.svreplay").c_str(), &fd);
+    if (find == INVALID_HANDLE_VALUE) return;
+    do {
+        SavedInfo info;
+        info.path = dir + fd.cFileName;
+        std::ifstream f(info.path, std::ios::binary);
+        std::vector<std::uint8_t> head(kInfoBytes);
+        f.read(reinterpret_cast<char*>(head.data()), static_cast<std::streamsize>(head.size()));
+        head.resize(static_cast<std::size_t>(f.gcount()));
+        if (ReadInfo(head, info)) g_reel.push_back(info);
+    } while (FindNextFileW(find, &fd));
+    FindClose(find);
+    std::sort(g_reel.begin(), g_reel.end(), [](const SavedInfo& a, const SavedInfo& b) { return a.savedUnix > b.savedUnix; });
+    g_reelSel = std::clamp(g_reelSel, 0, std::max(0, static_cast<int>(g_reel.size()) - 1));
+}
+
+void OpenReel(Mode back) {
+    if (!g_editValid) g_edit.Reset(g_rec.Start(), g_rec.End()), g_editValid = true;  // the editor's modes always have an edit
+    LoadReel();
+    g_reelBack = back;
+    g_hudHidden = false;
+    g_head.playing = false;
+    g_mode = Mode::Reel;
+}
+
+// Fade, stream the world around `at`, then show `after` (the skater may be far away).
+void BeginLoading(const float* at, Mode after) {
+    std::memcpy(g_loadAt, at, sizeof(g_loadAt));
+    g_afterLoad = after;
+    g_loadStep = 0;
+    g_loadUntil = g_clock + 8.0;
+    Call<void>(DO_SCREEN_FADE_OUT, 400);
+    g_mode = Mode::Loading;
+}
+
+void LoadingTick() {
+    if (g_loadStep == 0 && (Call<BOOL>(IS_SCREEN_FADED_OUT) || g_clock > g_loadUntil - 6.0)) {
+        Call<BOOL>(NEW_LOAD_SCENE_START_SPHERE, g_loadAt[0], g_loadAt[1], g_loadAt[2], 120.0f, 0);
+        Call<void>(SET_FOCUS_POS_AND_VEL, g_loadAt[0], g_loadAt[1], g_loadAt[2], 0.0f, 0.0f, 0.0f);
+        g_loadStep = 1;
+    } else if (g_loadStep == 1 && (Call<BOOL>(IS_NEW_LOAD_SCENE_LOADED) || g_clock > g_loadUntil)) {
+        Call<void>(NEW_LOAD_SCENE_STOP);
+        Call<void>(CLEAR_FOCUS);
+        Call<void>(DO_SCREEN_FADE_IN, 600);
+        g_mode = g_afterLoad;
+        g_input.Reset();
+        if (std::exchange(g_exitAfterLoad, false)) g_exitPending = true;  // leaves on A/Enter's release (already let go: at once)
+    }
+}
+
+void LeaveSaved(bool reload);
+
+// Opens a saved replay in the editor (the live recording waits until it is closed).
+void OpenSaved(int index) {
+    if (index < 0 || index >= static_cast<int>(g_reel.size())) return;
+    std::ifstream f(g_reel[static_cast<std::size_t>(index)].path, std::ios::binary);
+    const std::vector<std::uint8_t> bytes((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+    SavedReplay s;
+    std::string error;
+    if (!Deserialize(bytes, s, error)) return Notice("This replay cannot be opened: " + error + ".");
+    if (g_bones > 0 && s.frames.front().bones.size() != static_cast<std::size_t>(g_bones) * 16)
+        return Notice("This replay was saved with another skater model.");
+    if (g_loaded) LeaveSaved(false);
+    std::swap(g_rec, g_liveRec);
+    g_liveEdit = g_edit, g_liveEditValid = g_editValid, g_liveTime = g_head.time;
+    const int bones = static_cast<int>(s.frames.front().bones.size() / 16);
+    g_rec = Recording{};
+    g_rec.Reserve(s.frames.back().time + 2.0, 60.0, bones);
+    for (std::size_t i = 0; i < s.frames.size(); ++i) g_rec.Add(s.frames[i], i ? s.frames[i].time - s.frames[i - 1].time : 0.0);
+    g_edit.Restore(g_rec.Start(), g_rec.End(), s.in, s.out, s.markers, s.clips);
+    g_editValid = true;
+    gtaaudio::ReplaySoundLoad(s.soundStartMs, std::move(s.pcm), std::pow(10.0f, g_soundGainDb / 20.0f));
+    if (!g_loaded) {
+        g_invincibleWas = Call<BOOL>(GET_PLAYER_INVINCIBLE, Call<int>(PLAYER_ID)) != 0;
+        Call<void>(SET_PLAYER_INVINCIBLE, Call<int>(PLAYER_ID), 1);  // far away, a fall or the water never kills
+    }
+    g_loaded = true;
+    g_head.time = g_edit.In();
+    g_head.playing = false;
+    char text[200];
+    std::snprintf(text, sizeof(text), "replay: opened a saved replay (%u frames, %.1f s)", static_cast<unsigned>(s.frames.size()), g_rec.Length());
+    Log(text);
+    BeginLoading(s.frames.front().root, Mode::Timeline);
+}
+
+// Back to the live recording; `reload` streams the world back around it first.
+void LeaveSaved(bool reload) {
+    if (!g_loaded) return;
+    std::swap(g_rec, g_liveRec);
+    g_liveRec = Recording{};
+    g_edit = g_liveEdit, g_editValid = g_liveEditValid;
+    g_head.time = g_liveTime;
+    g_loaded = false;
+    Call<void>(SET_PLAYER_INVINCIBLE, Call<int>(PLAYER_ID), g_invincibleWas ? 1 : 0);
+    if (g_sound && g_rec.Size()) {
+        const Recording::Sample first = g_rec.At(g_rec.Start());
+        if (first.a) gtaaudio::ReplaySoundStart(first.a->gameMs, g_rec.Last().gameMs + 50, std::pow(10.0f, g_soundGainDb / 20.0f));
+    }
+    if (reload && g_rec.Size()) BeginLoading(g_rec.Last().root, Mode::Instant);
+}
+
 // ---- the editor's modes -----------------------------------------------------------
 
 constexpr CameraKind kMenuCameras[] = {CameraKind::Game,      CameraKind::Follow,    CameraKind::Tripod, CameraKind::Free,
                                        CameraKind::AdvFollow, CameraKind::AdvTripod, CameraKind::AdvFree};
-constexpr int kMenuSpeed = 7, kMenuShake = 8, kMenuFilter = 9, kMenuLens = 10, kMenuCommit = 11, kMenuItems = 12;
+constexpr int kMenuSpeed = 7, kMenuShake = 8, kMenuFilter = 9, kMenuLens = 10, kMenuCommit = 11, kMenuHelp = 12, kMenuItems = 13;
 
-void Ask(PromptAction action, const char* title, const char* text) {
+void Ask(PromptAction action, const std::string& title, const std::string& text) {
     g_hudHidden = false;  // a question is never asked unseen
     g_prompt.action = action;
     g_prompt.back = g_mode;
@@ -606,8 +911,14 @@ void PromptYes() {
     const Mode back = g_prompt.back;
     g_mode = back;
     switch (g_prompt.action) {
+    case PromptAction::PlaceMarker:
+        g_edit.PlaceMarker(g_prompt.time);
+        break;
     case PromptAction::DeleteMarker:
         g_edit.DeleteMarker(g_prompt.time, 0.5, true);
+        break;
+    case PromptAction::DeleteKey:
+        if (g_edit.DeleteKey(g_prompt.time, 0.25) == EditResult::Ok) g_camChanged = true, g_workDirty = false;
         break;
     case PromptAction::ResetTimeline:
         g_edit.Reset(g_rec.Start(), g_rec.End());
@@ -622,6 +933,18 @@ void PromptYes() {
         g_edit.ClipRef(g_editClip) = g_clipBefore;
         g_mode = Mode::Timeline;
         break;
+    case PromptAction::SavePhoto:
+        g_mode = Mode::Timeline;
+        TakePhoto();
+        break;
+    case PromptAction::SaveReplay:
+        g_mode = Mode::Timeline;
+        SaveReplay(g_promptPed);
+        break;
+    case PromptAction::DeleteSaved:
+        if (g_reelSel >= 0 && g_reelSel < static_cast<int>(g_reel.size())) DeleteFileW(g_reel[static_cast<std::size_t>(g_reelSel)].path.c_str());
+        OpenReel(g_reelBack);
+        break;
     default:
         break;
     }
@@ -631,9 +954,12 @@ void PromptYes() {
 
 // One editor frame; never leaves the replay (only Instant Replay and the Finished menu's "Exit replay" do).
 bool EditorTick(int ped, const PadIn& pad, const KeysIn& keys, float dt) {
+    g_promptPed = ped;
+    PollPhoto();
+    PollSave();
     const Edges e = g_input.Poll(pad, keys);
     const auto P = [&](std::uint16_t bit) { return (e.pad & bit) != 0; };
-    const bool listOrPrompt = g_mode == Mode::EditMenu || g_mode == Mode::Finished || g_mode == Mode::Prompt;
+    const bool listOrPrompt = g_mode == Mode::EditMenu || g_mode == Mode::Finished || g_mode == Mode::Prompt || g_mode == Mode::Help || g_mode == Mode::Reel;
     if (listOrPrompt) g_hudHidden = false;  // lists and questions are always shown
     else if (P(0x0080) || e.key.hide) g_hudHidden = !g_hudHidden;
     // The left stick steps through lists like the D-pad (one step per push).
@@ -655,20 +981,27 @@ bool EditorTick(int ped, const PadIn& pad, const KeysIn& keys, float dt) {
         if (P(0x0004) || e.key.pageUp) g_head.time = g_edit.In(), g_head.playing = false;
         if (P(0x0008) || e.key.pageDown) g_head.time = g_edit.Out(), g_head.playing = false;
         if (P(0x0002) || e.key.keyN) {
-            const EditResult r = g_edit.PlaceMarker(g_head.time);
-            if (r == EditResult::TooClose) Notice("Too close to another Marker or In/Out Point!");
-            if (r == EditResult::TooMany) Notice("You have reached the maximum limit on the number of markers allowed.");
+            // As in Skate: checked first, then asked (A54).
+            bool tooNear = g_head.time - g_edit.In() < Edit::kMinGap || g_edit.Out() - g_head.time < Edit::kMinGap;
+            for (double m : g_edit.Markers()) tooNear = tooNear || std::fabs(m - g_head.time) < Edit::kMinGap;
+            if (static_cast<int>(g_edit.Markers().size()) >= Edit::kMaxMarkers)
+                Notice(T("ID_REPLAY_EDITOR_NO_MORE_MARKERS", "You have reached the maximum limit on the number of markers allowed."));
+            else if (tooNear)
+                Notice(T("ID_REPLAY_EDITOR_POPUP_PROXIMITY", "Too close to another Marker or In/Out Point!"));
+            else
+                Ask(PromptAction::PlaceMarker, "Place Clip Marker",
+                    T("ID_REPLAY_EDITOR_POPUP_CLIPMARKER", "If you decide to remove this Clip Marker later, it will also remove all Key Markers in the clips on both sides.^^Are you sure you want to do this?"));
         }
         if (P(0x0001) || e.key.del) {
             if (g_edit.DeleteMarker(g_head.time, 0.5, false) == EditResult::NeedsConfirm)
-                Ask(PromptAction::DeleteMarker, "Delete Clip Marker",
-                    "You are about to delete a clip marker. All key and camera information will be reset on either side of the marker. Are you sure you want to do this?");
+                Ask(PromptAction::DeleteMarker, T("ID_REPLAY_EDITOR_DELETE_CLIP", "Delete Clip Marker"),
+                    T("ID_REPLAY_EDITOR_DELETE_CLIP_DESC", "You are about to delete a clip marker. All key and camera information will be reset on either side of the marker. Are you sure you want to do this?"));
         }
         if (e.lt || e.key.keyI) {
-            if (g_edit.SetIn(g_head.time) == EditResult::TooClose) Notice("Too close to another Marker or In/Out Point!");
+            if (g_edit.SetIn(g_head.time) == EditResult::TooClose) Notice(T("ID_REPLAY_EDITOR_POPUP_PROXIMITY", "Too close to another Marker or In/Out Point!"));
         }
         if (e.rt || e.key.keyO) {
-            if (g_edit.SetOut(g_head.time) == EditResult::TooClose) Notice("Too close to another Marker or In/Out Point!");
+            if (g_edit.SetOut(g_head.time) == EditResult::TooClose) Notice(T("ID_REPLAY_EDITOR_POPUP_PROXIMITY", "Too close to another Marker or In/Out Point!"));
         }
         if (P(0x4000) || e.key.enter) {
             g_editClip = g_edit.ClipAt(g_head.time);
@@ -678,7 +1011,7 @@ bool EditorTick(int ped, const PadIn& pad, const KeysIn& keys, float dt) {
             g_mode = Mode::EditMenu;
         }
         if (P(0x8000) || e.key.keyU)
-            Ask(PromptAction::ResetTimeline, "Reset Timeline", "This will remove all editing from this replay!^Continue?");
+            Ask(PromptAction::ResetTimeline, T("ID_REPLAY_EDITOR_RESET_TIMELINE", "Reset Timeline"), T("ID_REPLAY_EDITOR_POPUP_RESET", "This will remove all editing from this replay!^Continue?"));
         if (P(0x2000) || e.key.backspace) {  // back to Instant Replay (the edit is kept)
             g_mode = Mode::Instant;
             g_head.playing = false;
@@ -708,14 +1041,16 @@ bool EditorTick(int ped, const PadIn& pad, const KeysIn& keys, float dt) {
                 const CameraKind kind = kMenuCameras[g_menuSel];
                 g_clipBefore = clip;  // Cancel brings back the clip as it was before this camera
                 if (g_edit.SetCamera(g_editClip, kind, false) == EditResult::NeedsConfirm) {
-                    Ask(PromptAction::ChangeCamera, "Change Camera",
-                        "The current clip is using a different camera. You will lose all current key and camera information in this clip if you proceed. Do you want to use the new camera?");
+                    Ask(PromptAction::ChangeCamera, T("ID_REPLAY_EDITOR_REPLACE_CAMERA_TITLE", "Change Camera"),
+                        T("ID_REPLAY_EDITOR_REPLACE_CAMERA_DESC", "The current clip is using a different camera. You will lose all current key and camera information in this clip if you proceed. Do you want to use the new camera?"));
                     g_prompt.kind = kind;
                 } else {
                     EnterCameraEdit(g_editClip, g_clipBefore.camera != kind);
                 }
             } else if (g_menuSel == kMenuCommit) {
                 g_mode = Mode::Timeline;
+            } else if (g_menuSel == kMenuHelp) {
+                HelpForCamera(clip.camera, Mode::EditMenu);
             }
         }
         if (P(0x2000) || e.key.backspace) g_mode = Mode::Timeline;
@@ -743,7 +1078,11 @@ bool EditorTick(int ped, const PadIn& pad, const KeysIn& keys, float dt) {
             g_edit.AddKey(g_head.time, k);
             g_workDirty = false, g_camChanged = true;
         }
-        if (adv && (P(0x8000) || e.key.del)) g_camChanged |= g_edit.DeleteKey(g_head.time, 0.25) == EditResult::Ok;
+        if (adv && (P(0x8000) || e.key.del)) {
+            bool found = false;
+            for (const Key& k : clip.keys) found = found || std::fabs(k.time - g_head.time) <= 0.25;
+            if (found) Ask(PromptAction::DeleteKey, T("ID_REPLAY_EDITOR_DELETE_KEY", "Delete Key Marker"), T("ID_REPLAY_EDITOR_DELETE_KEY_DESC", "You are about to remove a key. Are you sure you want to do this?"));
+        }
         if (adv && (P(0x0040) || e.key.keyJ)) {
             const double next = g_edit.NextKey(g_head.time);
             g_head.time = next > g_head.time ? next : (clip.keys.empty() ? g_head.time : clip.keys.front().time);
@@ -751,23 +1090,57 @@ bool EditorTick(int ped, const PadIn& pad, const KeysIn& keys, float dt) {
         }
         if (P(0x0020) || e.key.tab) g_mode = Mode::Timeline;  // Commit
         if (P(0x2000) || e.key.backspace) {
-            if (g_camChanged) Ask(PromptAction::CancelCameraEdit, "Cancel", "Cancel this editing mode?");
+            if (g_camChanged) Ask(PromptAction::CancelCameraEdit, "Cancel", T("ID_REPLAY_EDITOR_POPUP_CANCEL", "Cancel this editing mode?"));
             else g_mode = Mode::Timeline;
         }
         break;
     }
     case Mode::Finished: {
         const int up = (P(0x0001) || e.key.faster) ? -1 : 0, down = (P(0x0002) || e.key.slower) ? 1 : 0;
-        g_menuSel = Cycle(g_menuSel, up + down + stickStep, 4);
+        g_menuSel = Cycle(g_menuSel, up + down + stickStep, 8);
         if (P(0x1000) || e.key.enter) {
-            if (g_menuSel == 0) g_head.time = g_edit.In(), g_head.playing = true, g_mode = Mode::Timeline;
-            if (g_menuSel == 1) Ask(PromptAction::ResetTimeline, "Reset Timeline", "This will remove all editing from this replay!^Continue?");
-            if (g_menuSel == 2) g_mode = Mode::Instant, g_leaveBlock = true, g_input.Reset();
-            if (g_menuSel == 3) g_exitPending = true;  // Exit replay once A/Enter is let go (the edit is kept)
+            switch (g_menuSel) {
+            case 0: g_head.time = g_edit.In(), g_head.playing = true, g_mode = Mode::Timeline; break;
+            case 1: Ask(PromptAction::SavePhoto, T("ID_REPLAYEDITOR_TAKE_PHOTO", "Take Photo"), T("ID_REPLAY_EDITOR_POPUP_PHOTOSAVE", "Save Photo?")); break;
+            case 2: Ask(PromptAction::SaveReplay, T("ID_REPLAYEDITOR_BASIC_SAVE_REPLAY", "Save Replay"), T("ID_REPLAY_EDITOR_POPUP_REPLAYSAVE", "Save Replay?")); break;
+            case 3: OpenReel(Mode::Finished); break;
+            case 4: HelpForTimeline(); break;
+            case 5: Ask(PromptAction::ResetTimeline, T("ID_REPLAY_EDITOR_RESET_TIMELINE", "Reset Timeline"), T("ID_REPLAY_EDITOR_POPUP_RESET", "This will remove all editing from this replay!^Continue?")); break;
+            case 6:
+                if (g_loaded) LeaveSaved(true);
+                else g_mode = Mode::Instant, g_leaveBlock = true, g_input.Reset();
+                break;
+            default:  // Exit replay once A/Enter is let go (the edit is kept); from a saved replay after its area is back
+                if (g_loaded) g_exitAfterLoad = true, LeaveSaved(true);
+                else g_exitPending = true;
+                break;
+            }
         }
         if (P(0x2000) || e.key.backspace) g_mode = Mode::Timeline;
         break;
     }
+    case Mode::Help: {
+        if (P(0x1000) || e.key.enter) {
+            if (++g_helpPage >= static_cast<int>(g_help.size())) g_mode = g_helpBack;
+        }
+        if (P(0x2000) || e.key.backspace) g_mode = g_helpBack;
+        break;
+    }
+    case Mode::Reel: {
+        const int up = (P(0x0001) || e.key.faster) ? -1 : 0, down = (P(0x0002) || e.key.slower) ? 1 : 0;
+        if (!g_reel.empty()) g_reelSel = Cycle(g_reelSel, up + down + stickStep, static_cast<int>(g_reel.size()));
+        if ((P(0x1000) || e.key.enter) && !g_reel.empty()) OpenSaved(g_reelSel);
+        else if ((P(0x8000) || e.key.del) && !g_reel.empty())
+            Ask(PromptAction::DeleteSaved, "Delete Replay", "This saved replay will be deleted from Documents\\GTAxSkate\\Replays.^Are you sure?");
+        else if (P(0x2000) || e.key.backspace) {
+            g_mode = g_reelBack;
+            if (g_mode == Mode::Instant) g_leaveBlock = true, g_input.Reset();
+        }
+        break;
+    }
+    case Mode::Loading:
+        LoadingTick();
+        break;
     default:
         break;
     }
@@ -775,7 +1148,8 @@ bool EditorTick(int ped, const PadIn& pad, const KeysIn& keys, float dt) {
 
     AdvanceEdited(dt);
     const Recording::Sample s = g_rec.At(g_head.time);
-    const bool menu = g_mode == Mode::EditMenu || g_mode == Mode::Finished || g_mode == Mode::Prompt;
+    const bool menu = g_mode == Mode::EditMenu || g_mode == Mode::Finished || g_mode == Mode::Prompt || g_mode == Mode::Help ||
+                      g_mode == Mode::Reel || g_mode == Mode::Loading;
     const int clipIndex = g_mode == Mode::CameraEdit ? g_editClip : g_edit.ClipAt(g_head.time);
     const Clip& clip = g_edit.ClipRef(clipIndex);
     if (s.a) {
@@ -796,6 +1170,19 @@ bool EditorTick(int ped, const PadIn& pad, const KeysIn& keys, float dt) {
     gtaaudio::ReplaySoundAt(GameMsAt(s), g_head.playing ? g_edit.Evaluate(g_head.time).speed : 0.0);
 
     // HUD
+    if (g_mode == Mode::Loading) {
+        Txt("Loading...", 0.5f, 0.48f, 0.5f, true);
+        FlushHud();
+        return true;
+    }
+    if (g_photoTaking) {  // the picture without the editor on it
+        g_rects.clear(), g_texts.clear();
+        const bool hidden = g_hudHidden;
+        g_hudHidden = true;
+        FlushHud();
+        g_hudHidden = hidden;
+        return true;
+    }
     if (g_mode == Mode::CameraEdit) {
         Strip(g_editClip);
         char title[96];
@@ -815,7 +1202,7 @@ bool EditorTick(int ped, const PadIn& pad, const KeysIn& keys, float dt) {
     } else {
         Strip(-1);
         EditorInfo(g_mode == Mode::Timeline ? "EDIT TIMELINE" : "REPLAY EDITOR");
-        Keys("A play/pause  left stick scrub  LB/RB marker  D-pad L/R start/end  D-pad down place marker  D-pad up delete  LT in  RT out  X edit clip  Y reset  R3 hide  Back finished  B instant replay",
+        if (g_mode != Mode::Reel && g_mode != Mode::Help) Keys("A play/pause  left stick scrub  LB/RB marker  D-pad L/R start/end  D-pad down place marker  D-pad up delete  LT in  RT out  X edit clip  Y reset  R3 hide  Back finished  B instant replay",
              "Space play/pause  A/D scrub  , . marker  PgUp/PgDn start/end  N place marker  Delete marker  I in  O out  Enter edit clip  U reset  H hide  Tab finished  Backspace instant replay");
     }
     if (g_mode == Mode::EditMenu) {
@@ -827,12 +1214,33 @@ bool EditorTick(int ped, const PadIn& pad, const KeysIn& keys, float dt) {
         items.push_back(std::string("Shake   < ") + shakes[std::clamp(clip.shake, 0, 3)] + " >");
         items.push_back(std::string("Filters   < ") + FilterName(clip.filter) + " >");
         items.push_back(std::string("Lens   < ") + (clip.lens == kLensFisheye ? "Fisheye" : "Normal") + " >");
-        items.push_back("Commit");
+        items.push_back(T("ID_REPLAYEDITOR_COMMIT", "Commit"));
+        items.push_back(T("ID_REPLAYEDITOR_HELP", "Help"));
         char title[64];
-        std::snprintf(title, sizeof(title), "Edit Menu - Clip %d", g_editClip + 1);
+        std::snprintf(title, sizeof(title), "%s - Clip %d", T("ID_REPLAYEDITOR_BASIC_EDIT_MENU", "Edit Menu").c_str(), g_editClip + 1);
         Panel(title, items, g_menuSel);
     } else if (g_mode == Mode::Finished) {
-        Panel("Finished", {"Play from In point", "Reset Timeline", "Back to Instant Replay", "Exit replay"}, g_menuSel);
+        Panel(T("ID_REPLAY_EDITOR_FINISHED", "Finished").c_str(),
+              {"Play from In point", T("ID_REPLAYEDITOR_TAKE_PHOTO", "Take Photo"), T("ID_REPLAYEDITOR_BASIC_SAVE_REPLAY", "Save Replay"),
+               "Saved Replays", T("ID_REPLAYEDITOR_HELP", "Help"), T("ID_REPLAY_EDITOR_RESET_TIMELINE", "Reset Timeline"),
+               g_loaded ? "Close saved replay" : "Back to Instant Replay", T("ID_REPLAYEDITOR_EXIT", "Exit") + " replay"},
+              g_menuSel);
+    } else if (g_mode == Mode::Help) {
+        HelpBox();
+    } else if (g_mode == Mode::Reel) {
+        std::vector<std::string> items;
+        for (const SavedInfo& r : g_reel) {
+            char line[96];
+            std::tm tm{};
+            const std::time_t t = static_cast<std::time_t>(r.savedUnix);
+            localtime_s(&tm, &t);
+            std::snprintf(line, sizeof(line), "%04d-%02d-%02d %02d:%02d   %s", tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday, tm.tm_hour, tm.tm_min,
+                          Clock(r.length).c_str());
+            items.push_back(line);
+        }
+        if (items.empty()) items.push_back("No saved replays yet (Finished > Save Replay)");
+        Panel("Saved Replays", items, g_reel.empty() ? -1 : g_reelSel);
+        Keys("A open   Y delete   B back", "Enter open   Delete delete   Backspace back");
     } else if (g_mode == Mode::Prompt) {
         PromptBox();
     }
@@ -866,6 +1274,11 @@ void Clear() {
 }
 
 void Record(const SvOutput& o, const float* placed, const float* bones, int count, const SvBoardPose* board) {
+    if (g_graceUntil && !g_active && static_cast<int>(GetTickCount() - g_graceUntil) >= 0) {  // the forced exit's grace is over
+        g_graceUntil = 0;
+        Call<void>(NEW_LOAD_SCENE_STOP);
+        Call<void>(SET_PLAYER_INVINCIBLE, Call<int>(PLAYER_ID), g_graceInvincible ? 1 : 0);
+    }
     if (!g_enabled || g_active || o.tick == g_lastTick || count <= 0 || !bones) return;
     if (count != g_bones) {
         g_rec.Reserve(g_seconds, 60.0, count);
@@ -944,6 +1357,7 @@ bool Enter(int ped) {
     posehook::TakeApplyTime();
     g_applyCalls = 0;
     (void)ped;
+    if (std::exchange(g_openReel, false) && GetTickCount() - g_openReelAt < 10000) OpenReel(Mode::Instant);
     char text[200];
     std::snprintf(text, sizeof(text), "replay: entered (%.1f s recorded, world time scale %.2f, sound %s, %s, %s, edit %s)", g_rec.Length(),
                   g_worldScale, !g_sound ? "off" : sound ? "on" : "none recorded", FilterName(g_filter), LensName(g_lens),
@@ -1042,6 +1456,26 @@ bool Tick(int ped, const PadIn& pad, const KeysIn& keys, float dt) {
 
 void Exit() {
     if (!g_active) return;
+    if (g_mode == Mode::Loading) {
+        Call<void>(NEW_LOAD_SCENE_STOP);
+        Call<void>(CLEAR_FOCUS);
+    }
+    if (g_loaded) {
+        // Forced out of a saved replay (pause, death of the session, F6): the skater's
+        // area streams in behind a fade while the player stays invincible for a moment.
+        const bool was = g_invincibleWas;
+        LeaveSaved(false);
+        if (g_rec.Size()) {
+            const float* at = g_rec.Last().root;
+            Call<BOOL>(NEW_LOAD_SCENE_START_SPHERE, at[0], at[1], at[2], 120.0f, 0);
+            Call<void>(DO_SCREEN_FADE_OUT, 0);
+        }
+        Call<void>(SET_PLAYER_INVINCIBLE, Call<int>(PLAYER_ID), 1);
+        g_graceInvincible = was;
+        g_graceUntil = GetTickCount() + 4000;
+    }
+    if (Call<BOOL>(IS_SCREEN_FADED_OUT) || g_mode == Mode::Loading || g_graceUntil) Call<void>(DO_SCREEN_FADE_IN, 1500);
+    if (g_photoTaking) fisheye::CancelPhoto(), fisheye::ResetPhoto(), g_photoTaking = false;
     if (g_appliedShake && g_cam) Call<void>(STOP_CAM_SHAKING, g_cam, 1);
     if (g_appliedFilter) Call<void>(CLEAR_TIMECYCLE_MODIFIER);
     g_appliedFilter = 0, g_appliedShake = 0, g_appliedFisheye = false;
@@ -1063,5 +1497,21 @@ void Exit() {
 }
 
 void SetKeyboard(bool keyboard) { g_keyboard = keyboard; }
+
+void OpenSavedReplaysOnEnter() { g_openReel = true, g_openReelAt = GetTickCount(); }
+
+void LoadTexts(const std::wstring& path) {
+    g_textTable.clear();
+    std::ifstream f(path, std::ios::binary);
+    std::string line;
+    while (std::getline(f, line)) {
+        if (!line.empty() && line.back() == '\r') line.pop_back();
+        const std::size_t tab = line.find('\t');
+        if (tab != std::string::npos) g_textTable[line.substr(0, tab)] = line.substr(tab + 1);
+    }
+    char text[160];
+    std::snprintf(text, sizeof(text), "replay: %u of Skate's editor texts loaded", static_cast<unsigned>(g_textTable.size()));
+    Log(text);
+}
 
 }  // namespace replay

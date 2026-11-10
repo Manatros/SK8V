@@ -40,6 +40,7 @@
 #include "collectibles_logic.h"
 #include "replay.h"
 #include "menu.h"
+#include "modkeys.h"
 #include "vehicle_survey.h"
 #include "ps_pad.h"
 #include "skate_map.h"
@@ -95,6 +96,7 @@ struct Config {
     bool replaySound = true;       // ReplaySound: Skate's recorded sound in the replay (design 2026-11-09-replay-look-sound)
     float replaySoundGainDb = -4.0f; // ReplaySoundGainDb: the replay plays the whole mix unplaced, so a little quieter
     bool replayFisheye = true;     // ReplayFisheye: the Fisheye lens bends the picture (0: a plain 120-degree view)
+    bool blockModKeys = true;      // BlockModKeys: other mods get no keys while the replay or the F10 menu is open (modkeys.h)
     bool boardShop = true;    // BoardShop: Skate 3's boards and parts for sale in street clothing stores (G)
     bool wheelsFromPaint = true; // WheelsFromPaint: painted wheels set the wheel hardness (matte soft .. metallic hard)
     bool vehicleShapes = true; // VehicleShapes: survey vehicles without an extracted bound (a roof to ride, a gap to hippie jump)
@@ -322,6 +324,7 @@ const Key kKeys[] = {
     {"ReplaySound", Store<&Config::replaySound>},
     {"ReplaySoundGainDb", Store<&Config::replaySoundGainDb>},
     {"ReplayFisheye", Store<&Config::replayFisheye>},
+    {"BlockModKeys", Store<&Config::blockModKeys>},
     {"BoardShop", Store<&Config::boardShop>},
     {"WheelsFromPaint", Store<&Config::wheelsFromPaint>},
     {"VehicleShapes", Store<&Config::vehicleShapes>},
@@ -4038,6 +4041,8 @@ std::vector<menu::Page> MenuPages(Session& s) {
                })),
         Helped(Action("Replay: watch the last seconds", [&s] { s.replayRequested = true; }),
                "Opens the replay when you close this menu (for keyboard players; works only while skating)."),
+        Helped(Action("Replay: saved replays", [&s] { replay::OpenSavedReplaysOnEnter(); s.replayRequested = true; }),
+               "Skate's Reel: opens your saved replays (Documents\\GTAxSkate\\Replays) when you close this menu; works only while skating."),
         Choice("Board tracks", "BoardTracks", {"1", "0"}, {"On", "Off"}, Bound("BoardTracks")),
         Number("Glowing wheels", "WheelGlow", 0, 0, 1, 0.05f,
                [](float v) { return v == 0.0f ? std::string("Off") : Fixed("%.0f%%")(v * 100.0f); },
@@ -4820,6 +4825,7 @@ void ScriptMain() {
         ApplyQuirk();
         Logf("SkateV Legacy: BackwardsMan %s chord %04x", cfg.backwardsMan ? "on" : "off", cfg.backwardsManChord);
         hudoverlay::Start(g_gameDir + L"SkateVLegacy.ini", g_runtime.Handle(), Log);
+        modkeys::Start(g_gameDir, Log);
         hudoverlay::SetTrickAnalyzer(cfg.trickAnalyzer);
         hudoverlay::SetVisible(cfg.skateHud && cfg.hud);
         boardstencil::SetMaterial(BoardMaterialClass(cfg));
@@ -4860,6 +4866,7 @@ void ScriptMain() {
         collectibles::Start(g_gameDir, cfg.collectibles, Log);
         replay::Configure(cfg.replay, cfg.replaySeconds, cfg.replayWorldScale, Log);
         replay::ConfigureLook(cfg.replaySound, cfg.replaySoundGainDb, cfg.replayFisheye, cfg.filmFilterStrength);
+        replay::LoadTexts(std::filesystem::u8path(cfg.dataRoot).wstring() + L"\\private\\replay-text.txt");
         // The board shop's part models and the shop itself (garages in the game folder).
         if (cfg.drawBoard && boardparts::Start(std::filesystem::u8path(cfg.dataRoot).wstring(), Log) && cfg.boardShop)
             boardshop::Start(g_runtime, cfg.dataRoot, util::Narrow(g_gameDir), Log, [](float hardness) {
@@ -4985,6 +4992,8 @@ void ScriptMain() {
         const bool filming = s.state == LifeState::Skating && s.action != 0;
         if (filming) Call<void>(gta::HIDE_HUD_AND_RADAR_THIS_FRAME);
         hudoverlay::Tick(cfg.skateHud && s.state == LifeState::Skating && !filming && !replay::Active());
+        // Other mods' hotkeys stay quiet in the replay and the F10 menu (no car spawned while editing).
+        modkeys::Tick(cfg.blockModKeys && (replay::Active() || menu::IsOpen()), cfg.blockModKeys && replay::Active());
         injuries::Tick(Call<Ped>(gta::PLAYER_PED_ID), s.state != LifeState::Skating && Call<BOOL>(gta::IS_PED_ON_FOOT, Call<Ped>(gta::PLAYER_PED_ID)),
                        cfg.injuries, Log);
         Lap(kPartHud);
@@ -5109,6 +5118,7 @@ BOOL APIENTRY DllMain(HMODULE module, DWORD reason, LPVOID reserved) {
     } else if (reason == DLL_PROCESS_DETACH) {
         keyboardHandlerUnregister(Keyboard);
         scriptUnregister(module);
+        modkeys::Stop();
         hudoverlay::Shutdown(reserved != nullptr);
         boardstencil::Stop();
         // reserved != nullptr: the process is exiting; let the OS reclaim.

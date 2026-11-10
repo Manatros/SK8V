@@ -51,6 +51,7 @@ public:
     };
     Sample At(double time) const;
     const Frame& Last() const { return At(count_ - 1); }
+    const Frame& Get(std::size_t i) const { return At(i); }  // 0 = the oldest
 
 private:
     const Frame& At(std::size_t i) const { return slots_[(head_ + i) % slots_.size()]; }

@@ -1,6 +1,8 @@
 // Skate 3's replay editor model (design 2026-11-09-skate-replay-editor).
 #include "../src/replay_logic.cpp"
 #include "../src/replay_edit.cpp"
+#include "../src/replay_store.cpp"
+#include "../src/modkeys.cpp"
 #include <cassert>
 #include <cmath>
 #include <iostream>
@@ -97,6 +99,61 @@ int main() {
     e.Reset(0.0, 10.0);
     assert(e.Clips().size() == 1 && e.Markers().empty() && !e.Edited());
     assert(ShakeAmplitude(3) == 1.2f && ShakeAmplitude(0) == 0.0f && ShakeAmplitude(9) == 0.0f);
+
+    {
+        // Saved replays: everything written comes back; another file is refused.
+        SavedReplay s;
+        s.modelHash = 0x705E61F2u;
+        s.savedUnix = 1762700000ull;
+        for (int i = 0; i < 3; ++i) {
+            Frame f;
+            f.time = i / 60.0;
+            f.root[0] = 1.0f + i, f.camera[6] = 50.0f, f.gameMs = 1000u + 16u * i, f.board = i == 1, f.cut = i == 2;
+            f.boardWorld[6][15] = 7.0f;
+            f.bones.assign(2 * 16, 0.5f + i);
+            s.frames.push_back(f);
+        }
+        s.in = 0.0, s.out = 2 / 60.0;
+        s.markers = {1 / 60.0};
+        Clip ca, c;
+        ca.camera = CameraKind::AdvFree, ca.speed = 0, ca.shake = 3, ca.filter = 2, ca.lens = kLensFisheye;
+        CameraParams kp;
+        kp.yaw = 33.0f, kp.positioned = true, kp.position[2] = 9.0f;
+        ca.keys.push_back(Key{0.005, kp});
+        c.camera = CameraKind::Follow, c.base.distance = 6.5f;
+        s.clips = {ca, c};
+        s.soundStartMs = 990;
+        s.pcm = {1, -2, 3};
+        const std::vector<std::uint8_t> bytes = Serialize(s);
+        SavedInfo info;
+        assert(ReadInfo(std::vector<std::uint8_t>(bytes.begin(), bytes.begin() + kInfoBytes), info) && info.frames == 3);
+        SavedReplay back;
+        std::string err;
+        assert(Deserialize(bytes, back, err));
+        assert(back.modelHash == s.modelHash && back.savedUnix == s.savedUnix && back.frames.size() == 3);
+        assert(back.frames[1].board && back.frames[2].cut && back.frames[2].gameMs == 1032u && back.frames[2].bones[31] == 2.5f);
+        assert(back.frames[0].boardWorld[6][15] == 7.0f && back.frames[2].root[0] == 3.0f);
+        assert(back.markers.size() == 1 && back.clips.size() == 2);
+        assert(back.clips[0].camera == CameraKind::AdvFree && back.clips[0].shake == 3 && back.clips[0].speed == 0);
+        assert(back.clips[0].filter == 2 && back.clips[0].lens == kLensFisheye);  // by name
+        assert(back.clips[0].keys.size() == 1 && back.clips[0].keys[0].p.yaw == 33.0f && back.clips[0].keys[0].p.positioned);
+        assert(back.clips[1].base.distance == 6.5f && back.soundStartMs == 990 && back.pcm.size() == 3 && back.pcm[1] == -2);
+        std::vector<std::uint8_t> cut(bytes.begin(), bytes.end() - 3);
+        assert(!Deserialize(cut, back, err));  // damaged
+        std::vector<std::uint8_t> other = bytes;
+        other[4] = 9;  // another version
+        assert(!Deserialize(other, back, err) && err == "saved by another version");
+        // Restore keeps a valid edit and refuses a broken one.
+        Edit r;
+        r.Restore(0.0, 10.0, 1.0, 9.0, {4.0}, {Clip{}, Clip{}});
+        assert(r.In() == 1.0 && r.Markers().size() == 1);
+        r.Restore(0.0, 10.0, 1.0, 9.0, {4.0}, {Clip{}});  // clips != markers + 1
+        assert(r.In() == 0.0 && r.Markers().empty());
+    }
+
+    // Other mods' keys: hidden only while blocking, mouse buttons never.
+    assert(!modkeys::Hidden('A', false) && modkeys::Hidden('A', true) && modkeys::Hidden(VK_F10, true));
+    assert(!modkeys::Hidden(VK_LBUTTON, true) && !modkeys::Hidden(VK_RBUTTON, true) && !modkeys::Hidden(0, true));
 
     std::cout << "replay edit tests passed\n";
     return 0;

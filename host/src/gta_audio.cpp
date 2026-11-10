@@ -897,6 +897,38 @@ void ReplaySoundAt(double gameMs, double rate) {
     g_replayHead = {gameMs, rate, NowMs()};
 }
 
+bool ReplaySoundCopy(std::uint32_t fromMs, std::uint32_t toMs, std::vector<std::int16_t>& out, std::uint32_t& startMs) {
+    std::lock_guard<std::mutex> lock(g_replayClipLock);
+    const auto& c = g_replayClip;
+    if (c.pcm.empty() || toMs <= fromMs) return false;
+    const std::int64_t a = std::max<std::int64_t>(0, (static_cast<std::int64_t>(fromMs) - c.startMs) * kRate / 1000);
+    const std::int64_t b = std::min<std::int64_t>(static_cast<std::int64_t>(c.pcm.size()), (static_cast<std::int64_t>(toMs) - c.startMs) * kRate / 1000);
+    if (b <= a) return false;
+    out.assign(c.pcm.begin() + a, c.pcm.begin() + b);
+    startMs = c.startMs + static_cast<std::uint32_t>(a * 1000 / kRate);
+    return true;
+}
+
+bool ReplaySoundLoad(std::uint32_t startMs, std::vector<std::int16_t> pcm, float gain) {
+    ReplaySoundStop();
+    if (!g_started || pcm.empty()) return false;
+    g_replayHold = true;  // Skate's recording stays as it is while a saved replay plays
+    {
+        std::lock_guard<std::mutex> lock(g_replayClipLock);
+        g_replayClip.startMs = startMs;
+        g_replayClip.pcm = std::move(pcm);
+    }
+    {
+        std::lock_guard<std::mutex> lock(g_replayLock);
+        g_replayHead = {-1.0, 0.0, NowMs()};
+    }
+    g_replayGain = std::isfinite(gain) ? std::clamp(gain, 0.0f, 2.0f) : 1.0f;
+    g_replayReset = true;
+    g_replayPlay = true;
+    Logf("gta audio: replay sound: a saved clip loaded (%u ms)", static_cast<unsigned>(g_replayClip.pcm.size() * 1000 / kRate));
+    return true;
+}
+
 void ReplaySoundStop() {
     if (!g_replayHold.load() && !g_replayPlay.load()) return;
     g_replayPlay = false;

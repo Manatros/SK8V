@@ -20,6 +20,7 @@ add_library(SkateVLegacy SHARED
   src/collectibles_logic.cpp
   src/replay_logic.cpp
   src/replay_edit.cpp
+  src/replay_store.cpp
   src/replay.cpp
   src/lifecycle.cpp
   src/runtime_bridge.cpp
@@ -39,6 +40,7 @@ add_library(SkateVLegacy SHARED
   src/hud_overlay.cpp
   src/hud_renderer.cpp
   src/fisheye.cpp
+  src/modkeys.cpp
   src/xray_renderer.cpp
   src/records_ui.cpp
   src/board_native.cpp
@@ -83,7 +85,7 @@ target_compile_definitions(SkateVLegacy PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX
 target_include_directories(SkateVLegacy PRIVATE include "${SHVDIR}/inc")
 target_link_libraries(SkateVLegacy PRIVATE "${SHVDIR}/lib/ScriptHookV.lib" version xinput hid setupapi shell32)
 # Original Skate 3 HUD overlay (hud_overlay.cpp): D3D11 + runtime shader compile.
-target_link_libraries(SkateVLegacy PRIVATE d3d11 dxgi d3dcompiler)
+target_link_libraries(SkateVLegacy PRIVATE d3d11 dxgi d3dcompiler windowscodecs ole32)
 set_target_properties(SkateVLegacy PROPERTIES PREFIX "" SUFFIX ".asi")
 
 if(MSVC)

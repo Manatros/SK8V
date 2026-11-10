@@ -25,6 +25,22 @@ int main() {
             assert(sx >= -0.5f && sx <= 1920.5f && sy >= -0.5f && sy <= 1080.5f);
         }
 
+    {
+        // Take Photo's PNG writer: a 4 x 2 picture becomes a PNG file.
+        wchar_t tmp[MAX_PATH];
+        GetTempPathW(MAX_PATH, tmp);
+        const std::wstring path = std::wstring(tmp) + L"gtaxskate-photo-test.png";
+        const unsigned char bgr[4 * 2 * 3] = {255, 0, 0, 0, 255, 0, 0, 0, 255, 255, 255, 255, 0, 0, 0, 10, 20, 30, 40, 50, 60, 70, 80, 90};
+        assert(fisheye::WritePng(path, bgr, 4, 2));
+        FILE* f = _wfopen(path.c_str(), L"rb");
+        assert(f);
+        unsigned char sig[8] = {};
+        assert(std::fread(sig, 1, 8, f) == 8);
+        std::fclose(f);
+        assert(sig[0] == 0x89 && sig[1] == 'P' && sig[2] == 'N' && sig[3] == 'G');
+        DeleteFileW(path.c_str());
+    }
+
     // The pass on WARP with a swap chain on a hidden window.
     WNDCLASSW wc{};
     wc.lpfnWndProc = DefWindowProcW;

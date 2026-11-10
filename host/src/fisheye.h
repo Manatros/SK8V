@@ -46,6 +46,19 @@ void SetHudItems(const std::vector<HudRect>& rects, const std::vector<HudText>& 
 void Present(IDXGISwapChain* swapChain);
 // Releases every GPU object (device change, shutdown).
 void Release();
+
+// Skate's "Take Photo" (design 2026-11-09-skate-replay-editor P2c). Script
+// thread: Request asks for the frame presented a few frames from now (the
+// caller hides its HUD meanwhile) to be written as a PNG to `path`; State is
+// 0 idle, 1 waiting or writing, 2 saved, 3 failed; Reset makes it idle again.
+// The picture is taken after the fisheye bend and before our HUD.
+void RequestPhoto(const std::wstring& path);
+int PhotoState();
+void ResetPhoto();
+// A request not taken yet is dropped (leaving the replay, a timeout).
+void CancelPhoto();
+// The PNG writer (WIC), 24-bit BGR rows top-down; also used by the tests.
+bool WritePng(const std::wstring& path, const unsigned char* bgr, unsigned width, unsigned height);
 // The source point (pixels of a w x h frame) the output pixel (x, y) shows,
 // for a source rendered at `vfovDegrees` vertical field of view. Exposed for
 // the tests; the shader does the same.

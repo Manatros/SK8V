@@ -2,6 +2,7 @@
 #include <windows.h>
 #include <cstdint>
 #include <string>
+#include <vector>
 
 // Skate's dry gameplay audio played INSIDE GTA's audio engine (ledger P0-3b).
 //
@@ -58,5 +59,10 @@ void SetReplayPaused(bool paused);
 bool ReplaySoundStart(std::uint32_t startMs, std::uint32_t endMs, float gain);
 void ReplaySoundAt(double gameMs, double rate);
 void ReplaySoundStop();
+// Saved replays (design 2026-11-09-skate-replay-editor P3), script thread:
+// Copy gives the playing clip's sound for game time [fromMs, toMs] (false:
+// none); Load plays a saved clip instead (its own game times), as Start does.
+bool ReplaySoundCopy(std::uint32_t fromMs, std::uint32_t toMs, std::vector<std::int16_t>& out, std::uint32_t& startMs);
+bool ReplaySoundLoad(std::uint32_t startMs, std::vector<std::int16_t> pcm, float gain);
 
 } // namespace gtaaudio

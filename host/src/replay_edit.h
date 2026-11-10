@@ -52,6 +52,8 @@ public:
 
     // A fresh edit over the recording's [start, end]: In and Out at the ends, one clip.
     void Reset(double start, double end);
+    // A saved edit: markers sorted inside (in, out), clips = markers + 1; else a fresh one.
+    void Restore(double start, double end, double in, double out, const std::vector<double>& markers, const std::vector<Clip>& clips);
     double In() const { return in_; }
     double Out() const { return out_; }
     double Start() const { return start_; }
