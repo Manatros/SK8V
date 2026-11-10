@@ -47,6 +47,26 @@ void Present(IDXGISwapChain* swapChain);
 // Releases every GPU object (device change, shutdown).
 void Release();
 
+// The fisheye's detail render (chat 2026-11-10: "fishey gets kind of
+// pixelated, can you render in higher resolution"). GTA draws one frame at
+// screen resolution, and the fisheye enlarges its middle about 2.7x. When the
+// replay is paused, the replay camera renders the middle once more at
+// kDetailFov (3x the pixels there); the bend then samples that sharp middle and
+// blends into the 120-degree frame outside it. While playing, an edge
+// smoothing (FXAA) pass keeps stair-steps from being enlarged.
+// Script thread: Begin asks for the next frames to be the detail view (the
+// screen holds the last picture meanwhile); once Captured, the caller turns
+// the camera back to 120 and calls Use; Drop forgets the detail (the camera
+// moved, play resumed). Ready: the sharp middle is shown.
+constexpr float kDetailFov = 60.0f;
+void BeginDetail();
+// The script saw GTA render at kDetailFov (GET_FINAL_RENDERED_CAM_FOV): take the next-but-two frame.
+void ArmDetail();
+bool DetailCaptured();
+void UseDetail();
+void DropDetail();
+bool DetailReady();
+
 // Skate's "Take Photo" (design 2026-11-09-skate-replay-editor P2c). Script
 // thread: Request asks for the frame presented a few frames from now (the
 // caller hides its HUD meanwhile) to be written as a PNG to `path`; State is

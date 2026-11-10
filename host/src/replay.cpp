@@ -98,6 +98,19 @@ double g_noticeUntil = 0.0;
 double g_clock = 0.0;        // real seconds in the replay
 bool g_leaveBlock = false;   // Instant Replay ignores the leave buttons until they are let go
 int g_promptPed = 0;         // the ped for actions a prompt starts
+int g_ped = 0;               // the skater (the camera's line tests ignore it)
+// Cameras never inside geometry (chat 2026-11-10: "make sure no cam can clip through geometry").
+float g_lastEye[3] = {};
+bool g_lastEyeSet = false;
+float g_skaterLen = -1.0f;   // Skater mode: the eye's distance (in at once, out eased)
+int g_lastCamKey = -1;       // camera or clip the path belongs to
+double g_lastPathTime = 0.0;
+float g_dt = 0.0f;
+// The fisheye's sharp middle while paused (fisheye.h kDetailFov).
+int g_detailState = 0;       // 0 none, 1 capturing (camera at the detail FOV), 3 returning to 120, 2 in use
+float g_detailCam[7] = {};   // eye, rot, fov the detail belongs to
+double g_detailTime = -1.0, g_stableSince = 0.0;
+std::wstring g_photoPath;    // a photo waiting for the sharp middle
 // Skate's texts, prepared from the player's game (replay-text.txt); our short English otherwise.
 std::map<std::string, std::string> g_textTable;
 // Photos and saved replays (P2c, P3).
@@ -283,17 +296,102 @@ Pose PoseAt(const Recording::Sample& s) {
     return p;
 }
 
-void SetCam(const float* eye, const float* rot, float fov) {
-    Call<void>(SET_CAM_COORD, g_cam, eye[0], eye[1], eye[2]);
-    Call<void>(SET_CAM_ROT, g_cam, rot[0], rot[1], rot[2], 2);
-    Call<void>(SET_CAM_FOV, g_cam, std::clamp(fov, 10.0f, 120.0f));
-}
-
 void LookAt(const float* eye, const float* at, float* rot) {
     const float dx = at[0] - eye[0], dy = at[1] - eye[1], dz = at[2] - eye[2];
     rot[0] = std::atan2(dz, std::hypot(dx, dy)) / kDeg;
     rot[1] = 0.0f;
     rot[2] = std::atan2(-dx, dy) / kDeg;
+}
+
+// The first world, vehicle or object hit from `a` to `b` (the skater ignored).
+bool Ray(const float* a, const float* b, float* hit, float* normal, int flags) {
+    const int test = Call<int>(START_EXPENSIVE_SYNCHRONOUS_SHAPE_TEST_LOS_PROBE, a[0], a[1], a[2], b[0], b[1], b[2], flags, g_ped, 7);
+    BOOL got = 0;
+    Vector3 end{}, n{};
+    Entity entity = 0;
+    if (Call<int>(GET_SHAPE_TEST_RESULT, test, &got, &end, &n, &entity) != 2 || !got) return false;
+    hit[0] = end.x, hit[1] = end.y, hit[2] = end.z;
+    normal[0] = n.x, normal[1] = n.y, normal[2] = n.z;
+    return true;
+}
+
+// `to` moved back onto the `from` side of anything between them: 0.3 m back
+// along the line and 0.15 m off the surface (a grazing wall or the ground
+// would otherwise still cut the picture open). Flags: 1 world, 2 vehicles, 16 objects.
+bool Block(const float* from, float* to, int flags = 1 | 2 | 16) {
+    float hit[3], n[3];
+    if (!Ray(from, to, hit, n, flags)) return false;
+    const float d[3] = {from[0] - hit[0], from[1] - hit[1], from[2] - hit[2]};
+    const float len = std::sqrt(d[0] * d[0] + d[1] * d[1] + d[2] * d[2]);
+    const float k = len > 1e-4f ? std::min(0.3f / len, 1.0f) : 0.0f;
+    const float nl = std::sqrt(n[0] * n[0] + n[1] * n[1] + n[2] * n[2]);
+    for (int i = 0; i < 3; ++i) to[i] = hit[i] + d[i] * k + (nl > 0.5f ? n[i] / nl * 0.15f : 0.0f);
+    return true;
+}
+
+// How a camera stays out of geometry: Skater = cameras around the skater (a
+// wall or the ground between skater and eye pulls the eye in front of it);
+// Path = placed cameras (Free, Tripod, Static, keys: the eye cannot pass
+// through anything from where it was); None = what play showed.
+enum class Clear { None, Skater, Path };
+
+// Sets the replay camera. `aim`: the camera turns to it again after the eye moved.
+void SetCam(float* eye, float* rot, float fov, Clear clear, const float* chest, const float* aim, int camKey) {
+    bool moved = false;
+    // A new camera or clip, or a jump in time, starts the path again (and from the skater).
+    if (camKey != g_lastCamKey || std::fabs(g_head.time - g_lastPathTime) > 0.25) g_lastEyeSet = false, g_skaterLen = -1.0f;
+    g_lastCamKey = camKey, g_lastPathTime = g_head.time;
+    if (clear == Clear::Skater && chest) {
+        // In front of a wall or the ground at once, back out eased (no flicker past
+        // posts); cars passing do not push it (world and objects only).
+        float d[3] = {eye[0] - chest[0], eye[1] - chest[1], eye[2] - chest[2]};
+        const float want = std::sqrt(d[0] * d[0] + d[1] * d[1] + d[2] * d[2]);
+        float clearEye[3] = {eye[0], eye[1], eye[2]};
+        const bool hit = Block(chest, clearEye, 1 | 16);
+        const float fx = clearEye[0] - chest[0], fy = clearEye[1] - chest[1], fz = clearEye[2] - chest[2];
+        const float room = hit ? std::sqrt(fx * fx + fy * fy + fz * fz) : want;
+        if (g_skaterLen < 0.0f || room < g_skaterLen) g_skaterLen = room;
+        else g_skaterLen += (std::min(room, want) - g_skaterLen) * std::min(1.0f, g_dt * 3.0f);
+        if (want > 1e-3f && g_skaterLen < want - 1e-3f) {
+            if (hit && room <= g_skaterLen + 1e-3f) std::memcpy(eye, clearEye, sizeof(clearEye));  // the wall's own clearance
+            else for (int i = 0; i < 3; ++i) eye[i] = chest[i] + d[i] / want * g_skaterLen;
+            moved = true;
+        }
+    } else if (clear == Clear::Path) {
+        if (g_lastEyeSet) moved = Block(g_lastEye, eye);
+        else if (chest) moved = Block(chest, eye);  // a start inside a wall comes out on the skater's side
+    }
+    if (moved && aim) LookAt(eye, aim, rot);
+    std::memcpy(g_lastEye, eye, sizeof(g_lastEye));
+    g_lastEyeSet = true;
+    // The fisheye's sharp middle: a still, paused camera is rendered once more
+    // at the detail FOV; anything that moves drops it.
+    fov = std::clamp(fov, 10.0f, 120.0f);
+    const float cam[7] = {eye[0], eye[1], eye[2], rot[0], rot[1], rot[2], fov};
+    bool still = true;
+    for (int i = 0; i < 7; ++i) still = still && std::fabs(cam[i] - g_detailCam[i]) < 1e-3f;
+    still = still && std::fabs(g_head.time - g_detailTime) < 1e-6 && !g_head.playing;
+    if (!still) {
+        std::memcpy(g_detailCam, cam, sizeof(cam));
+        g_detailTime = g_head.time;
+        g_stableSince = g_clock;
+        if (g_detailState) fisheye::DropDetail(), g_detailState = 0;
+    }
+    // Only a truly still picture: no shake, no filter (its vignette would ring the
+    // middle), no world moving, and the fisheye really drawn this frame.
+    const bool fish = g_appliedFisheye && fisheye::Drawing() && fov >= 119.0f && g_appliedShake == 0 && g_appliedFilter == 0 &&
+                      g_worldScale <= 0.0f;
+    if (!fish && g_detailState) fisheye::DropDetail(), g_detailState = 0;
+    if (fish && still && g_detailState == 0 && g_clock - g_stableSince > 0.3) fisheye::BeginDetail(), g_detailState = 1;
+    // GTA says which field of view it rendered: the capture waits for the detail view,
+    // the hold ends only once it is back at 120 degrees.
+    const float rendered = Call<float>(GET_FINAL_RENDERED_CAM_FOV);
+    if (g_detailState == 1 && std::fabs(rendered - fisheye::kDetailFov) < 0.5f) fisheye::ArmDetail();
+    if (g_detailState == 1 && fisheye::DetailCaptured()) g_detailState = 3;
+    if (g_detailState == 3 && std::fabs(rendered - fov) < 0.5f) fisheye::UseDetail(), g_detailState = 2;
+    Call<void>(SET_CAM_COORD, g_cam, eye[0], eye[1], eye[2]);
+    Call<void>(SET_CAM_ROT, g_cam, rot[0], rot[1], rot[2], 2);
+    Call<void>(SET_CAM_FOV, g_cam, g_detailState == 1 ? fisheye::kDetailFov : fov);
 }
 
 // Instant Replay's camera for the presented frame.
@@ -358,15 +456,22 @@ void Aim(const Recording::Sample& s, float dt, const Command& in) {
         break;
     }
     }
+    const float chest[3] = {root[0], root[1], root[2] + 0.4f};
+    const float body[3] = {root[0], root[1], root[2] + 1.0f};
     if (g_camera != Recorded && g_camera != Free && g_camera != Static) {
-        const float chest[3] = {root[0], root[1], root[2] + 0.4f};
         LookAt(eye, chest, rot);
         fov = g_camera == Filmer ? kFilmerFov : 50.0f;
     }
     if (g_camera == Static) fov = 50.0f;
     fov = LensFov(g_lens, fov);
     if (g_lens != kLensFisheye) fov *= g_zoom;  // the fisheye keeps its 120-degree source
-    SetCam(eye, rot, fov);
+    const bool around = g_camera == Follow || g_camera == Orbit || g_camera == Filmer;
+    const Clear clear = g_camera == Recorded ? Clear::None : around ? Clear::Skater : Clear::Path;
+    SetCam(eye, rot, fov, clear, body, g_camera == Tripod ? chest : around ? chest : nullptr, 100 + g_camera);
+    // The free cameras stay where they were stopped (no pushing into a wall); the
+    // Tripod keeps its base and gives up height instead (no sinking under a ceiling).
+    if (g_camera == Free || g_camera == Static) std::memcpy(g_eye, eye, sizeof(g_eye));
+    if (g_camera == Tripod) g_eye[0] = eye[0], g_eye[1] = eye[1], g_height = std::clamp(eye[2] - g_eye[2], -1.0f, 4.0f);
 }
 
 float MmToFov(float mm) { return 2.0f * std::atan(12.0f / std::max(mm, 1.0f)) / kDeg; }
@@ -420,7 +525,11 @@ void AimEdited(const Recording::Sample& s, CameraKind kind, const CameraParams& 
     }
     if (c.zoomMm > 0.0f) fov = MmToFov(c.zoomMm);
     if (lens == kLensFisheye) fov = 120.0f;
-    SetCam(eye, rot, fov);
+    const float body[3] = {p.root[0], p.root[1], p.root[2] + 1.0f};
+    const bool around = kind == CameraKind::Follow || kind == CameraKind::AdvFollow;
+    const bool tripod = kind == CameraKind::Tripod || kind == CameraKind::AdvTripod;
+    const Clear clear = kind == CameraKind::Game ? Clear::None : around ? Clear::Skater : Clear::Path;
+    SetCam(eye, rot, fov, clear, body, around || tripod ? aim : nullptr, 200 + static_cast<int>(kind) + 16 * g_edit.ClipAt(g_head.time));
 }
 
 // ---- Instant Replay's HUD ---------------------------------------------------
@@ -613,7 +722,7 @@ void HelpBox() {
 void TakePhoto() {
     const std::wstring dir = Folder(L"Photos");
     if (dir.empty()) return Notice("The photo could not be saved (no Documents folder).");
-    fisheye::RequestPhoto(dir + Stamp(L".png"));
+    g_photoPath = dir + Stamp(L".png");  // requested once the picture is ready (PollPhoto)
     g_photoTaking = true;
     g_photoSince = g_clock;
     g_head.playing = false;
@@ -621,6 +730,14 @@ void TakePhoto() {
 
 void PollPhoto() {
     if (!g_photoTaking) return;
+    if (!g_photoPath.empty()) {
+        // Under the fisheye the photo waits (up to 2 s) for the sharp middle.
+        if (g_appliedFisheye && !fisheye::DetailReady() && g_clock - g_photoSince < 2.0) return;
+        fisheye::RequestPhoto(g_photoPath);
+        g_photoPath.clear();
+        g_photoSince = g_clock;
+        return;
+    }
     const int state = fisheye::PhotoState();
     if (state == 2) Notice(T("ID_REPLAY_EDITOR_SAVE_PHOTO_COMPLETE", "Your photograph has been saved successfully.") + " (Documents\\GTAxSkate\\Photos)");
     else if (state == 3 || g_clock - g_photoSince > 6.0) fisheye::CancelPhoto(), Notice("The photo could not be saved.");
@@ -870,9 +987,11 @@ void AdjustCamera(const PadIn& pad, const KeysIn& keys, const Recording::Sample&
         if (free) p.yaw += lookYaw, p.pitch = std::clamp(p.pitch + lookPitch, -85.0f, 85.0f);
         // Tripod moves relative to the line towards the skater; Free along its own look.
         const float face = free ? p.yaw * kDeg : std::atan2(-(pose.root[0] - p.position[0]), pose.root[1] - p.position[1]);
+        const float before[3] = {p.position[0], p.position[1], p.position[2]};
         p.position[0] += (-std::sin(face) * fwd + std::cos(face) * side) * 6.0f * dt;
         p.position[1] += (std::cos(face) * fwd + std::sin(face) * side) * 6.0f * dt;
         p.position[2] += rise * 4.0f * dt;
+        Block(before, p.position);  // never into a wall, the ground or a car
         // Skate: "the Free Camera can only be a certain distance" from the skater.
         const float dx = p.position[0] - pose.root[0], dy = p.position[1] - pose.root[1], dz = p.position[2] - pose.root[2];
         const float d = std::sqrt(dx * dx + dy * dy + dz * dz);
@@ -1341,6 +1460,10 @@ bool Enter(int ped) {
     // The edit stays while its In point is still recorded (design 2026-11-09-skate-replay-editor).
     if (g_editValid && g_edit.In() < g_rec.Start() - 1e-6) g_editValid = false;
     g_cam = Call<int>(CREATE_CAM, "DEFAULT_SCRIPTED_CAMERA", 0);
+    Call<void>(SET_CAM_NEAR_CLIP, g_cam, 0.05f);  // close walls are not cut open
+    g_lastEyeSet = false;
+    g_detailState = 0;
+    g_ped = ped;
     Call<void>(SET_CAM_ACTIVE, g_cam, 1);
     Call<void>(RENDER_SCRIPT_CAMS, 1, 0, 0, 1, 0, 0);
     Call<void>(SET_TIME_SCALE, g_worldScale);
@@ -1369,6 +1492,8 @@ bool Enter(int ped) {
 bool Tick(int ped, const PadIn& pad, const KeysIn& keys, float dt) {
     if (!g_active) return false;
     g_clock += dt;
+    g_dt = dt;
+    g_ped = ped;
     // GTA's controls are taken by the caller as in skating (DisableSkateControls),
     // never all at once: that would stop GTA's own recorder.
     Call<void>(HIDE_HUD_AND_RADAR_THIS_FRAME);
@@ -1475,7 +1600,8 @@ void Exit() {
         g_graceUntil = GetTickCount() + 4000;
     }
     if (Call<BOOL>(IS_SCREEN_FADED_OUT) || g_mode == Mode::Loading || g_graceUntil) Call<void>(DO_SCREEN_FADE_IN, 1500);
-    if (g_photoTaking) fisheye::CancelPhoto(), fisheye::ResetPhoto(), g_photoTaking = false;
+    if (g_photoTaking) fisheye::CancelPhoto(), fisheye::ResetPhoto(), g_photoTaking = false, g_photoPath.clear();
+    if (g_detailState) fisheye::DropDetail(), g_detailState = 0;
     if (g_appliedShake && g_cam) Call<void>(STOP_CAM_SHAKING, g_cam, 1);
     if (g_appliedFilter) Call<void>(CLEAR_TIMECYCLE_MODIFIER);
     g_appliedFilter = 0, g_appliedShake = 0, g_appliedFisheye = false;

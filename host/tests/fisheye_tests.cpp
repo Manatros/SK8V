@@ -123,6 +123,37 @@ int main() {
     assert((empty & 0xFF) < 120 && ((empty >> 8) & 0xFF) < 120);  // 70 % dark over at most white
     ctx->Unmap(staging, 0);
 
+    {
+        // The detail render: the 60-degree view (here all red) is kept, the screen holds the
+        // 120-degree frame meanwhile, and afterwards the middle comes from the detail view
+        // while the edges still come from the 120-degree frame.
+        fisheye::SetHudItems({}, {}, false);
+        std::vector<std::uint32_t> red(256 * 144, 0xFF0000FFu);  // R8G8B8A8: red
+        fisheye::BeginDetail();
+        fisheye::ArmDetail();  // the script saw GTA render at the detail FOV
+        for (int i = 0; i < 6 && !fisheye::DetailCaptured(); ++i) {
+            ctx->UpdateSubresource(back, 0, nullptr, red.data(), 256 * 4, 0);
+            fisheye::Present(sc);
+        }
+        assert(fisheye::DetailCaptured());
+        fisheye::UseDetail();
+        for (int i = 0; i < 5; ++i) {
+            ctx->UpdateSubresource(back, 0, nullptr, px.data(), 256 * 4, 0);  // the 120-degree view again
+            fisheye::Present(sc);
+        }
+        assert(fisheye::DetailReady());
+        ctx->CopyResource(staging, back);
+        D3D11_MAPPED_SUBRESOURCE d2{};
+        ctx->Map(staging, 0, D3D11_MAP_READ, 0, &d2);
+        const auto* q = static_cast<const std::uint32_t*>(d2.pData);
+        const std::uint32_t mid = q[72 * (d2.RowPitch / 4) + 128] & 0xFFFFFFu, corner = q[2 * (d2.RowPitch / 4) + 2] & 0xFFFFFFu;
+        ctx->Unmap(staging, 0);
+        assert((mid & 0xFF) > 200 && ((mid >> 8) & 0xFF) < 40);   // red: the detail view
+        assert(!((corner & 0xFF) > 200 && ((corner >> 8) & 0xFF) < 40));  // the corner is not
+        fisheye::DropDetail();
+        assert(!fisheye::DetailReady());
+    }
+
     fisheye::SetEnabled(false);
     fisheye::Release();
     staging->Release();

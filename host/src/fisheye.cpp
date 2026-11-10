@@ -27,6 +27,10 @@ std::atomic<bool> g_enabled{false};
 std::atomic<bool> g_failed{false};
 std::atomic<std::uint64_t> g_drawnAt{0};  // GetTickCount64 of the last bent frame
 std::atomic<std::uint64_t> g_presents{0};
+// The detail render: 0 off, 1 capturing (screen held), 2 in use, 3 dropped (held until the 60-degree frames are gone).
+std::atomic<int> g_detailPhase{0};
+std::atomic<std::uint64_t> g_detailAt{0}, g_liveAt{0};
+std::atomic<bool> g_centerCaptured{false};
 // The photo: requested by the script thread, taken by the render thread, written by a worker.
 std::atomic<int> g_photoState{0};
 std::atomic<std::uint64_t> g_photoAt{0};
@@ -60,6 +64,9 @@ struct Gpu {
     ID3D11DepthStencilState* noDepth = nullptr;
     ID3D11Texture2D* copy = nullptr;
     ID3D11ShaderResourceView* copySrv = nullptr;
+    ID3D11Texture2D* center = nullptr;        // the detail render of the middle
+    ID3D11ShaderResourceView* centerSrv = nullptr;
+    bool baseValid = false;                   // `copy` holds a 120-degree frame
     UINT copyW = 0, copyH = 0;
     DXGI_FORMAT copyFormat = DXGI_FORMAT_UNKNOWN;
     ID3D11Texture2D* hud[2] = {};
@@ -76,10 +83,12 @@ constexpr char kShader[] = R"(
 cbuffer C : register(b0) {
     float aspect; float halfDiag; float cornerAngle; float tanHalf;
     float2 texSize; float vignette; float pad0;
+    float centerScale; float detail; float2 pad1;  // the detail view: tan(60)/tan(30); 1 when it is valid
     float4 rect;   // x0 y0 x1 y1 in clip space (HUD)
     float4 color;  // premultiplied (timeline)
 };
 Texture2D src : register(t0);
+Texture2D centerTex : register(t1);
 SamplerState smp : register(s0);
 struct V { float4 pos : SV_Position; float2 uv : TEXCOORD0; };
 V vs_main(uint id : SV_VertexID) {
@@ -94,7 +103,7 @@ V vs_rect(uint id : SV_VertexID) {
     o.pos = float4(lerp(rect.x, rect.z, o.uv.x), lerp(rect.y, rect.w, o.uv.y), 0, 1);
     return o;
 }
-float3 CatmullRom(float2 uv) {
+float3 CatmullRomOf(Texture2D tex, float2 uv) {
     float2 p = uv * texSize;
     float2 t1 = floor(p - 0.5) + 0.5;
     float2 f = p - t1;
@@ -105,16 +114,40 @@ float3 CatmullRom(float2 uv) {
     float2 w12 = w1 + w2;
     float2 t0 = (t1 - 1) / texSize, t3 = (t1 + 2) / texSize, t12 = (t1 + w2 / w12) / texSize;
     float3 c = 0;
-    c += src.SampleLevel(smp, float2(t0.x, t0.y), 0).rgb * w0.x * w0.y;
-    c += src.SampleLevel(smp, float2(t12.x, t0.y), 0).rgb * w12.x * w0.y;
-    c += src.SampleLevel(smp, float2(t3.x, t0.y), 0).rgb * w3.x * w0.y;
-    c += src.SampleLevel(smp, float2(t0.x, t12.y), 0).rgb * w0.x * w12.y;
-    c += src.SampleLevel(smp, float2(t12.x, t12.y), 0).rgb * w12.x * w12.y;
-    c += src.SampleLevel(smp, float2(t3.x, t12.y), 0).rgb * w3.x * w12.y;
-    c += src.SampleLevel(smp, float2(t0.x, t3.y), 0).rgb * w0.x * w3.y;
-    c += src.SampleLevel(smp, float2(t12.x, t3.y), 0).rgb * w12.x * w3.y;
-    c += src.SampleLevel(smp, float2(t3.x, t3.y), 0).rgb * w3.x * w3.y;
+    c += tex.SampleLevel(smp, float2(t0.x, t0.y), 0).rgb * w0.x * w0.y;
+    c += tex.SampleLevel(smp, float2(t12.x, t0.y), 0).rgb * w12.x * w0.y;
+    c += tex.SampleLevel(smp, float2(t3.x, t0.y), 0).rgb * w3.x * w0.y;
+    c += tex.SampleLevel(smp, float2(t0.x, t12.y), 0).rgb * w0.x * w12.y;
+    c += tex.SampleLevel(smp, float2(t12.x, t12.y), 0).rgb * w12.x * w12.y;
+    c += tex.SampleLevel(smp, float2(t3.x, t12.y), 0).rgb * w3.x * w12.y;
+    c += tex.SampleLevel(smp, float2(t0.x, t3.y), 0).rgb * w0.x * w3.y;
+    c += tex.SampleLevel(smp, float2(t12.x, t3.y), 0).rgb * w12.x * w3.y;
+    c += tex.SampleLevel(smp, float2(t3.x, t3.y), 0).rgb * w3.x * w3.y;
     return saturate(c);
+}
+float3 CatmullRom(float2 uv) { return CatmullRomOf(src, uv); }
+float Luma(float3 c) { return dot(c, float3(0.299, 0.587, 0.114)); }
+// FXAA (the classic short form) at a point of the 120-degree frame: along an
+// edge the colour is averaged, so the enlarged middle shows no stair-steps.
+float3 Fxaa(float2 uv) {
+    float2 px = 1.0 / texSize;
+    float3 rgbM = src.SampleLevel(smp, uv, 0).rgb;
+    float lNW = Luma(src.SampleLevel(smp, uv + float2(-1, -1) * px, 0).rgb);
+    float lNE = Luma(src.SampleLevel(smp, uv + float2(1, -1) * px, 0).rgb);
+    float lSW = Luma(src.SampleLevel(smp, uv + float2(-1, 1) * px, 0).rgb);
+    float lSE = Luma(src.SampleLevel(smp, uv + float2(1, 1) * px, 0).rgb);
+    float lM = Luma(rgbM);
+    float lMin = min(lM, min(min(lNW, lNE), min(lSW, lSE)));
+    float lMax = max(lM, max(max(lNW, lNE), max(lSW, lSE)));
+    if (lMax - lMin < max(0.0312, lMax * 0.125)) return CatmullRom(uv);  // no edge: the sharp sampling
+    float2 dir = float2(-((lNW + lNE) - (lSW + lSE)), (lNW + lSW) - (lNE + lSE));
+    float reduce = max((lNW + lNE + lSW + lSE) * 0.03125, 1.0 / 128.0);
+    float rcpMin = 1.0 / (min(abs(dir.x), abs(dir.y)) + reduce);
+    dir = clamp(dir * rcpMin, -8.0, 8.0) * px;
+    float3 a = 0.5 * (src.SampleLevel(smp, uv + dir * (1.0 / 3.0 - 0.5), 0).rgb + src.SampleLevel(smp, uv + dir * (2.0 / 3.0 - 0.5), 0).rgb);
+    float3 b = a * 0.5 + 0.25 * (src.SampleLevel(smp, uv - dir * 0.5, 0).rgb + src.SampleLevel(smp, uv + dir * 0.5, 0).rgb);
+    float lB = Luma(b);
+    return (lB < lMin || lB > lMax) ? a : b;
 }
 float4 ps_main(V i) : SV_Target {
     float2 p = (i.uv * 2 - 1) * float2(aspect, 1);
@@ -127,7 +160,15 @@ float4 ps_main(V i) : SV_Target {
     float2 uv = (q / float2(aspect, 1)) * 0.5 + 0.5;
     float rho = r / halfDiag;
     float shade = 1.0 - vignette * smoothstep(0.55, 1.0, rho);
-    return float4(CatmullRom(uv) * shade, 1);
+    float3 colour = Fxaa(uv);
+    if (detail > 0.5) {
+        // The same direction in the 60-degree detail view (same camera, narrower lens).
+        float2 qc = q * centerScale;
+        float edge = max(abs(qc.x) / aspect, abs(qc.y));
+        float w = 1.0 - smoothstep(0.82, 0.97, edge);
+        if (w > 0.0) colour = lerp(colour, CatmullRomOf(centerTex, (qc / float2(aspect, 1)) * 0.5 + 0.5), w);
+    }
+    return float4(colour * shade, 1);
 }
 float4 ps_tex(V i) : SV_Target { return src.Load(int3(i.uv * texSize, 0)); }
 float4 ps_color(V i) : SV_Target { return color; }
@@ -136,6 +177,7 @@ float4 ps_color(V i) : SV_Target { return color; }
 struct Constants {
     float aspect, halfDiag, cornerAngle, tanHalf;
     float texW, texH, vignette, pad0;
+    float centerScale, detail, pad1, pad2;
     float rect[4];
     float color[4];
 };
@@ -149,6 +191,7 @@ Constants Make(float w, float h, float vfov) {
     c.cornerAngle = std::atan(c.halfDiag * c.tanHalf);
     c.texW = w, c.texH = h;
     c.vignette = 0.35f;
+    c.centerScale = c.tanHalf / std::tan(kDetailFov * 0.5f * 0.01745329f);
     return c;
 }
 
@@ -159,6 +202,11 @@ void Fail(const char* what) {
 void ReleaseCopy() {
     SafeRelease(gpu.copySrv);
     SafeRelease(gpu.copy);
+    SafeRelease(gpu.centerSrv);
+    SafeRelease(gpu.center);
+    gpu.baseValid = false;
+    g_centerCaptured = false;  // a new size: the detail is gone
+    g_detailPhase = 0;
     gpu.copyW = gpu.copyH = 0;
     gpu.copyFormat = DXGI_FORMAT_UNKNOWN;
 }
@@ -276,7 +324,9 @@ bool EnsureCopy(UINT w, UINT h, DXGI_FORMAT typeless, DXGI_FORMAT unorm) {
     sv.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
     sv.Texture2D.MipLevels = 1;
     if (FAILED(gpu.device->CreateTexture2D(&d, nullptr, &gpu.copy)) ||
-        FAILED(gpu.device->CreateShaderResourceView(gpu.copy, &sv, &gpu.copySrv))) {
+        FAILED(gpu.device->CreateShaderResourceView(gpu.copy, &sv, &gpu.copySrv)) ||
+        FAILED(gpu.device->CreateTexture2D(&d, nullptr, &gpu.center)) ||
+        FAILED(gpu.device->CreateShaderResourceView(gpu.center, &sv, &gpu.centerSrv))) {
         ReleaseCopy();
         return false;
     }
@@ -464,8 +514,26 @@ void Bend(IDXGISwapChain* sc) {
     ID3D11DeviceContext* c = gpu.ctx;
     d3dstate::SavedState saved;
     saved.Save(c);
-    c->CopyResource(gpu.copy, back);
+    // The detail render: while capturing, the backbuffer holds the 60-degree view
+    // (kept as `center`) and the screen shows the last 120-degree frame.
+    const std::uint64_t n = g_presents.load();
+    const int phase = g_detailPhase.load();
+    bool hold = false;
+    if (phase == 1) {
+        hold = true;
+        if (!g_centerCaptured.load() && n >= g_detailAt.load()) {
+            c->CopyResource(gpu.center, back);
+            g_centerCaptured = true;
+        }
+    } else if ((phase == 2 || phase == 3) && n < g_liveAt.load()) {
+        hold = true;  // the camera turns back to 120 degrees a frame or two late
+    } else if (phase == 3) {
+        int expected = 3;
+        g_detailPhase.compare_exchange_strong(expected, 0);
+    }
+    if (!hold || !gpu.baseValid) c->CopyResource(gpu.copy, back), gpu.baseValid = true;
     Constants k = Make(static_cast<float>(bd.Width), static_cast<float>(bd.Height), kSourceFov);
+    k.detail = phase == 2 && g_centerCaptured.load() ? 1.0f : 0.0f;  // phase 3 holds without it
     auto upload = [&] {
         D3D11_MAPPED_SUBRESOURCE m{};
         if (FAILED(c->Map(gpu.cb, 0, D3D11_MAP_WRITE_DISCARD, 0, &m))) return false;
@@ -490,7 +558,8 @@ void Bend(IDXGISwapChain* sc) {
     c->PSSetShader(gpu.ps, nullptr, 0);
     c->VSSetConstantBuffers(0, 1, &gpu.cb);
     c->PSSetConstantBuffers(0, 1, &gpu.cb);
-    c->PSSetShaderResources(0, 1, &gpu.copySrv);
+    ID3D11ShaderResourceView* views[2] = {gpu.copySrv, gpu.centerSrv};
+    c->PSSetShaderResources(0, 2, views);
     c->PSSetSamplers(0, 1, &gpu.linear);
     c->Draw(3, 0);
     g_drawnAt = GetTickCount64();
@@ -528,8 +597,8 @@ void Bend(IDXGISwapChain* sc) {
             }
         }
     }
-    ID3D11ShaderResourceView* none = nullptr;
-    c->PSSetShaderResources(0, 1, &none);
+    ID3D11ShaderResourceView* none[2] = {};
+    c->PSSetShaderResources(0, 2, none);
     saved.Restore(c);
     rtv->Release();
     back->Release();
@@ -614,6 +683,27 @@ void RequestPhoto(const std::wstring& path) {
 }
 
 int PhotoState() { return g_photoState.load(); }
+
+void BeginDetail() {
+    g_centerCaptured = false;
+    g_detailAt = ~0ull;  // armed once GTA is seen rendering the detail view (ArmDetail)
+    g_detailPhase = 1;
+}
+void ArmDetail() {
+    if (g_detailPhase.load() == 1 && g_detailAt.load() == ~0ull) g_detailAt = g_presents.load() + 3;
+}
+bool DetailCaptured() { return g_detailPhase.load() == 1 && g_centerCaptured.load(); }
+void UseDetail() {
+    g_liveAt = g_presents.load() + 3;
+    g_detailPhase = 2;
+}
+void DropDetail() {
+    // While capturing, frames at the detail FOV are still on their way: hold until they are gone.
+    if (g_detailPhase.load() == 1) g_liveAt = g_presents.load() + 4, g_detailPhase = 3;
+    else if (g_detailPhase.load() != 3) g_detailPhase = 0;
+    g_centerCaptured = false;
+}
+bool DetailReady() { return g_detailPhase.load() == 2 && g_centerCaptured.load() && g_presents.load() >= g_liveAt.load(); }
 void CancelPhoto() {
     if (g_photoState.load() == 1 && g_photoAt.exchange(0)) g_photoState = 0;  // not taken yet (taken: the writer finishes it)
 }
