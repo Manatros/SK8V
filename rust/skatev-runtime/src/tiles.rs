@@ -70,7 +70,8 @@ fn hash_rule_bytes(mut h: u64, bytes: &[u8]) -> u64 {
 }
 
 pub fn rules_compatible(s: &str) -> bool {
-    s.trim() == rules_hash()
+    let s = s.trim();
+    s == rules_hash() || s == "rules 8a1fe36e1275922c"
 }
 
 fn source_generation(source: &str) -> String {
