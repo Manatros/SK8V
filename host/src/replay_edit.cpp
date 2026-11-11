@@ -138,6 +138,7 @@ EditResult Edit::DeleteMarker(double t, double within, bool confirmed) {
     Clip joined;  // camera and keys reset; the left clip's effects stay
     joined.speed = clips_[i].speed, joined.shake = clips_[i].shake;
     joined.filter = clips_[i].filter, joined.lens = clips_[i].lens;
+    joined.filterStrength = clips_[i].filterStrength;
     markers_.erase(markers_.begin() + best);
     clips_[i] = joined;
     clips_.erase(clips_.begin() + static_cast<std::ptrdiff_t>(i) + 1);

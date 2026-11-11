@@ -39,6 +39,7 @@ struct Clip {
     int shake = 0;          // 0 Off, 1 Low, 2 Medium, 3 High
     int filter = 0;         // FilterName index
     int lens = 0;           // Lens (Auto)
+    int filterStrength = -1;  // percentage; -1 inherits FilmFilterStrength
 };
 float ShakeAmplitude(int shake);  // GTA HAND_SHAKE amplitude: 0, 0.3, 0.7, 1.2
 
@@ -85,6 +86,7 @@ public:
     Clip& ClipRef(int i) { return clips_[static_cast<std::size_t>(i)]; }
     const Clip& ClipRef(int i) const { return clips_[static_cast<std::size_t>(i)]; }
     void Touch() { edited_ = true; }
+    void SetEdited(bool edited) { edited_ = edited; }
     // Keys (Advanced cameras): placed in the clip holding `t`, replacing one within 0.05 s.
     EditResult AddKey(double t, const CameraParams& p);
     EditResult DeleteKey(double t, double within);

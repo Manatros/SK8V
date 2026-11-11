@@ -2019,7 +2019,7 @@ void DisableSkateControls(std::uint16_t buttons, bool aiming) {
         // (and the look axes 1, 2: the pad's right stick, in case the wheel reads it there)
         skip[c] = (g_weaponWheel && ((c >= 12 && c <= 17) || c == 37 || c == 1 || c == 2)) ||
                   c == 199 || c == 200 || c == 170 || c == 288 || c == 289 || (c >= 296 && c <= 328) || c == 349 ||
-                  (c == 19 && !(buttons & 0x0100) && !replay::Active()) ||  // the replay's D-pad down is a lens, not the character wheel
+                  (c == 19 && !(buttons & 0x0100) && !replay::Active()) ||  // replay uses D-pad down for editor controls
                   (c == 244 && gtaKeyboard) || // keyboard and mouse: M stays GTA's interaction menu
                   (g_gtaView && !replay::Active() && (((c == 1 || c == 2) && mouseLook) || (c == 26 && !gtaKeyboard) || c == 0)) || // GTA's look, look behind (pad: on the keyboard C is a grab), V
                   (aiming && (c == 1 || c == 2 || c == 24 || c == 25 || c == 45 || (c >= 270 && c <= 273) || (c >= 290 && c <= 295)));
@@ -3466,7 +3466,7 @@ void LifecycleFrame(Session& s, const Config& cfg, bool f6) {
         // Hold Y to put the board away. The press still reaches Skate, so
         // it steps off first, then puts the board away while Y stays down.
         // Only a press made while skating counts; a Y held at entry does not.
-        const bool yDown = !replay::Active() && (pad.buttons & 0x8000) != 0;  // Y cycles the replay's cameras
+        const bool yDown = !replay::Active() && (pad.buttons & 0x8000) != 0;  // replay owns Y while active
         if (yDown && !s.yWasDown) s.yHeldSince = now;
         if (!yDown) s.yHeldSince = 0;
         s.yWasDown = yDown;
@@ -4033,9 +4033,9 @@ std::vector<menu::Page> MenuPages(Session& s) {
                    replay::Configure(g_config.replay, g_config.replaySeconds, g_config.replayWorldScale, Log);
                })),
                "Tap Back (keyboard: Tab) while skating to watch the last seconds again, as in Skate 3. "
-               "Controller: A play/pause, left stick scrubs, LB/RB speed, LT backwards, Y camera, B or Back returns. "
-               "Keyboard: Space play/pause, A/D scrub, Up/Down or mouse wheel speed, hold R backwards, C camera, "
-               "free camera W A S D, E/Q up/down, mouse look; Tab or Backspace returns to play where it stopped."),
+               "Play or scrub the recording, then choose Edit Timeline to trim it and edit each clip. "
+               "Use A (keyboard: Enter) to edit and B (keyboard: Backspace) to go back. "
+               "The mouse wheel scrubs or moves through lists. Use the mouse to aim the Free Camera."),
         Number("Replay length", "ReplaySeconds", D.replaySeconds, 10, 60, 5, Fixed("%.0f s"), Bound("ReplaySeconds", [] {
                    replay::Configure(g_config.replay, g_config.replaySeconds, g_config.replayWorldScale, Log);
                })),

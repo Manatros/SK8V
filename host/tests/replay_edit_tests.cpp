@@ -57,9 +57,11 @@ int main() {
 
     // A marker splits a clip: both halves keep its camera and effects, keys on their side.
     e.ClipRef(1).speed = 0;  // 1/4x
+    e.ClipRef(1).filterStrength = 40;
     assert(e.PlaceMarker(7.0) == EditResult::Ok);  // splits clip 1 (5..10)
     assert(e.Clips().size() == 4 && e.ClipRef(1).camera == CameraKind::AdvTripod && e.ClipRef(2).camera == CameraKind::AdvTripod);
     assert(e.ClipRef(1).keys.size() == 1 && e.ClipRef(2).keys.empty() && e.ClipRef(2).speed == 0);
+    assert(e.ClipRef(2).filterStrength == 40);
 
     // Speeds weight the edited length: 0-5 at 1x, 5-10 at 1/4x, 10-30 at 1x = 5 + 20 + 20.
     assert(std::fabs(e.EditedLength() - 45.0) < 1e-9);
@@ -69,7 +71,7 @@ int main() {
     assert(e.DeleteMarker(7.1, 0.5, false) == EditResult::NeedsConfirm);
     assert(e.DeleteMarker(7.1, 0.5, true) == EditResult::Ok);
     assert(e.Clips().size() == 3 && e.ClipRef(1).camera == CameraKind::Game && e.ClipRef(1).keys.empty());
-    assert(e.ClipRef(1).speed == 0);
+    assert(e.ClipRef(1).speed == 0 && e.ClipRef(1).filterStrength == 40);
     assert(e.DeleteMarker(20.0, 0.5, true) == EditResult::NotFound);
 
     // In/Out: markers outside go with their clips; too close to a marker is refused.
@@ -117,10 +119,12 @@ int main() {
         s.markers = {1 / 60.0};
         Clip ca, c;
         ca.camera = CameraKind::AdvFree, ca.speed = 0, ca.shake = 3, ca.filter = 2, ca.lens = kLensFisheye;
+        ca.filterStrength = 0;
         CameraParams kp;
         kp.yaw = 33.0f, kp.positioned = true, kp.position[2] = 9.0f;
         ca.keys.push_back(Key{0.005, kp});
         c.camera = CameraKind::Follow, c.base.distance = 6.5f;
+        c.lens = kLens50;
         s.clips = {ca, c};
         s.soundStartMs = 990;
         s.pcm = {1, -2, 3};
@@ -136,8 +140,29 @@ int main() {
         assert(back.markers.size() == 1 && back.clips.size() == 2);
         assert(back.clips[0].camera == CameraKind::AdvFree && back.clips[0].shake == 3 && back.clips[0].speed == 0);
         assert(back.clips[0].filter == 2 && back.clips[0].lens == kLensFisheye);  // by name
+        assert(back.clips[0].filterStrength == 0);
+        assert(back.clips[1].lens == kLens50 && back.clips[1].filterStrength == -1);
         assert(back.clips[0].keys.size() == 1 && back.clips[0].keys[0].p.yaw == 33.0f && back.clips[0].keys[0].p.positioned);
         assert(back.clips[1].base.distance == 6.5f && back.soundStartMs == 990 && back.pcm.size() == 3 && back.pcm[1] == -2);
+        // Convert the two clip tails to the published v1 layout. Each lens
+        // name follows a 16-bit length and v1 ends the clip after the name.
+        std::vector<std::uint8_t> v1 = bytes;
+        v1[4] = 1;
+        const auto legacyLens = [&](const std::string& name, bool keep) {
+            const auto it = std::search(v1.begin(), v1.end(), name.begin(), name.end());
+            assert(it != v1.end());
+            v1.erase(it + name.size(), it + name.size() + sizeof(std::int32_t));
+            if (!keep) {
+                *(it - sizeof(std::uint16_t)) = 0;
+                v1.erase(it, it + name.size());
+            }
+        };
+        legacyLens("Fisheye", true);
+        legacyLens("50 mm", false);
+        assert(ReadInfo(std::vector<std::uint8_t>(v1.begin(), v1.begin() + kInfoBytes), info));
+        assert(Deserialize(v1, back, err) && back.pcm == s.pcm);
+        assert(back.clips[0].lens == kLensFisheye && back.clips[0].filterStrength == -1);
+        assert(back.clips[1].lens == kLensAuto && back.clips[1].filterStrength == -1);
         std::vector<std::uint8_t> cut(bytes.begin(), bytes.end() - 3);
         assert(!Deserialize(cut, back, err));  // damaged
         std::vector<std::uint8_t> other = bytes;

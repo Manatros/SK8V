@@ -31,16 +31,12 @@ namespace {
 using namespace gta;
 
 constexpr double kTickSeconds = 1.0 / 60.0;  // Skate's fixed step
-constexpr float kFilmerFov = 100.0f;         // the filmer's fisheye
 constexpr float kDeg = 0.01745329f;
 
 // Instant Replay's cameras (design 2026-11-02-replay-editor, 2026-11-09-replay-look-sound).
-enum Camera { Recorded, Follow, Tripod, Free, Filmer, Orbit, Static, kCameras };
-constexpr const char* kCameraNames[kCameras] = {"Recorded", "Follow", "Tripod", "Free", "Filmer", "Orbit", "Static"};
-
 // Skate 3's editor (design 2026-11-09-skate-replay-editor).
-enum class Mode { Instant, Timeline, EditMenu, CameraEdit, Finished, Prompt, Help, Reel, Loading };
-enum class PromptAction { None, PlaceMarker, DeleteMarker, DeleteKey, ResetTimeline, ChangeCamera, CancelCameraEdit, SavePhoto, SaveReplay, DeleteSaved };
+enum class Mode { Instant, Timeline, EditMenu, CameraMenu, CameraEdit, Finished, Prompt, Help, Reel, Loading };
+enum class PromptAction { None, PlaceMarker, DeleteMarker, DeleteKey, ResetTimeline, ChangeCamera, CancelCameraEdit, SavePhoto, SaveReplay, DeleteSaved, ExitReplay };
 
 void (*g_log)(const char*) = nullptr;
 bool g_enabled = true;
@@ -53,26 +49,18 @@ Frame g_scratch;             // built in place each tick (no allocation once siz
 std::vector<float> g_pose;   // the presented pose
 bool g_active = false;
 Playhead g_head;
-int g_camera = Recorded;
 int g_cam = 0;               // the replay's own camera
-float g_eye[3] = {};         // follow/free/tripod state
-float g_yaw = 0.0f, g_pitch = 0.0f;
 Input g_input;               // both devices; the first frame takes what is held as it is
 unsigned g_applyCalls = 0;
-// Look and sound (design 2026-11-09-replay-look-sound). Instant Replay's
-// filter and lens are kept for the session; the editor's are per clip.
+// Look and sound (design 2026-11-09-replay-look-sound).
 bool g_sound = true, g_fisheyeOk = true;
 float g_soundGainDb = -4.0f, g_filterStrength = 0.85f;
-int g_filter = 0, g_lens = kLensAuto;
-float g_height = 0.0f;       // Follow, Tripod, Filmer: metres above their own height
-float g_orbitYaw = 0.0f, g_orbitDist = 4.0f, g_orbitHeight = 1.2f;
-float g_staticRot[3] = {};
 bool g_hudHidden = false;    // H / right stick click
-float g_zoom = 1.0f;         // [ and ]: a factor on the field of view
 bool g_keyboard = false;     // the help names the keyboard's keys
 
 // What is applied to GTA now (changed only on a difference).
 int g_appliedFilter = 0;
+int g_appliedStrength = -1;
 bool g_appliedFisheye = false;
 int g_appliedShake = 0;
 
@@ -96,7 +84,6 @@ struct PromptState {
 std::string g_notice;        // Skate's short messages ("Too close ..."), shown for a moment
 double g_noticeUntil = 0.0;
 double g_clock = 0.0;        // real seconds in the replay
-bool g_leaveBlock = false;   // Instant Replay ignores the leave buttons until they are let go
 int g_promptPed = 0;         // the ped for actions a prompt starts
 int g_ped = 0;               // the skater (the camera's line tests ignore it)
 // Cameras never inside geometry (chat 2026-11-10: "make sure no cam can clip through geometry").
@@ -138,7 +125,8 @@ Mode g_afterLoad = Mode::Timeline;
 std::vector<std::pair<std::string, std::string>> g_help;  // pages: title, text
 int g_helpPage = 0;
 Mode g_helpBack = Mode::Timeline;
-bool g_exitPending = false;  // "Exit replay" chosen: leave once A/Enter is let go
+bool g_exitPending = false;  // Exit waits for the selection or Back buttons to be released
+bool g_editWasDirty = false; // restore the original dirty state on camera cancel
 bool g_camChanged = false;   // camera mode: something was set (Cancel asks only then)
 float g_followHeading = 0.0f;  // the editor's Follow cameras: a steady heading (radians)
 bool g_followHeadingSet = false;
@@ -146,14 +134,20 @@ int g_stickPrev = 0;         // Edit Menu / Finished: the left stick's last up/d
 
 // ---- look -----------------------------------------------------------------
 
-void ApplyLook(int filter, bool fisheyeWanted, int shake) {
-    if (filter != g_appliedFilter) {
-        if (g_appliedFilter) Call<void>(CLEAR_TIMECYCLE_MODIFIER);
-        if (const char* mod = FilterModifier(filter)) {
-            Call<void>(SET_TIMECYCLE_MODIFIER, mod);
-            Call<void>(SET_TIMECYCLE_MODIFIER_STRENGTH, std::clamp(g_filterStrength, 0.0f, 1.0f));
+int StrengthPercent(const Clip& clip) {
+    return clip.filterStrength < 0 ? static_cast<int>(std::lround(g_filterStrength * 100.0f)) : clip.filterStrength;
+}
+
+void ApplyLook(int filter, bool fisheyeWanted, int shake, int strength) {
+    if (!FilterModifier(filter)) filter = 0;
+    if (filter != g_appliedFilter || (filter && strength != g_appliedStrength)) {
+        if (filter != g_appliedFilter) {
+            if (g_appliedFilter) Call<void>(CLEAR_TIMECYCLE_MODIFIER);
+            if (filter) Call<void>(SET_TIMECYCLE_MODIFIER, FilterModifier(filter));
         }
-        g_appliedFilter = FilterModifier(filter) ? filter : 0;
+        if (filter) Call<void>(SET_TIMECYCLE_MODIFIER_STRENGTH, strength / 100.0f);
+        g_appliedFilter = filter;
+        g_appliedStrength = strength;
         fisheye::SetFiltered(g_appliedFilter != 0);
         if (g_detailState) fisheye::DropDetail(), g_detailState = 0;
         g_stableSince = g_clock;
@@ -402,86 +396,6 @@ void SetCam(float* eye, float* rot, float fov, Clear clear, const float* chest, 
     Call<void>(SET_CAM_FOV, g_cam, g_detailState == 1 ? fisheye::kDetailFov : fov);
 }
 
-// Instant Replay's camera for the presented frame.
-void Aim(const Recording::Sample& s, float dt, const Command& in) {
-    const Frame& a = *s.a;
-    const Frame& b = *s.b;
-    const Pose p = PoseAt(s);
-    const float* root = p.root;
-    const float heading = p.heading;
-    float eye[3], rot[3] = {}, fov = 60.0f;
-    switch (g_camera) {
-    case Recorded:
-        Lerp3(a.camera, b.camera, s.t, eye);
-        LerpAngles3(a.camera + 3, b.camera + 3, s.t, rot);
-        fov = a.camera[6] + (b.camera[6] - a.camera[6]) * s.t;
-        break;
-    case Follow: {
-        const float want[3] = {root[0] + std::sin(heading) * 4.0f, root[1] - std::cos(heading) * 4.0f, root[2] + 1.8f + g_height};
-        const float k = std::min(1.0f, dt * 4.0f);
-        for (int i = 0; i < 3; ++i) g_eye[i] += (want[i] - g_eye[i]) * k;
-        std::memcpy(eye, g_eye, sizeof(eye));
-        break;
-    }
-    case Tripod:
-        std::memcpy(eye, g_eye, sizeof(eye));
-        eye[2] += g_height;
-        break;
-    case Orbit: {
-        // Around the skater: look turns it, forward/back the distance, up/down the height.
-        g_orbitYaw += in.lookYaw;
-        g_orbitDist = std::clamp(g_orbitDist - in.move[1] * 4.0f * dt, 1.5f, 12.0f);
-        g_orbitHeight = std::clamp(g_orbitHeight + in.move[2] * 3.0f * dt, -1.0f, 8.0f);
-        const float yaw = g_orbitYaw * kDeg;
-        eye[0] = root[0] + std::sin(yaw) * g_orbitDist;
-        eye[1] = root[1] - std::cos(yaw) * g_orbitDist;
-        eye[2] = root[2] + g_orbitHeight;
-        break;
-    }
-    case Static:
-        std::memcpy(eye, g_eye, sizeof(eye));
-        std::memcpy(rot, g_staticRot, sizeof(rot));
-        break;
-    case Free: {
-        g_yaw += in.lookYaw;
-        g_pitch = std::clamp(g_pitch + in.lookPitch, -85.0f, 85.0f);
-        const float yaw = g_yaw * kDeg;
-        const float fwd = in.move[1] * 8.0f * dt, side = in.move[0] * 8.0f * dt;
-        const float up = in.move[2] * 6.0f * dt;
-        g_eye[0] += -std::sin(yaw) * fwd + std::cos(yaw) * side;
-        g_eye[1] += std::cos(yaw) * fwd + std::sin(yaw) * side;
-        g_eye[2] += up;
-        std::memcpy(eye, g_eye, sizeof(eye));
-        rot[0] = g_pitch, rot[2] = g_yaw;
-        fov = 60.0f;
-        break;
-    }
-    default: {  // Filmer: low behind the board, wide lens
-        eye[0] = root[0] + std::sin(heading) * 1.6f;
-        eye[1] = root[1] - std::cos(heading) * 1.6f;
-        eye[2] = root[2] - 0.5f + g_height;
-        fov = kFilmerFov;
-        break;
-    }
-    }
-    const float chest[3] = {root[0], root[1], root[2] + 0.4f};
-    const float body[3] = {root[0], root[1], root[2] + 1.0f};
-    if (g_camera != Recorded && g_camera != Free && g_camera != Static) {
-        LookAt(eye, chest, rot);
-        fov = g_camera == Filmer ? kFilmerFov : 50.0f;
-    }
-    if (g_camera == Static) fov = 50.0f;
-    fov = LensFov(g_lens, fov);
-    if (g_lens != kLensFisheye) fov *= g_zoom;  // the fisheye keeps its 120-degree source
-    const bool around = g_camera == Follow || g_camera == Orbit || g_camera == Filmer;
-    const Clear clear = g_camera == Recorded ? Clear::None : around ? Clear::Skater : Clear::Path;
-    SetCam(eye, rot, fov, clear, body, g_camera == Tripod ? chest : around ? chest : nullptr, 100 + g_camera);
-    // The free cameras stay where they were stopped (no pushing into a wall); the
-    // Tripod keeps its base and gives up height instead (no sinking under a ceiling).
-    if (g_camera == Free || g_camera == Static) std::memcpy(g_eye, eye, sizeof(g_eye));
-    if (g_camera == Tripod) g_eye[0] = eye[0], g_eye[1] = eye[1], g_height = std::clamp(eye[2] - g_eye[2], -1.0f, 4.0f);
-}
-
 float MmToFov(float mm) { return 2.0f * std::atan(12.0f / std::max(mm, 1.0f)) / kDeg; }
 float FovToMm(float fov) { return 12.0f / std::tan(std::clamp(fov, 5.0f, 150.0f) * 0.5f * kDeg); }
 
@@ -531,48 +445,13 @@ void AimEdited(const Recording::Sample& s, CameraKind kind, const CameraParams& 
         fov = a.camera[6] + (b.camera[6] - a.camera[6]) * s.t;
         break;
     }
-    if (c.zoomMm > 0.0f) fov = MmToFov(c.zoomMm);
-    if (lens == kLensFisheye) fov = 120.0f;
+    fov = LensFov(lens, fov);
+    if (c.zoomMm > 0.0f && lens != kLensFisheye) fov = MmToFov(c.zoomMm);
     const float body[3] = {p.root[0], p.root[1], p.root[2] + 1.0f};
     const bool around = kind == CameraKind::Follow || kind == CameraKind::AdvFollow;
     const bool tripod = kind == CameraKind::Tripod || kind == CameraKind::AdvTripod;
     const Clear clear = kind == CameraKind::Game ? Clear::None : around ? Clear::Skater : Clear::Path;
     SetCam(eye, rot, fov, clear, body, around || tripod ? aim : nullptr, 200 + static_cast<int>(kind) + 16 * g_edit.ClipAt(g_head.time));
-}
-
-// ---- Instant Replay's HUD ---------------------------------------------------
-
-void InstantHud() {
-    static const char* speeds[] = {"1/4x", "1/2x", "1x", "2x"};
-    const double start = g_rec.Start(), len = std::max(g_rec.Length(), 1e-3);
-    const float f = static_cast<float>(std::clamp((g_head.time - start) / len, 0.0, 1.0));
-    Rect(0.2f, 0.901f, 0.8f, 0.909f, 0.08f, 0.08f, 0.08f, 0.7f);
-    Rect(0.2f, 0.901f, 0.2f + 0.6f * f, 0.909f, 1.0f, 0.78f, 0.16f, 0.9f);
-    Rect(0.2f + 0.6f * f - 0.0015f, 0.895f, 0.2f + 0.6f * f + 0.0015f, 0.915f, 1.0f, 1.0f, 1.0f, 1.0f);
-    const bool height = g_camera == Follow || g_camera == Tripod || g_camera == Filmer;
-    std::string keys;
-    if (!g_keyboard) {
-        keys = g_camera == Free    ? "A play/pause  LB/RB speed  Y camera  left stick move  RT/LT up/down  right stick look  X filter  D-pad lens"
-               : g_camera == Orbit ? "A play/pause  LB/RB speed  Y camera  right stick turn  left stick distance  RT/LT up/down  X filter  D-pad lens"
-               : height ? "A play/pause  left stick scrub  LB/RB speed  hold LT reverse  right stick up/down  Y camera  X filter  D-pad lens"
-                        : "A play/pause  left stick scrub  LB/RB speed  hold LT reverse  Y camera  X filter  D-pad lens";
-        if (!g_head.playing) {
-            const std::size_t at = keys.find("LB/RB speed");
-            if (at != std::string::npos) keys.replace(at, 11, "LB/RB frame");
-        }
-        keys += "  L3 edit timeline  R3 hide  B back";
-    } else {
-        keys = g_camera == Free    ? "Space play/pause  wheel or +/- speed  C camera  W A S D move  E/Q or Up/Down up/down  mouse look  F filter  L lens"
-               : g_camera == Orbit ? "Space play/pause  wheel or +/- speed  C camera  mouse turn  W/S distance  E/Q or Up/Down up/down  F filter  L lens"
-               : height ? "Space play/pause  A/D scrub  Up/Down, wheel or +/- speed  hold R reverse  E/Q up/down  C camera  F filter  L lens"
-                        : "Space play/pause  A/D scrub  Up/Down, wheel or +/- speed  hold R reverse  C camera  F filter  L lens";
-        keys += "  , . frame  [ ] zoom  T edit timeline  H hide  Tab back";
-    }
-    char line[256];
-    std::snprintf(line, sizeof(line), "INSTANT REPLAY  %s%s  %s  %s  %s  %.1f / %.1f s", g_head.reverse ? "-" : "", speeds[g_head.speed],
-                  kCameraNames[g_camera], LensName(g_lens), FilterName(g_filter), g_head.time - start, g_rec.Length());
-    Txt(line, 0.5f, 0.918f, 0.34f, true);
-    Txt(keys, 0.5f, 0.952f, 0.27f, true);
 }
 
 // ---- the editor's HUD ----------------------------------------------------------
@@ -585,41 +464,46 @@ void KindColour(CameraKind k, float& r, float& g, float& b) {
 }
 
 // Skate's timeline strip along the top: the whole recording, In/Out, clips by camera, markers, keys, playhead.
-void Strip(int highlightClip) {
+void Strip(int highlightClip, bool preview = false) {
     const double start = g_rec.Start(), len = std::max(g_rec.Length(), 1e-3);
     auto X = [&](double t) { return 0.05f + 0.9f * static_cast<float>(std::clamp((t - start) / len, 0.0, 1.0)); };
     Rect(0.045f, 0.028f, 0.955f, 0.082f, 0.0f, 0.0f, 0.0f, 0.55f);
     Rect(0.05f, 0.04f, 0.95f, 0.07f, 0.15f, 0.15f, 0.15f, 0.9f);  // outside In..Out
-    for (int i = 0; i < static_cast<int>(g_edit.Clips().size()); ++i) {
-        float r, g, b;
-        KindColour(g_edit.ClipRef(i).camera, r, g, b);
-        const float x0 = X(g_edit.ClipStart(i)), x1 = X(g_edit.ClipEnd(i));
-        if (i == highlightClip) Rect(x0, 0.034f, x1, 0.076f, 1.0f, 1.0f, 1.0f, 0.9f);
-        Rect(x0, 0.04f, x1, 0.07f, r, g, b, 0.95f);
-        for (const Key& k : g_edit.ClipRef(i).keys) Rect(X(k.time) - 0.0015f, 0.07f, X(k.time) + 0.0015f, 0.078f, 1.0f, 0.45f, 0.1f, 1.0f);
+    if (preview) {
+        Rect(0.05f, 0.04f, X(g_head.time), 0.07f, 0.7f, 0.57f, 0.16f, 0.9f);
+    } else {
+        for (int i = 0; i < static_cast<int>(g_edit.Clips().size()); ++i) {
+            float r, g, b;
+            KindColour(g_edit.ClipRef(i).camera, r, g, b);
+            const float x0 = X(g_edit.ClipStart(i)), x1 = X(g_edit.ClipEnd(i));
+            if (i == highlightClip) Rect(x0, 0.034f, x1, 0.076f, 1.0f, 1.0f, 1.0f, 0.9f);
+            Rect(x0, 0.04f, x1, 0.07f, r, g, b, 0.95f);
+            for (const Key& k : g_edit.ClipRef(i).keys) Rect(X(k.time) - 0.0015f, 0.07f, X(k.time) + 0.0015f, 0.078f, 1.0f, 0.45f, 0.1f, 1.0f);
+        }
+        for (double m : g_edit.Markers()) Rect(X(m) - 0.0012f, 0.036f, X(m) + 0.0012f, 0.074f, 1.0f, 1.0f, 1.0f, 1.0f);
+        Rect(X(g_edit.In()) - 0.002f, 0.032f, X(g_edit.In()) + 0.002f, 0.078f, 1.0f, 0.85f, 0.1f, 1.0f);
+        Rect(X(g_edit.Out()) - 0.002f, 0.032f, X(g_edit.Out()) + 0.002f, 0.078f, 1.0f, 0.85f, 0.1f, 1.0f);
     }
-    for (double m : g_edit.Markers()) Rect(X(m) - 0.0012f, 0.036f, X(m) + 0.0012f, 0.074f, 1.0f, 1.0f, 1.0f, 1.0f);
-    Rect(X(g_edit.In()) - 0.002f, 0.032f, X(g_edit.In()) + 0.002f, 0.078f, 1.0f, 0.85f, 0.1f, 1.0f);
-    Rect(X(g_edit.Out()) - 0.002f, 0.032f, X(g_edit.Out()) + 0.002f, 0.078f, 1.0f, 0.85f, 0.1f, 1.0f);
     Rect(X(g_head.time) - 0.0015f, 0.026f, X(g_head.time) + 0.0015f, 0.084f, 1.0f, 0.2f, 0.2f, 1.0f);
 }
 
-void EditorInfo(const char* title) {
-    const int c = g_edit.ClipAt(g_head.time);
-    const Clip& clip = g_edit.ClipRef(c);
-    static const char* speeds[] = {"1/4x", "1/2x", "1x", "2x"};
-    static const char* shakes[] = {"Off", "Low", "Medium", "High"};
-    char line[320];
-    std::snprintf(line, sizeof(line), "%s   Clip %d/%d  %s  Speed %s  Shake %s  %s  %s   Time %s   Length %s   Estimated Video Length %s",
-                  title, c + 1, static_cast<int>(g_edit.Clips().size()), CameraKindName(clip.camera),
-                  speeds[std::clamp(clip.speed, 0, 3)], shakes[std::clamp(clip.shake, 0, 3)], FilterName(clip.filter),
-                  clip.lens == kLensFisheye ? "Fisheye" : "Normal lens", Clock(g_head.time - g_edit.In()).c_str(),
-                  Clock(g_edit.Out() - g_edit.In()).c_str(), Clock(g_edit.EditedLength()).c_str());
+void EditorInfo(const char* title, bool preview) {
+    std::string line = title;
+    if (preview) {
+        line += "   " + Clock(g_head.time - g_rec.Start()) + " / " + Clock(g_rec.Length());
+    } else {
+        line += "   Clip " + std::to_string(g_edit.ClipAt(g_head.time) + 1);
+        line += " / " + std::to_string(g_edit.Clips().size());
+        line += "   " + Clock(g_head.time - g_edit.In());
+        line += "   Edited length " + Clock(g_edit.EditedLength());
+    }
     Txt(line, 0.5f, 0.088f, 0.3f, true);
     if (g_clock < g_noticeUntil) Txt(g_notice, 0.5f, 0.12f, 0.36f, true);
 }
 
-void Keys(const char* pad, const char* keyboard) { Txt(g_keyboard ? keyboard : pad, 0.5f, 0.95f, 0.27f, true); }
+void Keys(const char* pad, const char* keyboard, float y = 0.95f) {
+    Txt(g_keyboard ? keyboard : pad, 0.5f, y, 0.3f, true);
+}
 
 // A GTA-style list panel (A53: GTA-native menus) with Skate's entries.
 void Panel(const char* title, const std::vector<std::string>& items, int sel) {
@@ -668,15 +552,16 @@ void OpenHelp(const std::vector<std::pair<const char*, const char*>>& ids, Mode 
     g_helpPage = 0;
     g_helpBack = back;
     g_hudHidden = false;
+    g_head.playing = false;
     g_mode = Mode::Help;
 }
 
-void HelpForTimeline() {
+void HelpForTimeline(Mode back) {
     OpenHelp({{"ID_REPLAYEDITOR_HELP_TEXT_INSTANTREPLAY_TITLE", "ID_REPLAYEDITOR_HELP_TEXT_INSTANTREPLAY1"},
               {"ID_REPLAYEDITOR_HELP_TEXT_INSTANTREPLAY_TITLE", "ID_REPLAYEDITOR_HELP_TEXT_INSTANTREPLAY2"},
               {"ID_REPLAYEDITOR_HELP_TEXT_MAINTIMELINE_TITLE", "ID_REPLAYEDITOR_HELP_TEXT_MAINTIMELINE1"},
               {"ID_REPLAYEDITOR_HELP_TEXT_MAINTIMELINE_TITLE", "ID_REPLAYEDITOR_HELP_TEXT_MAINTIMELINE2"}},
-             Mode::Finished);
+             back);
 }
 
 void HelpForCamera(CameraKind k, Mode back) {
@@ -897,6 +782,7 @@ void LeaveSaved(bool reload) {
     g_liveRec = Recording{};
     g_edit = g_liveEdit, g_editValid = g_liveEditValid;
     g_head.time = g_liveTime;
+    g_head.playing = false;
     g_loaded = false;
     Call<void>(SET_PLAYER_INVINCIBLE, Call<int>(PLAYER_ID), g_invincibleWas ? 1 : 0);
     if (g_sound && g_rec.Size()) {
@@ -910,10 +796,31 @@ void LeaveSaved(bool reload) {
 
 constexpr CameraKind kMenuCameras[] = {CameraKind::Game,      CameraKind::Follow,    CameraKind::Tripod, CameraKind::Free,
                                        CameraKind::AdvFollow, CameraKind::AdvTripod, CameraKind::AdvFree};
-constexpr int kMenuSpeed = 7, kMenuShake = 8, kMenuFilter = 9, kMenuLens = 10, kMenuCommit = 11, kMenuHelp = 12, kMenuItems = 13;
+enum EditMenuRow { CameraRow, SpeedRow, ShakeRow, FilterRow, StrengthRow, LensRow, DoneRow, CameraHelpRow, EditMenuRows };
+enum ActionRow { PlayRow, PhotoRow, SaveRow, ReelRow, HelpRow, ResetRow, CloseSavedRow, ExitRow, ActionRows };
+
+void LeaveReplay() {
+    if (g_loaded) {
+        g_exitAfterLoad = true;
+        LeaveSaved(true);
+    } else {
+        g_editValid = false;
+        g_exitPending = true;
+    }
+}
+
+void Ask(PromptAction action, const std::string& title, const std::string& text);
+
+void RequestExit() {
+    if (g_edit.Edited() && !g_loaded)
+        Ask(PromptAction::ExitReplay, "Exit Replay", T("ID_REPLAY_EDITOR_QUIT", "Exit the Replay Editor? Unsaved edits will be lost."));
+    else
+        LeaveReplay();
+}
 
 void Ask(PromptAction action, const std::string& title, const std::string& text) {
     g_hudHidden = false;  // a question is never asked unseen
+    g_head.playing = false;
     g_prompt.action = action;
     g_prompt.back = g_mode;
     g_prompt.title = title;
@@ -924,7 +831,7 @@ void Ask(PromptAction action, const std::string& title, const std::string& text)
 
 void EnterTimeline() {
     g_followHeadingSet = false;
-    if (!g_editValid || g_edit.In() < g_rec.Start() - 1e-6) {
+    if (!g_editValid || !g_edit.Edited() || g_edit.In() < g_rec.Start() - 1e-6) {
         g_edit.Reset(g_rec.Start(), g_rec.End());
         g_editValid = true;
     }
@@ -935,7 +842,7 @@ void EnterTimeline() {
     g_input.Reset();
 }
 
-// The camera mode starts where the camera is (Tripod/Free), paused at the clip's start.
+// The camera mode opens paused at the current time inside the clip.
 // `changed`: the camera was just changed (the snapshot is already taken; Cancel asks).
 void EnterCameraEdit(int clip, bool changed) {
     g_editClip = clip;
@@ -953,7 +860,7 @@ void EnterCameraEdit(int clip, bool changed) {
         p.positioned = true;
     };
     place(c.base);
-    g_head.time = g_edit.ClipStart(clip);
+    g_head.time = std::clamp(g_head.time, g_edit.ClipStart(clip), g_edit.ClipEnd(clip) - 1e-4);
     g_head.playing = false;
     g_work = IsAdvanced(c.camera) && !c.keys.empty() ? g_edit.Evaluate(g_head.time).p : c.base;
     place(g_work);
@@ -969,15 +876,20 @@ const CameraParams& Shown() { return IsAdvanced(g_edit.ClipRef(g_editClip).camer
 void AdjustCamera(const PadIn& pad, const KeysIn& keys, const Recording::Sample& s, float dt) {
     Clip& clip = g_edit.ClipRef(g_editClip);
     CameraParams& p = IsAdvanced(clip.camera) ? g_work : clip.base;
+    const bool follow = clip.camera == CameraKind::Follow || clip.camera == CameraKind::AdvFollow;
+    const bool free = clip.camera == CameraKind::Free || clip.camera == CameraKind::AdvFree;
+    const bool game = clip.camera == CameraKind::Game;
+    const bool tracks = !free && !game;
     const bool read = keys.read;
     const auto k = [&](bool v) { return read && v ? 1.0f : 0.0f; };
-    const float side = std::clamp(StickAxis(pad.leftX) + k(keys.right) - k(keys.left), -1.0f, 1.0f);
-    const float fwd = std::clamp(StickAxis(pad.leftY) + k(keys.forward) - k(keys.back), -1.0f, 1.0f);
-    const float rise = std::clamp((pad.rightTrigger - pad.leftTrigger) / 255.0f + k(keys.up) - k(keys.down) + k(keys.faster) - k(keys.slower), -1.0f, 1.0f);
-    const float lookYaw = -StickAxis(pad.rightX) * 120.0f * dt - (read ? keys.mouseX : 0.0f) * 8.0f;
-    const float lookPitch = StickAxis(pad.rightY) * 90.0f * dt - (read ? keys.mouseY : 0.0f) * 6.0f;
-    const float zoom = ((pad.buttons & 0x0008) ? 1.0f : 0.0f) - ((pad.buttons & 0x0004) ? 1.0f : 0.0f) + k(keys.zoomIn) - k(keys.zoomOut);
-    const float aim = ((pad.buttons & 0x0001) ? 1.0f : 0.0f) - ((pad.buttons & 0x0002) ? 1.0f : 0.0f) + k(keys.keyX) - k(keys.keyZ);
+    const float side = game ? 0.0f : std::clamp(StickAxis(pad.leftX) + k(keys.right) - k(keys.left), -1.0f, 1.0f);
+    const float fwd = game ? 0.0f : std::clamp(StickAxis(pad.leftY) + k(keys.forward) - k(keys.back), -1.0f, 1.0f);
+    const float rise = game ? 0.0f : std::clamp((pad.rightTrigger - pad.leftTrigger) / 255.0f + k(keys.up) - k(keys.down) + k(keys.faster) - k(keys.slower), -1.0f, 1.0f);
+    const float lookYaw = follow || free ? -StickAxis(pad.rightX) * 120.0f * dt - (read ? keys.mouseX : 0.0f) * 8.0f : 0.0f;
+    const float lookPitch = free ? StickAxis(pad.rightY) * 90.0f * dt - (read ? keys.mouseY : 0.0f) * 6.0f : 0.0f;
+    const float zoom = clip.lens == kLensFisheye ? 0.0f :
+        ((pad.buttons & 0x0008) ? 1.0f : 0.0f) - ((pad.buttons & 0x0004) ? 1.0f : 0.0f) + k(keys.zoomIn) - k(keys.zoomOut);
+    const float aim = tracks ? ((pad.buttons & 0x0001) ? 1.0f : 0.0f) - ((pad.buttons & 0x0002) ? 1.0f : 0.0f) + k(keys.keyX) - k(keys.keyZ) : 0.0f;
     if (side == 0.0f && fwd == 0.0f && rise == 0.0f && lookYaw == 0.0f && lookPitch == 0.0f && zoom == 0.0f && aim == 0.0f) return;
     const Pose pose = PoseAt(s);
     switch (clip.camera) {
@@ -991,7 +903,6 @@ void AdjustCamera(const PadIn& pad, const KeysIn& keys, const Recording::Sample&
     case CameraKind::AdvTripod:
     case CameraKind::Free:
     case CameraKind::AdvFree: {
-        const bool free = clip.camera == CameraKind::Free || clip.camera == CameraKind::AdvFree;
         if (free) p.yaw += lookYaw, p.pitch = std::clamp(p.pitch + lookPitch, -85.0f, 85.0f);
         // Tripod moves relative to the line towards the skater; Free along its own look.
         const float face = free ? p.yaw * kDeg : std::atan2(-(pose.root[0] - p.position[0]), pose.root[1] - p.position[1]);
@@ -1010,7 +921,7 @@ void AdjustCamera(const PadIn& pad, const KeysIn& keys, const Recording::Sample&
         break;
     }
     if (zoom != 0.0f) {
-        if (p.zoomMm <= 0.0f) p.zoomMm = clip.lens == kLensFisheye ? 24.0f : FovToMm(Call<float>(GET_CAM_FOV, g_cam));
+        if (p.zoomMm <= 0.0f) p.zoomMm = FovToMm(Call<float>(GET_CAM_FOV, g_cam));
         p.zoomMm = std::clamp(p.zoomMm * std::pow(2.0f, zoom * dt), 8.0f, 200.0f);
     }
     p.target = std::clamp(p.target + aim * 0.6f * dt, 0.0f, 1.0f);
@@ -1058,15 +969,19 @@ void PromptYes() {
         break;
     case PromptAction::CancelCameraEdit:
         g_edit.ClipRef(g_editClip) = g_clipBefore;
-        g_mode = Mode::Timeline;
+        g_edit.SetEdited(g_editWasDirty);
+        g_mode = Mode::EditMenu;
+        g_menuSel = CameraRow;
         break;
     case PromptAction::SavePhoto:
-        g_mode = Mode::Timeline;
         TakePhoto();
         break;
     case PromptAction::SaveReplay:
         g_mode = Mode::Timeline;
         SaveReplay(g_promptPed);
+        break;
+    case PromptAction::ExitReplay:
+        LeaveReplay();
         break;
     case PromptAction::DeleteSaved:
         if (g_reelSel >= 0 && g_reelSel < static_cast<int>(g_reel.size())) DeleteFileW(g_reel[static_cast<std::size_t>(g_reelSel)].path.c_str());
@@ -1079,26 +994,75 @@ void PromptYes() {
     g_input.Reset();
 }
 
-// One editor frame; never leaves the replay (only Instant Replay and the Finished menu's "Exit replay" do).
+// One replay frame. Exit is deferred until the triggering controls are released.
 bool EditorTick(int ped, const PadIn& pad, const KeysIn& keys, float dt) {
     g_promptPed = ped;
     PollPhoto();
     PollSave();
     const Edges e = g_input.Poll(pad, keys);
     const auto P = [&](std::uint16_t bit) { return (e.pad & bit) != 0; };
-    const bool listOrPrompt = g_mode == Mode::EditMenu || g_mode == Mode::Finished || g_mode == Mode::Prompt || g_mode == Mode::Help || g_mode == Mode::Reel;
+    const Mode inputMode = g_mode;
+    const bool listOrPrompt = g_mode == Mode::CameraMenu || g_mode == Mode::EditMenu || g_mode == Mode::Finished || g_mode == Mode::Prompt || g_mode == Mode::Help || g_mode == Mode::Reel;
     if (listOrPrompt) g_hudHidden = false;  // lists and questions are always shown
     else if (P(0x0080) || e.key.hide) g_hudHidden = !g_hudHidden;
     // The left stick steps through lists like the D-pad (one step per push).
     const int stick = StickAxis(pad.leftY) > 0.5f ? -1 : StickAxis(pad.leftY) < -0.5f ? 1 : 0;
     const int stickStep = stick != g_stickPrev ? stick : 0;
     g_stickPrev = stick;
-    switch (g_mode) {
+    const int wheel = static_cast<int>(e.key.wheelDown) - static_cast<int>(e.key.wheelUp);
+    const int vertical = (P(0x0001) || e.key.faster ? -1 : 0) +
+                         (P(0x0002) || e.key.slower ? 1 : 0) + stickStep + wheel;
+    const bool accept = P(0x1000) || e.key.enter;
+    const bool back = P(0x2000) || e.key.backspace;
+    if (!g_photoTaking) switch (g_mode) {
+    case Mode::Instant: {
+        if (back || P(0x0020) || e.key.tab) {
+            RequestExit();
+        } else if (accept || P(0x0040) || e.key.keyT) {
+            EnterTimeline();
+        } else if (P(0x4000) || e.key.keyX) {
+            Ask(PromptAction::SavePhoto, T("ID_REPLAYEDITOR_TAKE_PHOTO", "Take Photo"),
+                T("ID_REPLAY_EDITOR_POPUP_PHOTOSAVE", "Save Photo?"));
+        } else if (P(0x8000) || e.key.keyU) {
+            HelpForTimeline(Mode::Instant);
+        } else if (P(0x0200) || e.key.play) {
+            if (!g_head.playing && g_head.time >= g_rec.End()) g_head.time = g_rec.Start();
+            g_head.playing = !g_head.playing;
+        } else if (P(0x0004) || e.key.pageUp) {
+            g_head.time = g_rec.Start();
+            g_head.playing = false;
+        } else if (P(0x0008) || e.key.pageDown) {
+            g_head.time = g_rec.End();
+            g_head.playing = false;
+        } else {
+            const float scrub = (static_cast<float>(pad.rightTrigger) - pad.leftTrigger) / 255.0f +
+                                StickAxis(pad.leftX) + static_cast<float>(keys.read && keys.right) -
+                                static_cast<float>(keys.read && keys.left);
+            const int frames = static_cast<int>(e.key.stepForward) - static_cast<int>(e.key.stepBack) - wheel;
+            if (scrub != 0.0f || frames) {
+                g_head.playing = false;
+                g_head.time = std::clamp(g_head.time + std::clamp(scrub, -1.0f, 1.0f) * dt * 2.0 +
+                                             frames * kTickSeconds, g_rec.Start(), g_rec.End());
+            }
+        }
+        break;
+    }
     case Mode::Prompt:
-        if (P(0x1000) || e.key.enter) PromptYes();
-        else if (P(0x2000) || e.key.backspace) g_mode = g_prompt.back, g_prompt.action = PromptAction::None;
+        if (back) g_mode = g_prompt.back, g_prompt.action = PromptAction::None;
+        else if (accept) PromptYes();
         break;
     case Mode::Timeline: {
+        if (back) {
+            if (g_loaded) LeaveSaved(true);
+            else g_mode = Mode::Instant, g_head.playing = false;
+            break;
+        }
+        if (P(0x0020) || e.key.tab) {
+            g_menuSel = 0;
+            g_head.playing = false;
+            g_mode = Mode::Finished;
+            break;
+        }
         if (P(0x1000) || e.key.play) {
             if (!g_head.playing && (g_head.time < g_edit.In() || g_head.time >= g_edit.Out() - 1e-3)) g_head.time = g_edit.In();
             g_head.playing = !g_head.playing;
@@ -1107,6 +1071,10 @@ bool EditorTick(int ped, const PadIn& pad, const KeysIn& keys, float dt) {
         if (P(0x0200) || e.key.stepForward) g_head.time = g_edit.NextStop(g_head.time), g_head.playing = false;
         if (P(0x0004) || e.key.pageUp) g_head.time = g_edit.In(), g_head.playing = false;
         if (P(0x0008) || e.key.pageDown) g_head.time = g_edit.Out(), g_head.playing = false;
+        if (wheel) {
+            g_head.time = std::clamp(g_head.time - wheel * kTickSeconds, g_rec.Start(), g_rec.End());
+            g_head.playing = false;
+        }
         if (P(0x0002) || e.key.keyN) {
             // As in Skate: checked first, then asked (A54).
             bool tooNear = g_head.time - g_edit.In() < Edit::kMinGap || g_edit.Out() - g_head.time < Edit::kMinGap;
@@ -1119,11 +1087,13 @@ bool EditorTick(int ped, const PadIn& pad, const KeysIn& keys, float dt) {
                 Ask(PromptAction::PlaceMarker, "Place Clip Marker",
                     T("ID_REPLAY_EDITOR_POPUP_CLIPMARKER", "If you decide to remove this Clip Marker later, it will also remove all Key Markers in the clips on both sides.^^Are you sure you want to do this?"));
         }
+        if (g_mode != inputMode) break;
         if (P(0x0001) || e.key.del) {
             if (g_edit.DeleteMarker(g_head.time, 0.5, false) == EditResult::NeedsConfirm)
                 Ask(PromptAction::DeleteMarker, T("ID_REPLAY_EDITOR_DELETE_CLIP", "Delete Clip Marker"),
                     T("ID_REPLAY_EDITOR_DELETE_CLIP_DESC", "You are about to delete a clip marker. All key and camera information will be reset on either side of the marker. Are you sure you want to do this?"));
         }
+        if (g_mode != inputMode) break;
         if (e.lt || e.key.keyI) {
             if (g_edit.SetIn(g_head.time) == EditResult::TooClose) Notice(T("ID_REPLAY_EDITOR_POPUP_PROXIMITY", "Too close to another Marker or In/Out Point!"));
         }
@@ -1132,20 +1102,11 @@ bool EditorTick(int ped, const PadIn& pad, const KeysIn& keys, float dt) {
         }
         if (P(0x4000) || e.key.enter) {
             g_editClip = g_edit.ClipAt(g_head.time);
-            const CameraKind cur = g_edit.ClipRef(g_editClip).camera;
-            g_menuSel = static_cast<int>(std::find(std::begin(kMenuCameras), std::end(kMenuCameras), cur) - std::begin(kMenuCameras));
+            g_menuSel = CameraRow;
             g_head.playing = false;
             g_mode = Mode::EditMenu;
         }
-        if (P(0x8000) || e.key.keyU)
-            Ask(PromptAction::ResetTimeline, T("ID_REPLAY_EDITOR_RESET_TIMELINE", "Reset Timeline"), T("ID_REPLAY_EDITOR_POPUP_RESET", "This will remove all editing from this replay!^Continue?"));
-        if (P(0x2000) || e.key.backspace) {  // back to Instant Replay (the edit is kept)
-            g_mode = Mode::Instant;
-            g_head.playing = false;
-            g_leaveBlock = true;
-            g_input.Reset();
-        }
-        if (P(0x0020) || e.key.tab) g_menuSel = 0, g_head.playing = false, g_mode = Mode::Finished;
+        if (g_mode != inputMode) break;
         if (!g_head.playing) {
             const float scrub = std::clamp(StickAxis(pad.leftX) + (keys.read && keys.right ? 1.0f : 0.0f) - (keys.read && keys.left ? 1.0f : 0.0f), -1.0f, 1.0f);
             g_head.time = std::clamp(g_head.time + scrub * dt * 2.0, g_rec.Start(), g_rec.End());
@@ -1153,49 +1114,79 @@ bool EditorTick(int ped, const PadIn& pad, const KeysIn& keys, float dt) {
         break;
     }
     case Mode::EditMenu: {
+        if (back) {
+            g_mode = Mode::Timeline;
+            break;
+        }
         Clip& clip = g_edit.ClipRef(g_editClip);
-        const int up = (P(0x0001) || e.key.faster) ? -1 : 0, down = (P(0x0002) || e.key.slower) ? 1 : 0;
-        g_menuSel = Cycle(g_menuSel, up + down + stickStep, kMenuItems);
+        g_menuSel = Cycle(g_menuSel, vertical, EditMenuRows);
         const int step = (P(0x0008) || e.key.right) ? 1 : (P(0x0004) || e.key.left) ? -1 : 0;
         if (step) {
-            if (g_menuSel == kMenuSpeed) clip.speed = std::clamp(clip.speed + step, 0, 3), g_edit.Touch();
-            if (g_menuSel == kMenuShake) clip.shake = std::clamp(clip.shake + step, 0, 3), g_edit.Touch();
-            if (g_menuSel == kMenuFilter) clip.filter = Cycle(clip.filter, step, kFilterCount), g_edit.Touch();
-            if (g_menuSel == kMenuLens) clip.lens = clip.lens == kLensFisheye ? kLensAuto : kLensFisheye, g_edit.Touch();
-        }
-        if (P(0x1000) || e.key.enter) {
-            if (g_menuSel < static_cast<int>(std::size(kMenuCameras))) {
-                const CameraKind kind = kMenuCameras[g_menuSel];
-                g_clipBefore = clip;  // Cancel brings back the clip as it was before this camera
-                if (g_edit.SetCamera(g_editClip, kind, false) == EditResult::NeedsConfirm) {
-                    Ask(PromptAction::ChangeCamera, T("ID_REPLAY_EDITOR_REPLACE_CAMERA_TITLE", "Change Camera"),
-                        T("ID_REPLAY_EDITOR_REPLACE_CAMERA_DESC", "The current clip is using a different camera. You will lose all current key and camera information in this clip if you proceed. Do you want to use the new camera?"));
-                    g_prompt.kind = kind;
-                } else {
-                    EnterCameraEdit(g_editClip, g_clipBefore.camera != kind);
-                }
-            } else if (g_menuSel == kMenuCommit) {
-                g_mode = Mode::Timeline;
-            } else if (g_menuSel == kMenuHelp) {
-                HelpForCamera(clip.camera, Mode::EditMenu);
+            const Clip before = clip;
+            switch (g_menuSel) {
+            case SpeedRow: clip.speed = std::clamp(clip.speed + step, 0, 3); break;
+            case ShakeRow: clip.shake = std::clamp(clip.shake + step, 0, 3); break;
+            case FilterRow: clip.filter = Cycle(clip.filter, step, kFilterCount); break;
+            case StrengthRow: if (clip.filter) clip.filterStrength = std::clamp(StrengthPercent(clip) + step * 10, 0, 100); break;
+            case LensRow: clip.lens = Cycle(clip.lens, step, kLensCount); break;
+            default: break;
             }
+            if (clip.speed != before.speed || clip.shake != before.shake || clip.filter != before.filter ||
+                clip.filterStrength != before.filterStrength || clip.lens != before.lens) g_edit.Touch();
         }
-        if (P(0x2000) || e.key.backspace) g_mode = Mode::Timeline;
+        if (accept && g_menuSel == CameraRow) {
+            g_menuSel = static_cast<int>(clip.camera);
+            g_mode = Mode::CameraMenu;
+        } else if (accept && g_menuSel == DoneRow) {
+            g_mode = Mode::Timeline;
+        } else if (accept && g_menuSel == CameraHelpRow) {
+            HelpForCamera(clip.camera, Mode::EditMenu);
+        }
+        break;
+    }
+    case Mode::CameraMenu: {
+        if (back) {
+            g_mode = Mode::EditMenu;
+            g_menuSel = CameraRow;
+            break;
+        }
+        g_menuSel = Cycle(g_menuSel, vertical, static_cast<int>(std::size(kMenuCameras)));
+        if (!accept) break;
+        const CameraKind kind = kMenuCameras[g_menuSel];
+        g_clipBefore = g_edit.ClipRef(g_editClip);
+        g_editWasDirty = g_edit.Edited();
+        if (g_edit.SetCamera(g_editClip, kind, false) == EditResult::NeedsConfirm) {
+            Ask(PromptAction::ChangeCamera, T("ID_REPLAY_EDITOR_REPLACE_CAMERA_TITLE", "Change Camera"),
+                T("ID_REPLAY_EDITOR_REPLACE_CAMERA_DESC", "Changing camera will reset this clip's camera settings and keys. Continue?"));
+            g_prompt.kind = kind;
+        } else {
+            EnterCameraEdit(g_editClip, g_clipBefore.camera != kind);
+        }
         break;
     }
     case Mode::CameraEdit: {
         Clip& clip = g_edit.ClipRef(g_editClip);
         const bool adv = IsAdvanced(clip.camera);
+        if (back) {
+            if (g_camChanged) Ask(PromptAction::CancelCameraEdit, "Cancel", T("ID_REPLAY_EDITOR_POPUP_CANCEL", "Cancel this editing mode?"));
+            else g_edit.ClipRef(g_editClip) = g_clipBefore, g_mode = Mode::EditMenu, g_menuSel = CameraRow;
+            break;
+        }
+        if (P(0x0020) || e.key.tab) {
+            g_mode = Mode::Timeline;
+            g_head.playing = false;
+            break;
+        }
         if (P(0x1000) || e.key.play) g_head.playing = !g_head.playing, g_workDirty = false;
         // One frame back/on while paused; held, it repeats.
-        const bool back = (pad.buttons & 0x0100) || (keys.read && keys.stepBack);
+        const bool frameBack = (pad.buttons & 0x0100) || (keys.read && keys.stepBack);
         const bool on = (pad.buttons & 0x0200) || (keys.read && keys.stepForward);
-        if (back || on) {
-            const bool first = P(0x0100) || P(0x0200) || e.key.stepBack || e.key.stepForward;
+        if (frameBack || on || wheel) {
+            const bool first = P(0x0100) || P(0x0200) || e.key.stepBack || e.key.stepForward || wheel;
             g_stepHeld = first ? 0.0f : g_stepHeld + dt;
             if (first || g_stepHeld > 0.35f) {
                 g_head.playing = false;
-                g_head.time = std::clamp(g_head.time + (on ? kTickSeconds : -kTickSeconds), g_edit.ClipStart(g_editClip), g_edit.ClipEnd(g_editClip) - 1e-4);
+                g_head.time = std::clamp(g_head.time + (on || wheel < 0 ? kTickSeconds : -kTickSeconds), g_edit.ClipStart(g_editClip), g_edit.ClipEnd(g_editClip) - 1e-4);
                 g_workDirty = false;
             }
         }
@@ -1210,40 +1201,33 @@ bool EditorTick(int ped, const PadIn& pad, const KeysIn& keys, float dt) {
             for (const Key& k : clip.keys) found = found || std::fabs(k.time - g_head.time) <= 0.25;
             if (found) Ask(PromptAction::DeleteKey, T("ID_REPLAY_EDITOR_DELETE_KEY", "Delete Key Marker"), T("ID_REPLAY_EDITOR_DELETE_KEY_DESC", "You are about to remove a key. Are you sure you want to do this?"));
         }
+        if (g_mode != inputMode) break;
         if (adv && (P(0x0040) || e.key.keyJ)) {
             const double next = g_edit.NextKey(g_head.time);
             g_head.time = next > g_head.time ? next : (clip.keys.empty() ? g_head.time : clip.keys.front().time);
             g_head.playing = false, g_workDirty = false;
         }
-        if (P(0x0020) || e.key.tab) g_mode = Mode::Timeline;  // Commit
-        if (P(0x2000) || e.key.backspace) {
-            if (g_camChanged) Ask(PromptAction::CancelCameraEdit, "Cancel", T("ID_REPLAY_EDITOR_POPUP_CANCEL", "Cancel this editing mode?"));
-            else g_mode = Mode::Timeline;
-        }
         break;
     }
     case Mode::Finished: {
-        const int up = (P(0x0001) || e.key.faster) ? -1 : 0, down = (P(0x0002) || e.key.slower) ? 1 : 0;
-        g_menuSel = Cycle(g_menuSel, up + down + stickStep, 8);
-        if (P(0x1000) || e.key.enter) {
-            switch (g_menuSel) {
-            case 0: g_head.time = g_edit.In(), g_head.playing = true, g_mode = Mode::Timeline; break;
-            case 1: Ask(PromptAction::SavePhoto, T("ID_REPLAYEDITOR_TAKE_PHOTO", "Take Photo"), T("ID_REPLAY_EDITOR_POPUP_PHOTOSAVE", "Save Photo?")); break;
-            case 2: Ask(PromptAction::SaveReplay, T("ID_REPLAYEDITOR_BASIC_SAVE_REPLAY", "Save Replay"), T("ID_REPLAY_EDITOR_POPUP_REPLAYSAVE", "Save Replay?")); break;
-            case 3: OpenReel(Mode::Finished); break;
-            case 4: HelpForTimeline(); break;
-            case 5: Ask(PromptAction::ResetTimeline, T("ID_REPLAY_EDITOR_RESET_TIMELINE", "Reset Timeline"), T("ID_REPLAY_EDITOR_POPUP_RESET", "This will remove all editing from this replay!^Continue?")); break;
-            case 6:
-                if (g_loaded) LeaveSaved(true);
-                else g_mode = Mode::Instant, g_leaveBlock = true, g_input.Reset();
-                break;
-            default:  // Exit replay once A/Enter is let go (the edit is kept); from a saved replay after its area is back
-                if (g_loaded) g_exitAfterLoad = true, LeaveSaved(true);
-                else g_exitPending = true;
-                break;
+        if (back || e.key.tab) {
+            g_mode = Mode::Timeline;
+            break;
+        }
+        g_menuSel = Cycle(g_menuSel, vertical, g_loaded ? ActionRows : ActionRows - 1);
+        if (accept) {
+            const int action = !g_loaded && g_menuSel == CloseSavedRow ? ExitRow : g_menuSel;
+            switch (action) {
+            case PlayRow: g_head.time = g_edit.In(), g_head.playing = true, g_mode = Mode::Timeline; break;
+            case PhotoRow: Ask(PromptAction::SavePhoto, T("ID_REPLAYEDITOR_TAKE_PHOTO", "Take Photo"), T("ID_REPLAY_EDITOR_POPUP_PHOTOSAVE", "Save Photo?")); break;
+            case SaveRow: Ask(PromptAction::SaveReplay, T("ID_REPLAYEDITOR_BASIC_SAVE_REPLAY", "Save Replay"), T("ID_REPLAY_EDITOR_POPUP_REPLAYSAVE", "Save Replay?")); break;
+            case ReelRow: OpenReel(Mode::Finished); break;
+            case HelpRow: HelpForTimeline(Mode::Finished); break;
+            case ResetRow: Ask(PromptAction::ResetTimeline, T("ID_REPLAY_EDITOR_RESET_TIMELINE", "Reset Timeline"), T("ID_REPLAY_EDITOR_POPUP_RESET", "This will remove all editing from this replay!^Continue?")); break;
+            case CloseSavedRow: LeaveSaved(true); break;
+            case ExitRow: RequestExit(); break;
             }
         }
-        if (P(0x2000) || e.key.backspace) g_mode = Mode::Timeline;
         break;
     }
     case Mode::Help: {
@@ -1254,14 +1238,12 @@ bool EditorTick(int ped, const PadIn& pad, const KeysIn& keys, float dt) {
         break;
     }
     case Mode::Reel: {
-        const int up = (P(0x0001) || e.key.faster) ? -1 : 0, down = (P(0x0002) || e.key.slower) ? 1 : 0;
-        if (!g_reel.empty()) g_reelSel = Cycle(g_reelSel, up + down + stickStep, static_cast<int>(g_reel.size()));
+        if (!g_reel.empty()) g_reelSel = Cycle(g_reelSel, vertical, static_cast<int>(g_reel.size()));
         if ((P(0x1000) || e.key.enter) && !g_reel.empty()) OpenSaved(g_reelSel);
         else if ((P(0x8000) || e.key.del) && !g_reel.empty())
             Ask(PromptAction::DeleteSaved, "Delete Replay", "This saved replay will be deleted from Documents\\GTAxSkate\\Replays.^Are you sure?");
         else if (P(0x2000) || e.key.backspace) {
             g_mode = g_reelBack;
-            if (g_mode == Mode::Instant) g_leaveBlock = true, g_input.Reset();
         }
         break;
     }
@@ -1271,30 +1253,32 @@ bool EditorTick(int ped, const PadIn& pad, const KeysIn& keys, float dt) {
     default:
         break;
     }
-    if (g_mode == Mode::Instant) return true;  // handed back this frame
-
-    AdvanceEdited(dt);
+    const bool preview = g_mode == Mode::Instant ||
+                         (g_mode == Mode::Prompt && g_prompt.back == Mode::Instant) ||
+                         (g_mode == Mode::Help && g_helpBack == Mode::Instant) ||
+                         (g_mode == Mode::Reel && g_reelBack == Mode::Instant);
+    if (preview) g_head.Advance(dt, g_rec.Start(), g_rec.End());
+    else AdvanceEdited(dt);
     const Recording::Sample s = g_rec.At(g_head.time);
-    const bool menu = g_mode == Mode::EditMenu || g_mode == Mode::Finished || g_mode == Mode::Prompt || g_mode == Mode::Help ||
-                      g_mode == Mode::Reel || g_mode == Mode::Loading;
     const int clipIndex = g_mode == Mode::CameraEdit ? g_editClip : g_edit.ClipAt(g_head.time);
-    const Clip& clip = g_edit.ClipRef(clipIndex);
-    // The clip's look; no fisheye under a list or prompt (they stay straight).
-    ApplyLook(clip.filter, clip.lens == kLensFisheye && !menu, clip.shake);
+    const Clip previewClip;
+    const Clip& clip = preview ? previewClip : g_edit.ClipRef(clipIndex);
+    ApplyLook(clip.filter, clip.lens == kLensFisheye, clip.shake, StrengthPercent(clip));
     if (s.a) {
         Present(ped, s);
         if (g_mode == Mode::CameraEdit) {
-            AdjustCamera(pad, keys, s, dt);
+            if (inputMode == Mode::CameraEdit) AdjustCamera(pad, keys, s, dt);
             if (IsAdvanced(clip.camera) && (g_head.playing || !g_workDirty)) {
                 if (!clip.keys.empty()) g_work = g_edit.Evaluate(g_head.time).p;
             }
             AimEdited(s, clip.camera, Shown(), clip.lens, dt);
         } else {
-            const Edit::Frame f = g_edit.Evaluate(g_head.time);
+            const Edit::Frame f = preview ? Edit::Frame{} : g_edit.Evaluate(g_head.time);
             AimEdited(s, f.camera, f.p, clip.lens, dt);
         }
     }
-    gtaaudio::ReplaySoundAt(GameMsAt(s), g_head.playing ? g_edit.Evaluate(g_head.time).speed : 0.0);
+    const float speed = preview ? 1.0f : g_edit.Evaluate(g_head.time).speed;
+    gtaaudio::ReplaySoundAt(GameMsAt(s), g_head.playing ? speed : 0.0f);
 
     // HUD
     if (g_mode == Mode::Loading) {
@@ -1310,48 +1294,73 @@ bool EditorTick(int ped, const PadIn& pad, const KeysIn& keys, float dt) {
         g_hudHidden = hidden;
         return true;
     }
-    if (g_mode == Mode::CameraEdit) {
-        Strip(g_editClip);
-        char title[96];
-        std::snprintf(title, sizeof(title), "%s", CameraKindName(clip.camera));
-        EditorInfo(title);
-        char extra[160];
-        const CameraParams& p = Shown();
-        std::snprintf(extra, sizeof(extra), "Zoom %d mm   Aim %.0f %%   %s%s", p.zoomMm > 0.0f ? static_cast<int>(p.zoomMm + 0.5f) : 0,
-                      p.target * 100.0f, IsAdvanced(clip.camera) ? "Keys " : "", IsAdvanced(clip.camera) ? std::to_string(clip.keys.size()).c_str() : "");
-        Txt(extra, 0.5f, 0.15f, 0.3f, true);
-        if (IsAdvanced(clip.camera))
-            Keys("A play/pause  LB/RB frame  left stick move  right stick rotate  LT/RT down/up  D-pad L/R zoom  D-pad U/D aim  X place key  Y delete key  L3 next key  Back commit  B cancel",
-                 "Space play/pause  , . frame  W A S D move  mouse rotate  Q/E up/down  [ ] zoom  Z/X aim  K place key  Delete key  J next key  Tab commit  Backspace cancel");
-        else
-            Keys("A play/pause  LB/RB frame  left stick move  right stick rotate  LT/RT down/up  D-pad L/R zoom  D-pad U/D aim  R3 hide  Back commit  B cancel",
-                 "Space play/pause  , . frame  W A S D move  mouse rotate  Q/E up/down  [ ] zoom  Z/X aim  H hide  Tab commit  Backspace cancel");
-    } else {
-        Strip(-1);
-        EditorInfo(g_mode == Mode::Timeline ? "EDIT TIMELINE" : "REPLAY EDITOR");
-        if (g_mode != Mode::Reel && g_mode != Mode::Help) Keys("A play/pause  left stick scrub  LB/RB marker  D-pad L/R start/end  D-pad down place marker  D-pad up delete  LT in  RT out  X edit clip  Y reset  R3 hide  Back finished  B instant replay",
-             "Space play/pause  A/D scrub  , . marker  PgUp/PgDn start/end  N place marker  Delete marker  I in  O out  Enter edit clip  U reset  H hide  Tab finished  Backspace instant replay");
-    }
-    if (g_mode == Mode::EditMenu) {
+    Strip(g_mode == Mode::CameraEdit ? g_editClip : -1, preview);
+    EditorInfo(preview ? "Instant Replay" : g_mode == Mode::CameraEdit ? CameraKindName(clip.camera) : "Main Timeline", preview);
+    if (g_mode == Mode::Instant) {
+        Keys("RB Play/Pause   LT/RT Scrub   D-pad Left/Right Start/End   A Edit Timeline",
+             "Space Play/Pause   A/D or Wheel Scrub   PgUp/PgDn Start/End   Enter Edit Timeline", 0.91f);
+        Keys("X Photo   Y Help   R3 Hide   B Exit", "X Photo   U Help   H Hide   Backspace Exit");
+    } else if (g_mode == Mode::Timeline) {
+        Keys("A Play/Pause   Left Stick Scrub   LT/RT In/Out   LB/RB Jump to Marker",
+             "Space Play/Pause   A/D or Wheel Scrub   I/O In/Out   ,/. Jump to Marker", 0.91f);
+        Keys("D-pad Down/Up Add/Delete Marker   X Edit Clip   Back Actions   R3 Hide   B Back",
+             "N/Delete Add/Delete Marker   Enter Edit Clip   Tab Actions   H Hide   Backspace Back");
+    } else if (g_mode == Mode::CameraEdit) {
+        const CameraParams& camera = Shown();
+        const bool fish = clip.lens == kLensFisheye;
+        if (fish || camera.zoomMm <= 0.0f) Txt(LensName(clip.lens), 0.5f, 0.15f, 0.3f, true);
+        else Txt("Zoom " + std::to_string(static_cast<int>(std::lround(camera.zoomMm))) + " mm", 0.5f, 0.15f, 0.3f, true);
+        std::string padKeys = "LB/RB Step Frame";
+        std::string keyboardKeys = ",/. or Wheel Step Frame";
+        if (!fish) {
+            padKeys += "   D-pad Left/Right Zoom";
+            keyboardKeys += "   [ / ] Zoom";
+        }
+        if (clip.camera != CameraKind::Game) {
+            const bool free = clip.camera == CameraKind::Free || clip.camera == CameraKind::AdvFree;
+            padKeys += "   Left Stick Move   LT/RT Height";
+            keyboardKeys += "   WASD Move   Q/E Height";
+            if (free) {
+                padKeys += "   Right Stick Look";
+                keyboardKeys += "   Mouse Look";
+            } else {
+                padKeys += "   D-pad Up/Down Aim";
+                keyboardKeys += "   Z/X Aim";
+            }
+        }
+        Keys(padKeys.c_str(), keyboardKeys.c_str(), 0.87f);
+        Keys("A Play/Pause   Back Commit   B Cancel   R3 Hide", "Space Play/Pause   Tab Commit   Backspace Cancel   H Hide", 0.91f);
+        if (IsAdvanced(clip.camera)) Keys("X Set Key   Y Delete Key   L3 Next Key", "K Set Key   Delete Key   J Next Key");
+    } else if (g_mode == Mode::EditMenu) {
         static const char* speeds[] = {"1/4x", "1/2x", "1x", "2x"};
         static const char* shakes[] = {"Off", "Low", "Medium", "High"};
+        const std::string strength = clip.filter ? std::to_string(StrengthPercent(clip)) + "%" : "Off";
+        const bool zoomOverride = clip.lens != kLensFisheye &&
+            (clip.base.zoomMm > 0.0f || std::any_of(clip.keys.begin(), clip.keys.end(), [](const Key& key) { return key.p.zoomMm > 0.0f; }));
+        const std::string lens = std::string("Lens   < ") + LensName(clip.lens) + " >" +
+                                 (zoomOverride ? "   (camera zoom set)" : "");
+        Panel(("Edit Clip " + std::to_string(g_editClip + 1)).c_str(),
+              {std::string("Camera   ") + CameraKindName(clip.camera),
+               std::string("Speed   < ") + speeds[std::clamp(clip.speed, 0, 3)] + " >",
+               std::string("Shake   < ") + shakes[std::clamp(clip.shake, 0, 3)] + " >",
+               std::string("Filter   < ") + FilterName(clip.filter) + " >",
+               "Filter Strength   < " + strength + " >",
+               lens,
+               "Done", T("ID_REPLAYEDITOR_HELP", "Help")}, g_menuSel);
+        Keys("D-pad Select / Adjust   A Open   B Back", "Arrows Select / Adjust   Enter Open   Backspace Back");
+    } else if (g_mode == Mode::CameraMenu) {
         std::vector<std::string> items;
-        for (CameraKind k : kMenuCameras) items.push_back(std::string(CameraKindName(k)) + (k == clip.camera ? "   (current)" : ""));
-        items.push_back(std::string("Speed   < ") + speeds[std::clamp(clip.speed, 0, 3)] + " >");
-        items.push_back(std::string("Shake   < ") + shakes[std::clamp(clip.shake, 0, 3)] + " >");
-        items.push_back(std::string("Filters   < ") + FilterName(clip.filter) + " >");
-        items.push_back(std::string("Lens   < ") + (clip.lens == kLensFisheye ? "Fisheye" : "Normal") + " >");
-        items.push_back(T("ID_REPLAYEDITOR_COMMIT", "Commit"));
-        items.push_back(T("ID_REPLAYEDITOR_HELP", "Help"));
-        char title[64];
-        std::snprintf(title, sizeof(title), "%s - Clip %d", T("ID_REPLAYEDITOR_BASIC_EDIT_MENU", "Edit Menu").c_str(), g_editClip + 1);
-        Panel(title, items, g_menuSel);
+        for (CameraKind kind : kMenuCameras) items.emplace_back(CameraKindName(kind));
+        Panel("Camera", items, g_menuSel);
+        Keys("A Select   B Back", "Enter Select   Backspace Back");
     } else if (g_mode == Mode::Finished) {
-        Panel(T("ID_REPLAY_EDITOR_FINISHED", "Finished").c_str(),
-              {"Play from In point", T("ID_REPLAYEDITOR_TAKE_PHOTO", "Take Photo"), T("ID_REPLAYEDITOR_BASIC_SAVE_REPLAY", "Save Replay"),
-               "Saved Replays", T("ID_REPLAYEDITOR_HELP", "Help"), T("ID_REPLAY_EDITOR_RESET_TIMELINE", "Reset Timeline"),
-               g_loaded ? "Close saved replay" : "Back to Instant Replay", T("ID_REPLAYEDITOR_EXIT", "Exit") + " replay"},
-              g_menuSel);
+        std::vector<std::string> items = {"Play from In Point", T("ID_REPLAYEDITOR_TAKE_PHOTO", "Take Photo"),
+            T("ID_REPLAYEDITOR_BASIC_SAVE_REPLAY", "Save Replay"), "Saved Replays", T("ID_REPLAYEDITOR_HELP", "Help"),
+            T("ID_REPLAY_EDITOR_RESET_TIMELINE", "Reset Timeline")};
+        if (g_loaded) items.emplace_back("Close Saved Replay");
+        items.emplace_back("Exit Replay");
+        Panel("Replay Actions", items, g_menuSel);
+        Keys("A Select   B Back", "Enter Select   Backspace Back");
     } else if (g_mode == Mode::Help) {
         HelpBox();
     } else if (g_mode == Mode::Reel) {
@@ -1372,6 +1381,7 @@ bool EditorTick(int ped, const PadIn& pad, const KeysIn& keys, float dt) {
         PromptBox();
     }
     FlushHud();
+    g_applyCalls += posehook::TakeApplyTime().calls;
     return true;
 }
 
@@ -1391,7 +1401,7 @@ void ConfigureLook(bool sound, float soundGainDb, bool fisheye, float filterStre
     g_sound = sound;
     g_soundGainDb = std::clamp(soundGainDb, -30.0f, 6.0f);
     g_fisheyeOk = fisheye;
-    g_filterStrength = filterStrength;
+    g_filterStrength = std::isfinite(filterStrength) ? std::clamp(filterStrength, 0.0f, 1.0f) : 0.85f;
 }
 
 void Clear() {
@@ -1451,22 +1461,17 @@ bool Enter(int ped) {
     g_active = true;
     g_mode = Mode::Instant;
     g_clock = 0.0;
-    g_leaveBlock = false;
     g_exitPending = false;
     g_head = Playhead{};
     g_head.time = std::max(g_rec.Start(), g_rec.End() - 10.0);  // the last ten seconds first
-    g_camera = Recorded;
     const Frame& last = g_rec.Last();
-    // Tripod and free cameras start at the camera play left.
-    std::memcpy(g_eye, last.camera, sizeof(g_eye));
-    g_pitch = last.camera[3], g_yaw = last.camera[5];
-    g_height = 0.0f;
-    g_hudHidden = false;  // every replay starts with its HUD and help
-    g_zoom = 1.0f;
-    g_orbitYaw = last.camera[5], g_orbitDist = 4.0f, g_orbitHeight = 1.2f;
-    std::memcpy(g_staticRot, last.camera + 3, sizeof(g_staticRot));
-    // The edit stays while its In point is still recorded (design 2026-11-09-skate-replay-editor).
-    if (g_editValid && g_edit.In() < g_rec.Start() - 1e-6) g_editValid = false;
+    g_hudHidden = false;
+    g_notice.clear();
+    g_noticeUntil = 0.0;
+    if (!g_editValid || g_edit.In() < g_rec.Start() - 1e-6) {
+        g_edit.Reset(g_rec.Start(), g_rec.End());
+        g_editValid = true;
+    }
     g_cam = Call<int>(CREATE_CAM, "DEFAULT_SCRIPTED_CAMERA", 0);
     Call<void>(SET_CAM_NEAR_CLIP, g_cam, 0.05f);  // close walls are not cut open
     g_lastEyeSet = false;
@@ -1484,16 +1489,14 @@ bool Enter(int ped) {
     gtaaudio::SetReplayPaused(true);
     g_appliedFilter = 0, g_appliedFisheye = false, g_appliedShake = 0;
     fisheye::SetFiltered(false);
-    ApplyLook(g_filter, g_lens == kLensFisheye, 0);
     g_input.Reset();
     posehook::TakeApplyTime();
     g_applyCalls = 0;
     (void)ped;
     if (std::exchange(g_openReel, false) && GetTickCount() - g_openReelAt < 10000) OpenReel(Mode::Instant);
     char text[200];
-    std::snprintf(text, sizeof(text), "replay: entered (%.1f s recorded, world time scale %.2f, sound %s, %s, %s, edit %s)", g_rec.Length(),
-                  g_worldScale, !g_sound ? "off" : sound ? "on" : "none recorded", FilterName(g_filter), LensName(g_lens),
-                  g_editValid ? "kept" : "none");
+    std::snprintf(text, sizeof(text), "replay: entered (%.1f s recorded, world time scale %.2f, sound %s)",
+                  g_rec.Length(), g_worldScale, !g_sound ? "off" : sound ? "on" : "none recorded");
     Log(text);
     return true;
 }
@@ -1509,87 +1512,17 @@ bool Tick(int ped, const PadIn& pad, const KeysIn& keys, float dt) {
     // D-pad down is GTA's character wheel; the replay uses it.
     Call<void>(DISABLE_CONTROL_ACTION, 0, 19, 1);
     if (g_exitPending) {
-        const bool held = (pad.buttons & 0x1000) || !keys.read || keys.enter;
+        const bool held = (pad.buttons & (0x1000 | 0x2000 | 0x0020)) || !keys.read || keys.enter || keys.leave;
         if (!held) return false;  // leaves on the release: the press never reaches skating
         FlushHud();
         return true;
     }
-    if (g_mode != Mode::Instant) {
-        const bool stay = EditorTick(ped, pad, keys, dt);
-        if (!stay || g_mode != Mode::Instant) return stay;
-    }
-    Command in = g_input.Update(pad, keys, dt, g_camera == Free || g_camera == Orbit, !g_head.playing);
-    // Back from the editor with B/Backspace: that button's release is not "leave".
-    if (g_leaveBlock) {
-        const bool held = (pad.buttons & (0x2000 | 0x0020)) || !keys.read || keys.leave;
-        if (!held) g_leaveBlock = false;
-        in.leave = false;
-    }
-    // B, Back, Tab or Backspace leaves on the release, so the press never reaches
-    // skating afterwards (a Back release there toggles the gun or opens the replay).
-    if (in.leave) return false;
-    if (in.openEditor) {
-        EnterTimeline();
-        return true;
-    }
-    if (in.playPause) {
-        if (!g_head.playing && g_head.time >= g_rec.End()) g_head.time = g_rec.Start();
-        g_head.playing = !g_head.playing;
-    }
-    if (in.slower) g_head.Slower();
-    if (in.faster) g_head.Faster();
-    if (in.nextCamera) {
-        g_camera = (g_camera + 1) % kCameras;
-        g_height = 0.0f;  // each camera starts at its own height (the copied eye already has the old one)
-        if (g_camera == Free || g_camera == Orbit) g_head.reverse = false;  // no reverse there: never latched on
-        // Tripod, Free and Static start where the camera is; Static also keeps its direction.
-        if (g_camera == Tripod || g_camera == Free || g_camera == Static) {
-            const Vector3 c = Call<Vector3>(GET_CAM_COORD, g_cam);
-            g_eye[0] = c.x, g_eye[1] = c.y, g_eye[2] = c.z;
-            if (g_camera == Static) {
-                const Vector3 r = Call<Vector3>(GET_CAM_ROT, g_cam, 2);
-                g_staticRot[0] = r.x, g_staticRot[1] = r.y, g_staticRot[2] = r.z;
-            }
-        }
-    }
-    if (in.filterStep) g_filter = Cycle(g_filter, in.filterStep, kFilterCount);
-    if (in.lensStep) g_lens = Cycle(g_lens, in.lensStep, kLensCount), g_zoom = 1.0f;
-    if (in.hideHud) g_hudHidden = !g_hudHidden;
-    if (in.zoom != 0.0f) g_zoom = std::clamp(g_zoom * std::pow(2.0f, -in.zoom * dt), 0.25f, 1.6f);  // ] halves the FOV in a second
-    if (in.frameStep) {
-        g_head.playing = false;
-        g_head.time = std::clamp(g_head.time + in.frameStep * kTickSeconds, g_rec.Start(), g_rec.End());
-    }
-    // Follow, Tripod and Filmer: E/Q and the right stick's up/down set the
-    // camera height (LT stays "hold to play backwards").
-    if (g_camera == Follow || g_camera == Tripod || g_camera == Filmer) {
-        const float rise = static_cast<float>(keys.up) - static_cast<float>(keys.down) + StickAxis(pad.rightY);
-        g_height = std::clamp(g_height + std::clamp(rise, -1.0f, 1.0f) * 3.0f * dt, -1.0f, 4.0f);
-    }
-    bool scrubbing = false;
-    if (g_camera != Free && g_camera != Orbit) {
-        g_head.reverse = in.reverse;
-        if (!g_head.playing) {
-            g_head.time += in.scrub * dt * 2.0;  // scrub
-            scrubbing = in.scrub != 0.0f;
-        }
-    }
-    g_head.Advance(dt, g_rec.Start(), g_rec.End());
-    ApplyLook(g_filter, g_lens == kLensFisheye, 0);
-    const Recording::Sample s = g_rec.At(g_head.time);
-    if (s.a) {
-        Present(ped, s);
-        Aim(s, dt, in);
-    }
-    gtaaudio::ReplaySoundAt(GameMsAt(s), SoundRate(g_head, scrubbing));
-    InstantHud();
-    FlushHud();
-    g_applyCalls += posehook::TakeApplyTime().calls;
-    return true;
+    return EditorTick(ped, pad, keys, dt);
 }
 
 void Exit() {
     if (!g_active) return;
+    g_exitAfterLoad = false;
     if (g_mode == Mode::Loading) {
         Call<void>(NEW_LOAD_SCENE_STOP);
         Call<void>(CLEAR_FOCUS);

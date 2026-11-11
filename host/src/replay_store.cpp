@@ -8,7 +8,9 @@ namespace replay {
 namespace {
 
 constexpr char kMagic[4] = {'S', 'V', 'R', 'P'};
-constexpr std::uint32_t kVersion = 1;
+constexpr std::uint32_t kVersion = 2;
+
+bool SupportedVersion(std::uint32_t version) { return version == 1 || version == kVersion; }
 
 struct Writer {
     std::vector<std::uint8_t>& out;
@@ -132,7 +134,8 @@ std::vector<std::uint8_t> Serialize(const SavedReplay& r) {
         for (const Key& k : c.keys) w.Pod(k.time), WriteParams(w, k.p);
         w.Pod(static_cast<std::int32_t>(c.speed)), w.Pod(static_cast<std::int32_t>(c.shake));
         w.Str(FilterKey(c.filter));
-        w.Str(c.lens == kLensFisheye ? "Fisheye" : "");
+        w.Str(LensName(c.lens));
+        w.Pod(static_cast<std::int32_t>(c.filterStrength));
     }
     w.Pod(r.soundStartMs);
     w.Pod(static_cast<std::uint32_t>(r.pcm.size()));
@@ -144,7 +147,7 @@ bool ReadInfo(const std::vector<std::uint8_t>& head, SavedInfo& info) {
     Reader r{head};
     if (head.size() < 4 || std::memcmp(head.data(), kMagic, 4) != 0) return false;
     r.at = 4;
-    if (r.Pod<std::uint32_t>() != kVersion) return false;
+    if (!SupportedVersion(r.Pod<std::uint32_t>())) return false;
     r.Pod<std::uint32_t>();  // model
     r.Pod<std::uint32_t>();  // bones
     info.frames = r.Pod<std::uint32_t>();
@@ -157,7 +160,8 @@ bool Deserialize(const std::vector<std::uint8_t>& bytes, SavedReplay& out, std::
     Reader r{bytes};
     if (bytes.size() < 4 || std::memcmp(bytes.data(), kMagic, 4) != 0) return error = "not a saved replay", false;
     r.at = 4;
-    if (r.Pod<std::uint32_t>() != kVersion) return error = "saved by another version", false;
+    const auto version = r.Pod<std::uint32_t>();
+    if (!SupportedVersion(version)) return error = "saved by another version", false;
     SavedReplay s;
     s.modelHash = r.Pod<std::uint32_t>();
     const auto bones = r.Pod<std::uint32_t>();
@@ -215,7 +219,11 @@ bool Deserialize(const std::vector<std::uint8_t>& bytes, SavedReplay& out, std::
         c.speed = std::clamp(static_cast<int>(r.Pod<std::int32_t>()), 0, 3);
         c.shake = std::clamp(static_cast<int>(r.Pod<std::int32_t>()), 0, 3);
         c.filter = FilterFromKey(r.Str());
-        c.lens = r.Str() == "Fisheye" ? kLensFisheye : kLensAuto;
+        const std::string lens = r.Str();
+        for (int j = 1; j < kLensCount; ++j) {
+            if (lens == LensName(j)) c.lens = j;
+        }
+        if (version >= 2) c.filterStrength = std::clamp(static_cast<int>(r.Pod<std::int32_t>()), -1, 100);
         s.clips.push_back(std::move(c));
     }
     s.soundStartMs = r.Pod<std::uint32_t>();
