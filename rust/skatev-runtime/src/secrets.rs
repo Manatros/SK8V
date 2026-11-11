@@ -114,6 +114,43 @@ impl Secrets {
         self.order.len() > before
     }
 
+    /// Upgrades unearned duplicate deck entries at indices >= 61 with new brand
+    /// items (trucks, wheels, grips, decks) from `more` that are not yet in `self.secret`.
+    /// Preserves indices 0..61 bit-for-bit, and never alters any unlocked key.
+    /// Returns true if any entry was replaced.
+    pub fn upgrade_unearned_duplicates(&mut self, more: &Self) -> bool {
+        let mut candidates: Vec<String> = more
+            .order
+            .iter()
+            .filter(|k| !self.secret.contains(*k))
+            .cloned()
+            .collect();
+        // Prioritize scarce kinds (trucks, wheels, grips) over decks
+        candidates.sort_by_key(|k| match k.split(':').next() {
+            Some("trucks") => 0,
+            Some("wheels") => 1,
+            Some("grip") => 2,
+            _ => 3,
+        });
+
+        let mut cand_iter = candidates.into_iter();
+        let mut changed = false;
+
+        // Slot 61 onwards: replace unearned duplicate plain decks
+        for i in 61..self.order.len() {
+            let key = &self.order[i];
+            if !self.unlocked.contains(key) && key.starts_with("deck:") && !key.contains("c057") {
+                if let Some(new_key) = cand_iter.next() {
+                    let old_key = std::mem::replace(&mut self.order[i], new_key.clone());
+                    self.secret.remove(&old_key);
+                    self.secret.insert(new_key);
+                    changed = true;
+                }
+            }
+        }
+        changed
+    }
+
     fn from_parts(order: Vec<String>, unlocked: BTreeSet<String>) -> Self {
         let secret = order.iter().cloned().collect();
         Self { order, unlocked, secret }
@@ -369,5 +406,46 @@ mod tests {
         assert!(kept.is_unlocked(&unlocked_key));
         assert_eq!(kept.remaining(), 135);
         assert!(!kept.extend_from(&full136, 136), "already at target count");
+    }
+
+    #[test]
+    fn upgrade_unearned_duplicates_preserves_prefix_and_unlocked_items() {
+        // Construct an existing secrets order of 100 items: 0..61 donor mixed, 61..100 trailing plain decks
+        let mut order: Vec<String> = (0..61).map(|i| format!("donor:item:{i}")).collect();
+        for i in 61..100 {
+            order.push(format!("deck:plain:{i}"));
+        }
+        let mut unlocked = BTreeSet::new();
+        // Player unlocked item 5 (in 0..61) and item 70 (in 61..100)
+        unlocked.insert(order[5].clone());
+        unlocked.insert(order[70].clone());
+
+        let mut existing = Secrets::from_parts(order.clone(), unlocked.clone());
+
+        // Brand catalog offers brand trucks, wheels, grips and decks
+        let brand_keys: Vec<String> = (0..12).map(|i| format!("trucks:t:c057_brand_{i}_t"))
+            .chain((0..12).map(|i| format!("wheels:w:c057_brand_{i}_w")))
+            .chain((0..12).map(|i| format!("grip:c057brand{i}g")))
+            .chain((0..12).map(|i| format!("deck:m:c057_brand_{i}_d")))
+            .collect();
+        let brand_catalog = Secrets::choose(brand_keys, 48);
+
+        let changed = existing.upgrade_unearned_duplicates(&brand_catalog);
+        assert!(changed, "upgrade should replace unearned plain decks");
+
+        // Invariant 1: First 61 items must remain 100% identical
+        assert_eq!(&existing.order()[..61], &order[..61], "0..61 must be untouched");
+
+        // Invariant 2: Unlocked items must remain unlocked and in their positions
+        assert!(existing.is_unlocked(&order[5]));
+        assert!(existing.is_unlocked(&order[70]));
+        assert_eq!(existing.order()[70], order[70], "unlocked item 70 must not be replaced");
+
+        // Invariant 3: Unearned item 61 was replaced with a brand truck
+        assert_ne!(existing.order()[61], order[61]);
+        assert!(existing.order()[61].starts_with("trucks:"));
+
+        // Invariant 4: Running upgrade again does nothing (idempotent)
+        assert!(!existing.upgrade_unearned_duplicates(&brand_catalog));
     }
 }

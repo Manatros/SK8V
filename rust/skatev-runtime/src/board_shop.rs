@@ -295,7 +295,10 @@ impl BoardShop {
         self.secrets = match std::fs::read_to_string(&path) {
             Ok(text) => {
                 let mut kept = crate::secrets::Secrets::from_text(&text);
-                if boards > 0 && kept.order().len() < count && kept.extend_from(&choose(), count) {
+                let more = choose();
+                let upgraded = kept.upgrade_unearned_duplicates(&more);
+                let extended = boards > 0 && kept.order().len() < count && kept.extend_from(&more, count);
+                if upgraded || extended {
                     log_counts(&kept);
                     let _ = std::fs::write(&path, kept.to_text());
                 }

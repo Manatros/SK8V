@@ -263,9 +263,17 @@ def main():
         for job in jobs:
             built.append(job.result())
     shutil.rmtree(work)
-    (args.out / 'parts.json').write_text(json.dumps({'schema': 1, 'offset': [float(v) for v in offset], 'binds': binds(args.board_json),
-                                                    'parts': sorted(built)}, indent=1))
-    print(f'board parts: {len(built)} models -> {args.out}')
+    existing = set()
+    parts_json_path = args.out / 'parts.json'
+    if parts_json_path.is_file():
+        try:
+            existing = set(json.loads(parts_json_path.read_text()).get('parts', []))
+        except Exception:
+            pass
+    existing.update(built)
+    parts_json_path.write_text(json.dumps({'schema': 1, 'offset': [float(v) for v in offset], 'binds': binds(args.board_json),
+                                           'parts': sorted(existing)}, indent=1))
+    print(f'board parts: {len(built)} new/updated models ({len(existing)} total in catalog) -> {args.out}')
 
 
 if __name__ == '__main__':
