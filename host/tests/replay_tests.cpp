@@ -329,6 +329,38 @@ int main() {
         k = KeysIn{};
         k.zoomOut = true;
         assert(in.Update(p, k, 0.016f).zoom == -1.0f);
+
+        // Poll edge detection for direct keyboard/mouse shortcuts:
+        Input pollIn;
+        pollIn.Reset();
+        KeysIn pk{};
+        pk.read = true;
+        PadIn pp{};
+        pollIn.Poll(pp, pk);  // baseline frame establishes unpressed state
+        pk.mouseLeft = true;
+        pk.ctrl = true;
+        pk.key1 = true;
+        pk.keyE = true;
+        Edges pe = pollIn.Poll(pp, pk);
+        assert(pe.key.mouseLeft);
+        assert(pe.key.ctrl);
+        assert(pe.key.key1);
+        assert(pe.key.keyE);
+        assert(!pe.key.mouseRight);
+        // Next frame, held keys do not trigger new edges, but level modifiers remain:
+        pe = pollIn.Poll(pp, pk);
+        assert(!pe.key.mouseLeft);
+        assert(pe.key.ctrl);
+        assert(!pe.key.key1);
+        assert(!pe.key.keyE);
+        // Release and press mouseRight & Escape:
+        pk.mouseLeft = false;
+        pk.mouseRight = true;
+        pk.escape = true;
+        pe = pollIn.Poll(pp, pk);
+        assert(!pe.key.mouseLeft);
+        assert(pe.key.mouseRight);
+        assert(pe.key.escape);
     }
     {
         // Sound: game time between two frames; a gap (a menu was open) is silence.

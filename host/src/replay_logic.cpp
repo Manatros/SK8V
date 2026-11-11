@@ -181,9 +181,13 @@ Edges Input::Poll(const PadIn& pad, const KeysIn& in) {
                             &KeysIn::stepForward, &KeysIn::zoomIn, &KeysIn::zoomOut, &KeysIn::tab, &KeysIn::backspace,
                             &KeysIn::enter, &KeysIn::del, &KeysIn::pageUp, &KeysIn::pageDown, &KeysIn::keyT, &KeysIn::keyN,
                             &KeysIn::keyI, &KeysIn::keyO, &KeysIn::keyU, &KeysIn::keyK, &KeysIn::keyJ, &KeysIn::keyZ,
-                            &KeysIn::keyX})
+                            &KeysIn::keyX, &KeysIn::keyV, &KeysIn::keyS, &KeysIn::keyE, &KeysIn::key1, &KeysIn::key2,
+                            &KeysIn::key3, &KeysIn::key4, &KeysIn::keyF1, &KeysIn::keyF2, &KeysIn::keyF3,
+                            &KeysIn::home, &KeysIn::endKey, &KeysIn::escape, &KeysIn::mouseLeft, &KeysIn::mouseRight})
         edge(k);
     e.key.shift = keys.shift;
+    e.key.ctrl = keys.ctrl;
+    e.key.alt = keys.alt;
     e.key.wheelUp = keys.wheelUp, e.key.wheelDown = keys.wheelDown;
     prevPad_ = pad.buttons;
     prevKeys_ = keys;

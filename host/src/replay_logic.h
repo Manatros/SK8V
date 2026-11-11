@@ -109,6 +109,12 @@ struct KeysIn {                    // held this frame
     bool pageUp = false, pageDown = false;
     bool keyT = false, keyN = false, keyI = false, keyO = false, keyU = false;
     bool keyK = false, keyJ = false, keyZ = false, keyX = false;
+    bool keyV = false, keyS = false, keyE = false;
+    bool key1 = false, key2 = false, key3 = false, key4 = false;
+    bool keyF1 = false, keyF2 = false, keyF3 = false;
+    bool home = false, endKey = false;
+    bool ctrl = false, alt = false, escape = false;
+    bool mouseLeft = false, mouseRight = false;
     float mouseX = 0.0f, mouseY = 0.0f;   // GTA's look normals this frame (0: mouse not in use)
 };
 struct Command {

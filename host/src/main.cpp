@@ -902,7 +902,7 @@ replay::KeysIn ReplayKeys() {
     }
     const auto held = [](int vk) { return (GetAsyncKeyState(vk) & 0x8000) != 0; };
     k.play = held(VK_SPACE);
-    k.leave = held(VK_TAB) || held(VK_BACK);  // Tab (the gun key, Skate's Back) opened it
+    k.leave = held(VK_TAB) || held(VK_BACK) || held(VK_ESCAPE);  // Tab, Backspace or Esc
     k.camera = held('C');
     k.reverse = held('R');
     k.left = held('A');
@@ -917,6 +917,9 @@ replay::KeysIn ReplayKeys() {
     k.filter = held('F');
     k.lens = held('L');
     k.shift = held(VK_SHIFT);
+    k.ctrl = held(VK_CONTROL);
+    k.alt = held(VK_MENU);
+    k.escape = held(VK_ESCAPE);
     k.plus = held(VK_OEM_PLUS) || held(VK_ADD);        // the = / + key, numpad +
     k.minus = held(VK_OEM_MINUS) || held(VK_SUBTRACT); // the - key, numpad -
     k.hide = held('H');
@@ -926,11 +929,13 @@ replay::KeysIn ReplayKeys() {
     k.zoomOut = held(VK_OEM_4);  // [
     // The editor (design 2026-11-09-skate-replay-editor); none of these is a GTA key left on in skating.
     k.tab = held(VK_TAB);
-    k.backspace = held(VK_BACK);
+    k.backspace = held(VK_BACK) || held(VK_ESCAPE);
     k.enter = held(VK_RETURN);
     k.del = held(VK_DELETE);
     k.pageUp = held(VK_PRIOR);
     k.pageDown = held(VK_NEXT);
+    k.home = held(VK_HOME);
+    k.endKey = held(VK_END);
     k.keyT = held('T');
     k.keyN = held('N');
     k.keyI = held('I');
@@ -940,8 +945,20 @@ replay::KeysIn ReplayKeys() {
     k.keyJ = held('J');
     k.keyZ = held('Z');
     k.keyX = held('X');
+    k.keyV = held('V');
+    k.keyS = held('S');
+    k.keyE = held('E');
+    k.key1 = held('1') || held(VK_NUMPAD1);
+    k.key2 = held('2') || held(VK_NUMPAD2);
+    k.key3 = held('3') || held(VK_NUMPAD3);
+    k.key4 = held('4') || held(VK_NUMPAD4);
+    k.keyF1 = held(VK_F1);
+    k.keyF2 = held(VK_F2);
+    k.keyF3 = held(VK_F3);
     k.faster = held(VK_UP);
     k.slower = held(VK_DOWN);
+    k.mouseLeft = held(VK_LBUTTON);
+    k.mouseRight = held(VK_RBUTTON);
     // The mouse: GTA's look normals and wheel, only while GTA says the mouse
     // is in use (on a controller the look controls are the right stick).
     if (Call<BOOL>(gta::IS_USING_KEYBOARD_AND_MOUSE, 2)) {
@@ -950,6 +967,8 @@ replay::KeysIn ReplayKeys() {
         // Each wheel notch is one speed step (two notches on two frames: two steps).
         k.wheelUp = Call<BOOL>(gta::IS_DISABLED_CONTROL_JUST_PRESSED, 0, 241) != 0;    // INPUT_CURSOR_SCROLL_UP
         k.wheelDown = Call<BOOL>(gta::IS_DISABLED_CONTROL_JUST_PRESSED, 0, 242) != 0;  // INPUT_CURSOR_SCROLL_DOWN
+        if (Call<BOOL>(gta::IS_DISABLED_CONTROL_JUST_PRESSED, 0, 237)) k.mouseLeft = true;
+        if (Call<BOOL>(gta::IS_DISABLED_CONTROL_JUST_PRESSED, 0, 238)) k.mouseRight = true;
     }
     return k;
 }
