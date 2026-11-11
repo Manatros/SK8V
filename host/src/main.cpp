@@ -905,8 +905,11 @@ replay::KeysIn ReplayKeys() {
     k.leave = held(VK_TAB) || held(VK_BACK);  // Tab (the gun key, Skate's Back) opened it
     k.camera = held('C');
     k.reverse = held('R');
-    k.left = held('A') || held(VK_LEFT);
-    k.right = held('D') || held(VK_RIGHT);
+    k.left = held('A');
+    k.right = held('D');
+    k.arrowLeft = held(VK_LEFT);
+    k.arrowRight = held(VK_RIGHT);
+    k.photo = held('P');
     k.forward = held('W');
     k.back = held('S');
     k.up = held('E');

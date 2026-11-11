@@ -82,8 +82,10 @@ int main() {
 
     fisheye::SetEnabled(true);
     // The replay timeline as the replay sends it: dark bar, yellow fill to 0.5, a line of text.
-    fisheye::SetHudItems({{0.2f, 0.901f, 0.8f, 0.909f, 0.08f, 0.08f, 0.08f, 0.7f}, {0.2f, 0.901f, 0.5f, 0.909f, 1.0f, 0.78f, 0.16f, 0.9f}},
-                         {{"INSTANT REPLAY  1x  Follow", 0.5f, 0.918f, 0.34f, true}}, true);
+    fisheye::SetHudItems({{0.2f, 0.901f, 0.8f, 0.909f, 0.08f, 0.08f, 0.08f, 0.7f}, {0.2f, 0.901f, 0.5f, 0.909f, 1.0f, 0.78f, 0.16f, 0.9f},
+                          {0.12f, 0.28f, 0.84f, 0.45f, 0.0f, 0.0f, 0.0f, 1.0f}},
+                         {{"Clip 1", 0.5f, 0.07f, 0.34f, true}, {"Look Settings", 0.5f, 0.31f, 0.48f, true},
+                          {"INSTANT REPLAY  1x  Follow", 0.5f, 0.918f, 0.34f, true}}, true);
     fisheye::Present(sc);
     assert(!fisheye::g_failed.load());
 
@@ -121,7 +123,30 @@ int main() {
     assert(r > 150 && g > 100 && b < 120);
     const std::uint32_t empty = static_cast<const std::uint32_t*>(m.pData)[130 * (m.RowPitch / 4) + 180];
     assert((empty & 0xFF) < 120 && ((empty >> 8) & 0xFF) < 120);  // 70 % dark over at most white
+    bool menuTextVisible = false;
+    for (int y = 45; y < 62; ++y)
+        for (int x = 78; x < 178; ++x)
+            menuTextVisible = menuTextVisible || (at(x, y) & 0xFF) > 160;
+    assert(menuTextVisible);  // white glyphs over an opaque black panel
     ctx->Unmap(staging, 0);
+
+    {
+        // A width-only resize must replace all three textures independently.
+        for (int band = 0; band < fisheye::kBandCount; ++band) {
+            assert(fisheye::UpdateBand(band, fisheye::g_hud, 320, 144));
+            D3D11_TEXTURE2D_DESC bandDesc{};
+            fisheye::gpu.hud[band]->GetDesc(&bandDesc);
+            assert(bandDesc.Width == 320);
+        }
+        // A capture frame still bends the picture but omits even a stale visible HUD.
+        ctx->UpdateSubresource(back, 0, nullptr, px.data(), 256 * 4, 0);
+        fisheye::Bend(sc, false);
+        ctx->CopyResource(staging, back);
+        assert(SUCCEEDED(ctx->Map(staging, 0, D3D11_MAP_READ, 0, &m)));
+        assert(at(108, 72) == mid);
+        assert(at(60, 130) != (bar & 0xFFFFFFu));
+        ctx->Unmap(staging, 0);
+    }
 
     {
         // The detail render: the 60-degree view (here all red) is kept, the screen holds the

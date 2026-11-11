@@ -93,7 +93,9 @@ struct KeysIn {                    // held this frame
     bool camera = false;           // C
     bool leave = false;            // Tab or Backspace
     bool reverse = false;          // R
-    bool left = false, right = false;     // A / D or Left / Right arrow
+    bool left = false, right = false;     // A / D
+    bool arrowLeft = false, arrowRight = false;
+    bool photo = false;                   // P
     bool forward = false, back = false;   // W / S
     bool up = false, down = false;        // E / Q
     bool plus = false, minus = false;     // + / - (main row and numpad): speed

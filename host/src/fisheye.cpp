@@ -20,8 +20,11 @@ namespace {
 using d3dstate::SafeRelease;
 
 constexpr float kSourceFov = 120.0f;  // the replay camera's vertical FOV for the fisheye lens
-// The two text bands (fractions of the frame height).
-constexpr float kBands[2][2] = {{0.0f, 0.2f}, {0.8f, 1.0f}};
+// Assign each line once. Overlap the texture margins so glyphs and their
+// shadows can extend past a band's assignment boundary.
+constexpr int kBandCount = 3;
+constexpr float kBands[kBandCount][2] = {{0.0f, 0.24f}, {0.16f, 0.88f}, {0.8f, 1.0f}};
+int TextBand(float y) { return y < 0.17f ? 0 : y < 0.81f ? 1 : 2; }
 
 std::atomic<bool> g_enabled{false};
 std::atomic<bool> g_failed{false};
@@ -42,9 +45,9 @@ LogFn g_log = nullptr;
 // The HUD as the script thread last set it.
 struct Hud {
     std::vector<HudRect> rects;
-    std::vector<HudText> texts[2];  // per band
+    std::vector<HudText> texts[kBandCount];  // per band
     bool show = false;
-    std::uint64_t serial[2] = {};   // per band: its texts changed
+    std::uint64_t serial[kBandCount] = {};   // per band: its texts changed
 };
 std::mutex g_hudLock;
 Hud g_hud;
@@ -70,10 +73,10 @@ struct Gpu {
     bool baseValid = false;                   // `copy` holds a 120-degree frame
     UINT copyW = 0, copyH = 0;
     DXGI_FORMAT copyFormat = DXGI_FORMAT_UNKNOWN;
-    ID3D11Texture2D* hud[2] = {};
-    ID3D11ShaderResourceView* hudSrv[2] = {};
-    UINT hudW = 0, hudH[2] = {};
-    std::uint64_t hudSerial[2] = {~0ull, ~0ull};
+    ID3D11Texture2D* hud[kBandCount] = {};
+    ID3D11ShaderResourceView* hudSrv[kBandCount] = {};
+    UINT hudW[kBandCount] = {}, hudH[kBandCount] = {}, hudFrameH[kBandCount] = {};
+    std::uint64_t hudSerial[kBandCount] = {};
 } gpu;
 
 // Full-screen triangle; the pixel shader maps each output pixel to the point
@@ -229,13 +232,12 @@ void ReleaseCopy() {
 }
 
 void ReleaseHud() {
-    for (int i = 0; i < 2; ++i) {
+    for (int i = 0; i < kBandCount; ++i) {
         SafeRelease(gpu.hudSrv[i]);
         SafeRelease(gpu.hud[i]);
-        gpu.hudH[i] = 0;
+        gpu.hudW[i] = gpu.hudH[i] = gpu.hudFrameH[i] = 0;
         gpu.hudSerial[i] = ~0ull;
     }
-    gpu.hudW = 0;
 }
 
 bool Typed(DXGI_FORMAT f, DXGI_FORMAT& typeless, DXGI_FORMAT& unorm) {
@@ -419,7 +421,7 @@ bool UpdateBand(int band, const Hud& hud, UINT w, UINT h) {
     if (hud.texts[band].empty()) return false;
     const UINT top = static_cast<UINT>(std::lround(kBands[band][0] * h));
     const UINT bandH = std::max(8u, static_cast<UINT>(std::lround(kBands[band][1] * h)) - top);
-    if (!gpu.hud[band] || gpu.hudW != w || gpu.hudH[band] != bandH) {
+    if (!gpu.hud[band] || gpu.hudW[band] != w || gpu.hudH[band] != bandH) {
         SafeRelease(gpu.hudSrv[band]);
         SafeRelease(gpu.hud[band]);
         D3D11_TEXTURE2D_DESC d{};
@@ -438,10 +440,10 @@ bool UpdateBand(int band, const Hud& hud, UINT w, UINT h) {
             SafeRelease(gpu.hud[band]);
             return false;
         }
-        gpu.hudW = w, gpu.hudH[band] = bandH;
+        gpu.hudW[band] = w, gpu.hudH[band] = bandH;
         gpu.hudSerial[band] = ~0ull;
     }
-    if (gpu.hudSerial[band] != hud.serial[band]) {
+    if (gpu.hudSerial[band] != hud.serial[band] || gpu.hudFrameH[band] != h) {
         static std::vector<std::uint32_t> pixels;
         PaintHud(hud.texts[band], kBands[band][0], w, bandH, static_cast<float>(h), pixels);
         D3D11_MAPPED_SUBRESOURCE m{};
@@ -450,6 +452,7 @@ bool UpdateBand(int band, const Hud& hud, UINT w, UINT h) {
             std::memcpy(static_cast<std::uint8_t*>(m.pData) + static_cast<std::size_t>(y) * m.RowPitch, &pixels[static_cast<std::size_t>(y) * w], w * 4);
         gpu.ctx->Unmap(gpu.hud[band], 0);
         gpu.hudSerial[band] = hud.serial[band];
+        gpu.hudFrameH[band] = h;
     }
     return true;
 }
@@ -466,12 +469,12 @@ void SetEnabled(bool on) {
 bool Enabled() { return g_enabled.load(); }
 
 void SetHudItems(const std::vector<HudRect>& rects, const std::vector<HudText>& texts, bool show) {
-    std::vector<HudText> band[2];
-    for (const HudText& t : texts) band[t.y < 0.5f ? 0 : 1].push_back(t);
+    std::vector<HudText> band[kBandCount];
+    for (const HudText& t : texts) band[TextBand(t.y)].push_back(t);
     std::lock_guard<std::mutex> lock(g_hudLock);
     g_hud.rects = rects;
     g_hud.show = show;
-    for (int i = 0; i < 2; ++i)
+    for (int i = 0; i < kBandCount; ++i)
         if (!(g_hud.texts[i] == band[i])) g_hud.texts[i] = std::move(band[i]), ++g_hud.serial[i];  // painted again only on change
 }
 
@@ -494,20 +497,22 @@ void SourcePoint(float x, float y, float w, float h, float vfov, float& sx, floa
 }
 
 namespace {
-void Bend(IDXGISwapChain* sc);
+void Bend(IDXGISwapChain* sc, bool drawHud);
 void Capture(IDXGISwapChain* sc);
 }  // namespace
 
 void Present(IDXGISwapChain* sc) {
     if (!sc) return;
     const std::uint64_t n = ++g_presents;
-    if (g_enabled.load() && !g_failed.load()) Bend(sc);
-    if (g_photoState.load() == 1 && g_photoAt.load() && n >= g_photoAt.load()) Capture(sc);
+    const auto photoAt = g_photoAt.load();
+    const bool capture = g_photoState.load() == 1 && photoAt && n >= photoAt;
+    if (g_enabled.load() && !g_failed.load()) Bend(sc, !capture);
+    if (capture) Capture(sc);
 }
 
 namespace {
 
-void Bend(IDXGISwapChain* sc) {
+void Bend(IDXGISwapChain* sc, bool drawHud) {
     ID3D11Device* device = nullptr;
     if (FAILED(sc->GetDevice(__uuidof(ID3D11Device), reinterpret_cast<void**>(&device)))) return;
     const bool ready = Init(device);
@@ -585,13 +590,13 @@ void Bend(IDXGISwapChain* sc) {
     c->PSSetSamplers(0, 1, &gpu.linear);
     c->Draw(3, 0);
     g_drawnAt = GetTickCount64();
-    // The replay HUD, unbent, over the picture: rectangles, then the two text bands.
+    // The replay HUD, unbent, over the picture: rectangles, then text.
     Hud hud;
     {
         std::lock_guard<std::mutex> lock(g_hudLock);
         hud = g_hud;
     }
-    if (hud.show) {
+    if (drawHud && hud.show) {
         const float H = static_cast<float>(bd.Height);
         auto clipX = [](float x) { return x * 2.0f - 1.0f; };
         auto clipY = [](float y) { return 1.0f - y * 2.0f; };
@@ -605,13 +610,13 @@ void Bend(IDXGISwapChain* sc) {
             k.color[0] = r.r * r.a, k.color[1] = r.g * r.a, k.color[2] = r.b * r.a, k.color[3] = r.a;
             if (upload()) c->Draw(4, 0);
         }
-        for (int band = 0; band < 2; ++band) {
+        for (int band = 0; band < kBandCount; ++band) {
             if (!UpdateBand(band, hud, bd.Width, bd.Height)) continue;
             // On whole pixels, texel for pixel (no blur).
             const float top = static_cast<float>(std::lround(kBands[band][0] * H));
             k.rect[0] = -1.0f, k.rect[1] = clipY(top / H);
             k.rect[2] = 1.0f, k.rect[3] = clipY((top + gpu.hudH[band]) / H);
-            k.texW = static_cast<float>(gpu.hudW), k.texH = static_cast<float>(gpu.hudH[band]);
+            k.texW = static_cast<float>(gpu.hudW[band]), k.texH = static_cast<float>(gpu.hudH[band]);
             if (upload()) {
                 c->PSSetShader(gpu.psTex, nullptr, 0);
                 c->PSSetShaderResources(0, 1, &gpu.hudSrv[band]);

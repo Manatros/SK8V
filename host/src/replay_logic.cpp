@@ -176,7 +176,7 @@ Edges Input::Poll(const PadIn& pad, const KeysIn& in) {
     e.lt = lt && !prevLt_, e.rt = rt && !prevRt_;
     const auto edge = [&](bool KeysIn::*k) { e.key.*k = keys.*k && !(prevKeys_.*k); };
     for (bool KeysIn::*k : {&KeysIn::play, &KeysIn::faster, &KeysIn::slower, &KeysIn::camera, &KeysIn::leave, &KeysIn::reverse,
-                            &KeysIn::left, &KeysIn::right, &KeysIn::forward, &KeysIn::back, &KeysIn::up, &KeysIn::down,
+                            &KeysIn::left, &KeysIn::right, &KeysIn::arrowLeft, &KeysIn::arrowRight, &KeysIn::photo, &KeysIn::forward, &KeysIn::back, &KeysIn::up, &KeysIn::down,
                             &KeysIn::plus, &KeysIn::minus, &KeysIn::filter, &KeysIn::lens, &KeysIn::hide, &KeysIn::stepBack,
                             &KeysIn::stepForward, &KeysIn::zoomIn, &KeysIn::zoomOut, &KeysIn::tab, &KeysIn::backspace,
                             &KeysIn::enter, &KeysIn::del, &KeysIn::pageUp, &KeysIn::pageDown, &KeysIn::keyT, &KeysIn::keyN,
