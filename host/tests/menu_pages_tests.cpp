@@ -48,8 +48,10 @@ int wmain(int argc, wchar_t** argv) {
     const std::string fakie = menu::ItemHelp(menu::g_pages[0].items[0]);
     assert(fakie.find("Keep the fakie stance.") == 0);
     assert(fakie.find("Default: Off") != std::string::npos && fakie.find("Left/Right") != std::string::npos);
+    assert(fakie.find("Del: default.") != std::string::npos);
     const std::string grip = menu::ItemHelp(menu::g_pages[2].items[0]);
     assert(grip.find("Default: 1") != std::string::npos && grip.find("Restart GTA") != std::string::npos);
+    assert(grip.find("Del: default.") != std::string::npos);
     assert(menu::ItemHelp(advanced[1]) == menu::PageHint("Developer"));
     assert(menu::ItemHelp(menu::g_pages[3].items[0]) == "Enter to run.");
 
@@ -75,6 +77,14 @@ int wmain(int argc, wchar_t** argv) {
     // A second Start (reload) builds the links again from scratch.
     menu::Start(ini, pages, {}, nullptr);
     assert(menu::g_pages[1].items.size() == 2 && menu::g_top.size() == 2);
+
+    // Resetting a modified setting back to its default value restores the initial state.
+    WritePrivateProfileStringW(L"Preset.User", nullptr, nullptr, ini.c_str());
+    menu::Commit(menu::g_pages[0].items[0], "1");
+    assert(menu::ReadIni(menu::g_pages[0].items[0]) == "1");
+    menu::Commit(menu::g_pages[0].items[0], menu::g_pages[0].items[0].def);
+    assert(menu::ReadIni(menu::g_pages[0].items[0]) == "0");
+
     std::wcout << L"menu pages tests passed\n";
     return 0;
 }

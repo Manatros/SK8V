@@ -1374,6 +1374,56 @@ void LoadingSpinner(Session& s, bool on) {
     }
 }
 
+// Onboarding: displays on-screen tutorial prompt with essential controls.
+void ShowControlsGuide() {
+    std::string pushKey = "A / X";
+    std::string popKey = "Flick RS";
+    std::string dismountKey = "Hold Y / Triangle";
+
+    const bool keyboardActive = g_keyboard && (!g_controller || Call<BOOL>(gta::IS_USING_KEYBOARD_AND_MOUSE, 2) != 0);
+    if (keyboardActive) {
+        const std::string a = g_runtime.KeyboardKey("a");
+        pushKey = (!a.empty() && a != "-") ? a : "Shift";
+
+        const std::string pop = g_runtime.KeyboardKey("pop");
+        const std::string ollie = g_runtime.KeyboardKey("ollie");
+        const std::string mouse = g_runtime.KeyboardKey("mouse_trick");
+        const std::string trickDown = g_runtime.KeyboardKey("trick_down");
+        const std::string trickUp = g_runtime.KeyboardKey("trick_up");
+
+        const std::string hints = g_runtime.KeyboardHints(false);
+        const bool mouseTricksActive = hints.find("mouse tricks") != std::string::npos ||
+                                       hints.find("mouse flick") != std::string::npos;
+
+        if (!pop.empty() && pop != "-") {
+            popKey = pop;
+        } else if (!ollie.empty() && ollie != "-") {
+            popKey = ollie;
+        } else if (mouseTricksActive) {
+            popKey = (!mouse.empty() && mouse != "-") ? (mouse + " + Mouse") : "Mouse flick";
+        } else if (!trickDown.empty() && trickDown != "-") {
+            popKey = (!trickUp.empty() && trickUp != "-") ? (trickDown + " then " + trickUp) : trickDown;
+        } else {
+            popKey = "Space";
+        }
+
+        const std::string y = g_runtime.KeyboardKey("y");
+        dismountKey = (!y.empty() && y != "-") ? ("Hold " + y) : "Hold E";
+    }
+
+    Call<void>(gta::BEGIN_TEXT_COMMAND_DISPLAY_HELP, "CELL_EMAIL_BCON");
+    Call<void>(gta::ADD_TEXT_COMPONENT_SUBSTRING_PLAYER_NAME,
+               "~INPUT_SELECT_WEAPON~ Skateboard: Select in weapon wheel.~n~");
+    const std::string pushStr = "Push: " + pushKey + " | ";
+    Call<void>(gta::ADD_TEXT_COMPONENT_SUBSTRING_PLAYER_NAME, pushStr.c_str());
+    const std::string popStr = "Ollie: " + popKey + ".~n~";
+    Call<void>(gta::ADD_TEXT_COMPONENT_SUBSTRING_PLAYER_NAME, popStr.c_str());
+    const std::string dismountStr = "Dismount: " + dismountKey + ".~n~";
+    Call<void>(gta::ADD_TEXT_COMPONENT_SUBSTRING_PLAYER_NAME, dismountStr.c_str());
+    Call<void>(gta::ADD_TEXT_COMPONENT_SUBSTRING_PLAYER_NAME, "Settings: Press F10 or /.");
+    Call<void>(gta::END_TEXT_COMMAND_DISPLAY_HELP, 0, 0, 1, 8000);
+}
+
 // While Skate poses the real ped, GTA's IK (feet to ground, arm/head/torso
 // look-at) and gesture/ambient animation would rewrite limbs after our pose.
 void SetGtaPosing(Ped ped, bool enabled) {
@@ -1781,6 +1831,10 @@ void TryEnter(Session& s, const Config& cfg, bool strict) {
         g_runtime.Output(o);
         if (o.status == SV_STATUS_ERROR) {
             Notify(s, "Skate runtime error: " + g_runtime.StatusText(), 6000);
+            Call<void>(gta::BEGIN_TEXT_COMMAND_DISPLAY_HELP, "STRING");
+            Call<void>(gta::ADD_TEXT_COMPONENT_SUBSTRING_PLAYER_NAME,
+                "~r~GTAxSkate:~s~ Skate collision/runtime error.~n~Please run Update.bat to sync world files.");
+            Call<void>(gta::END_TEXT_COMMAND_DISPLAY_HELP, 0, 0, 1, 6000);
             SetState(s, LifeState::Ready, "runtime error");
             return;
         }
@@ -1955,6 +2009,15 @@ void BeginActive(Session& s, const Config& cfg) {
              GetTickCount() - s.stateSince, l.last_activate_ms, l.session_builds);
     }
     SetState(s, LifeState::Skating, "runtime active");
+    static bool s_firstRunChecked = false;
+    if (!s_firstRunChecked) {
+        s_firstRunChecked = true;
+        const std::wstring ini = g_gameDir + L"SkateVLegacy.ini";
+        if (GetPrivateProfileIntW(L"SkateV", L"FirstRunHelpShown", 0, ini.c_str()) == 0) {
+            ShowControlsGuide();
+            WritePrivateProfileStringW(L"SkateV", L"FirstRunHelpShown", L"1", ini.c_str());
+        }
+    }
 }
 // Board aiming. Sniper rifles and the homing launcher take over the camera,
 // so they are not offered; unarmed has nothing to aim.
@@ -3415,6 +3478,10 @@ void LifecycleFrame(Session& s, const Config& cfg, bool f6) {
             g_runtime.Output(o);
             if (o.status == SV_STATUS_ERROR) {
                 Notify(s, "Skate runtime error: " + g_runtime.StatusText(), 6000);
+                Call<void>(gta::BEGIN_TEXT_COMMAND_DISPLAY_HELP, "STRING");
+                Call<void>(gta::ADD_TEXT_COMPONENT_SUBSTRING_PLAYER_NAME,
+                    "~r~GTAxSkate:~s~ Skate collision/runtime error.~n~Please run Update.bat to sync world files.");
+                Call<void>(gta::END_TEXT_COMMAND_DISPLAY_HELP, 0, 0, 1, 6000);
                 if (s.teleportWait) {
                     Call<void>(gta::FREEZE_ENTITY_POSITION, player, 0);
                     s.teleportWait = false;
@@ -4507,7 +4574,12 @@ std::vector<menu::Page> MenuPages(Session& s) {
             Action("Custom - save current settings", [] { SaveCustomPreset(); }),
             Action("Custom - restore saved settings", [] { RestoreCustomPreset(); }),
         }},
-        {"Skating", {}}, {"Board", {}}, {"Camera", {}}, {"Controls", {}}, {"HUD", {}},
+        {"Skating", {}}, {"Board", {}}, {"Camera", {}},
+        {"Controls", {
+            Helped(Action("Show beginner controls guide", [] { ShowControlsGuide(); }),
+                   "Displays on-screen tutorial card with essential skating and menu controls.")
+        }},
+        {"HUD", {}},
         {"World", {}}, {"Audio and radio", {}}, {"Advanced", {}},
         // Sub-pages are listed as rows on their parent (Back returns there).
         {"Board in hand", {}, "Board"}, {"Keyboard keys", {}, "Controls"},
@@ -4631,6 +4703,37 @@ std::vector<menu::Page> MenuPages(Session& s) {
         {"AudioOutput", "Play Skate sound through GTA's audio or directly."},
         {"CarryBoard", "The board stays in your hand after taking it from the weapon wheel."},
         {"BackwardsMan", "Assist for the BackwardsMan trick."},
+        {"DevOptions", "Show diagnostic tools and fine-grained collision switches (DetailedStairs, RailTops, CurbBevels)."},
+        {"ReplayHudStyle", "HUD appearance in replay: authentic Skate 3 banner with button badges, or clean GTA style."},
+        {"ReplayVehicles", "Record and replay traffic movement during replay playback."},
+        {"ReplayPeds", "Record and replay pedestrian movement during replay playback."},
+        {"BlockModKeys", "Block other script mod hotkeys while in Skate menus or replay."},
+        {"GpsWhileSkating", "Draw GPS route on the radar and road while skating."},
+        {"SkateSpots", "Mark skateparks and famous spots with blips on the map."},
+        {"Collectibles", "Show spinning pickups across San Andreas to unlock secret decks and songs."},
+        {"VehiclePush", "How strongly moving vehicles push the skater on collision."},
+        {"ObjectPush", "How easily the board and skater push movable props."},
+        {"BoardScratches", "Leave visual scratches and dents on vehicles hit by the board."},
+        {"PedBumpImpulse", "Shove strength when bumping into pedestrians without knocking them down."},
+        {"EmoteUp", "Up gesture animation triggered with D-Pad Up while riding."},
+        {"EmoteDown", "Down gesture animation triggered with D-Pad Down while riding."},
+        {"EmoteLeft", "Left gesture animation triggered with D-Pad Left while riding."},
+        {"EmoteRight", "Right gesture animation triggered with D-Pad Right while riding."},
+        {"BoardShop", "Open the board shop in clothing stores or Vespucci boardwalk."},
+        {"WheelsFromPaint", "Wheel paint finish determines hardness (metallic = hard, matte = soft)."},
+        {"Replay", "Record the last seconds of riding to review with Back/Tab."},
+        {"ReplaySeconds", "Buffer length recorded for instant replay (up to 30 seconds)."},
+        {"DetailedStairs", "Convert flagged staircase ramps into stepped physical terraces."},
+        {"StepRails", "Generate grind rails along step nosings and stair borders."},
+        {"TrackRails", "Grind rails along train and metro tracks."},
+        {"ObjectRails", "Grind rails along placed and standing park props."},
+        {"TubeRails", "Grind rails along cylinder and coping tubes."},
+        {"VisualRails", "Physical rails and collision along visible handrails."},
+        {"RailTops", "Snap grind lines onto the top surfaces of rails."},
+        {"CurbBevels", "Smooth bevels on curb edges to prevent wheel snags."},
+        {"HighResParks", "Visible high-resolution collision for skatepark bowls."},
+        {"VisibleRailings", "Physical collision from visible railing bars instead of GTA boxes."},
+        {"UnflaggedStairs", "Detect and step unflagged staircases (experimental)."},
     };
     for (Page& page : pages) for (Item& item : page.items) {
         const std::string target = destination(page, item);
@@ -4660,7 +4763,8 @@ std::vector<menu::Page> MenuPages(Session& s) {
         {"Camera", {{"Views", {"CameraView", "CameraRemember", "Camera", "CameraFovScale"}},
                     {"Cinematic camera (R)", {"CinemaFilter", "FilmerFilter", "FilmFilterStrength"}},
                     {"Replay (tap Back)", {"Replay", "ReplaySeconds", "Replay:"}}}},
-        {"Controls", {{"Keyboard", {"Keyboard", "PutAwayHoldMs"}},
+        {"Controls", {{"Tutorial", {"Show beginner controls guide"}},
+                      {"Keyboard", {"Keyboard", "PutAwayHoldMs"}},
                       {"Controller buttons", {"MenuButton", "GunButton", "AimButton", "FireButton", "BackwardsManChord"}},
                       {"Missions", {"BoardActionInMissions"}}}},
         {"HUD", {{"On screen", {"SkateHud", "Hud", "TrickAnalyzer", "KeyboardHints", "ReplayHudStyle"}},
@@ -4739,7 +4843,10 @@ bool ComponentInstalled(const char* name) {
 // only with DevOptions on; options of components the installer left out do
 // not show at all. Hidden rows keep their saved values.
 void HideUnavailable(std::vector<menu::Page>& pages) {
-    static const std::set<std::string> dev = {"CurbBevels", "RailTops", "VisualRails", "TubeRails", "UnflaggedStairs", "HighResParks", "VisibleRailings"};
+    static const std::set<std::string> dev = {
+        "CurbBevels", "RailTops", "VisualRails", "TubeRails", "UnflaggedStairs", "HighResParks", "VisibleRailings",
+        "DetailedStairs", "StepRails", "TrackRails", "ObjectRails"
+    };
     static const std::map<std::string, const char*> component = {
         {"BoardShop", "boards"}, {"WheelsFromPaint", "boards"}, {"WheelGlow", "glow"}, {"WheelGlowColour", "glow"},
         {"SkateRadio", "music"}, {"VisualRails", "world"}, {"HighResParks", "world"}, {"VisibleRailings", "world"}};

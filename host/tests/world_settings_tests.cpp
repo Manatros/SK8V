@@ -134,9 +134,14 @@ int wmain(int argc, wchar_t** argv) {
     compare.apply("0");
     assert(!g_plainGtaCompare && !g_config.stepRails && !g_config.highResParks);
     HideUnavailable(pages);
+    g_config.devOptions = false;
+    assert(!dev->items[4].visible()); // DetailedStairs is technical.
+    assert(!dev->items[5].visible()); // StepRails is technical.
+    assert(!dev->items[6].visible()); // TrackRails is technical.
+    assert(!dev->items[7].visible()); // ObjectRails is technical.
     assert(!dev->items[8].visible()); // TubeRails is technical.
     g_config.devOptions = true;
-    assert(dev->items[8].visible());
+    assert(dev->items[4].visible() && dev->items[5].visible() && dev->items[6].visible() && dev->items[7].visible() && dev->items[8].visible());
     WritePrivateProfileStringW(L"SkateV", L"ObjectPush", L"0.75", ini.c_str());
     menu::Start(ini, pages, {}, nullptr);
     g_config.objectPush = 0.75f;

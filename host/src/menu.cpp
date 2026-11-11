@@ -41,6 +41,7 @@ ULONGLONG g_statusUntil = 0;
 
 // Chord capture: hold the buttons, release to set.
 bool g_capturing = false, g_captureArmed = false;
+bool g_delArmed = true;
 unsigned g_captureMask = 0;
 ULONGLONG g_captureStart = 0;
 
@@ -363,6 +364,13 @@ void Commit(Item& it, const std::string& value) {
 
 void Beep(const char* name) { Call<void>(gta::PLAY_SOUND_FRONTEND, -1, name, "HUD_FRONTEND_DEFAULT_SOUNDSET", 1); }
 
+bool GameFocused() {
+    DWORD process = 0;
+    const HWND window = GetForegroundWindow();
+    if (window) GetWindowThreadProcessId(window, &process);
+    return window && process == GetCurrentProcessId();
+}
+
 bool Fire(int slot, int control) {
     Repeat& r = g_repeat[slot];
     const ULONGLONG now = GetTickCount64();
@@ -493,6 +501,7 @@ std::string ItemHelp(const Item& it) {
     if (it.kind == Kind::Flag || it.kind == Kind::Number || it.kind == Kind::Choice) {
         text += (text.empty() ? "" : "  ") + std::string("Default: ") + Show(it, it.def) + ".";
         text += it.restart ? " Restart GTA to apply." : " Left/Right change.";
+        text += " Del: default.";
     } else if (it.kind == Kind::Chord || it.kind == Kind::Key) {
         text += (text.empty() ? "" : "  ") + std::string("Enter, then press the new button.");
     } else if (text.empty()) {
@@ -638,27 +647,46 @@ void Navigate() {
     }
     const bool left = Fire(2, kLeft), right = Fire(3, kRight);
     const bool accept = Call<BOOL>(gta::IS_DISABLED_CONTROL_JUST_PRESSED, 0, kAccept);
+    const bool focused = GameFocused();
+    const bool delDown = focused && ((GetAsyncKeyState(VK_DELETE) & 0x8000) != 0);
+    if (!delDown || !focused) g_delArmed = focused && !delDown;
+
     if (Call<BOOL>(gta::IS_DISABLED_CONTROL_JUST_PRESSED, 0, kCancel)) {
         Beep("BACK");
+        g_delArmed = false;
         if (g_level && !g_back.empty()) g_pageIndex = g_back.back().first, g_sel[1] = g_back.back().second, g_back.pop_back();
         else if (g_level) g_level = 0;
         else g_open = false;
         return;
     }
     if (!g_level) {
+        if (delDown) g_delArmed = false;
         if (accept || right) {
             g_pageIndex = tops[static_cast<std::size_t>(sel)], g_level = 1, g_back.clear(), Beep("SELECT");
             g_sel[1] = FirstSelectable(g_pages[static_cast<std::size_t>(g_pageIndex)].items);
+            g_delArmed = false;
         }
         return;
     }
     Item& it = g_pages[g_pageIndex].items[static_cast<std::size_t>(sel)];
+    if (delDown && g_delArmed && !g_capturing) {
+        g_delArmed = false;
+        if (it.kind == Kind::Flag || it.kind == Kind::Number || it.kind == Kind::Choice || it.kind == Kind::Chord) {
+            const std::string cur = it.current ? it.current() : g_cache[it.key];
+            if (cur != it.def) {
+                Commit(it, it.def);
+                Beep("NAV_LEFT_RIGHT");
+                return;
+            }
+        }
+    }
     if (it.kind == Kind::Link) {
         if (accept || right)
             for (std::size_t i = 0; i < g_pages.size(); ++i)
                 if (g_pages[i].title == it.target) {
                     g_back.emplace_back(g_pageIndex, sel);
                     g_pageIndex = static_cast<int>(i), g_sel[1] = FirstSelectable(g_pages[i].items), Beep("SELECT");
+                    g_delArmed = false;
                     break;
                 }
     } else if (it.kind == Kind::Heading) {
@@ -669,7 +697,7 @@ void Navigate() {
             if (it.run) it.run();
         }
     } else if (it.kind == Kind::Chord || it.kind == Kind::Key) {
-        if (accept) g_capturing = true, g_captureArmed = false, g_captureMask = 0, g_captureStart = GetTickCount64();
+        if (accept) g_capturing = true, g_captureArmed = false, g_delArmed = false, g_captureMask = 0, g_captureStart = GetTickCount64();
     } else if (left || right || accept) {
         Commit(it, Step(it, it.current ? it.current() : g_cache[it.key], left ? -1 : 1));
         Beep("NAV_LEFT_RIGHT");
@@ -691,6 +719,7 @@ void Start(const std::wstring& ini, std::vector<Page> pages, std::function<unsig
             }
     }
     g_level = 0, g_sel[0] = g_sel[1] = 0;
+    g_delArmed = false;
     g_cache.clear();
     g_presetDefaults.clear();
 }
@@ -759,6 +788,7 @@ void Toggle() {
     }
     if (gta::FrontendActive()) return;
     Refresh();
+    g_delArmed = false;
     g_open = true;
 }
 

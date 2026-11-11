@@ -205,7 +205,7 @@ inline std::string PageHint(const std::string& title) {
         {"Presets", "GTAxSkate is the recommended default. SK8V, RP, User and Custom apply other complete setups. Keyboard bindings stay personal."},
         {"Board", "How the board looks and the marks it leaves; the board shop and the board in your hand."},
         {"Controls", "Keyboard, controller buttons and the keyboard key list."},
-        {"World", "What the board hits (cars, objects, stairs), people, swimming and guns, the object dropper and GPS."},
+        {"World", "What the board hits (cars, objects), people, swimming, object dropper and GPS. Enable 'Developer options' on Advanced for collision tuning."},
         {"Audio and radio", "The radio while skating and the Skate sound mix."},
         {"Advanced", "Fine tuning in sub-pages: physics, peds and vehicles, Hall of Meat, board in hand, developer."},
         {"World and roleplay", "Gentle pedestrian collisions, vehicle damage, injuries and GTA integration."},
