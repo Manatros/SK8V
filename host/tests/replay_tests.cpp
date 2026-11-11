@@ -466,6 +466,102 @@ int main() {
         assert(FormatSkateBadges("LB/RB Step Frame") == "[LB/RB] Step Frame");
         assert(FormatSkateBadges("X Set Key   Y Delete Key   L3 Next Key") == "[X] Set Key   [Y] Delete Key   [LS] Next Key");
         assert(FormatSkateBadges("a open   y delete   b back") == "[A] open   [Y] delete   [B] back");
+
+        // 48 vehicles + 32 peds maximum capacity test:
+        Frame fFull = At(10.0f);
+        fFull.vehicleCount = kMaxTrackedVehicles;
+        assert(kMaxTrackedVehicles == 48);
+        for (int v = 0; v < kMaxTrackedVehicles; ++v) {
+            fFull.vehicles[v].handle = 1000 + v;
+            fFull.vehicles[v].pos[0] = static_cast<float>(v);
+            fFull.vehicles[v].quat[3] = 1.0f;
+        }
+        fFull.pedCount = kMaxTrackedPeds;
+        assert(kMaxTrackedPeds == 32);
+        for (int p = 0; p < kMaxTrackedPeds; ++p) {
+            fFull.peds[p].handle = 2000 + p;
+            fFull.peds[p].pos[1] = static_cast<float>(p);
+            fFull.peds[p].quat[3] = 1.0f;
+        }
+        Recording recFull(5.0);
+        recFull.Reserve(5.0, 60.0, 2);
+        recFull.Add(fFull, 0.0);
+        assert(recFull.Last().vehicleCount == 48);
+        assert(recFull.Last().pedCount == 32);
+        assert(recFull.Last().vehicles[47].handle == 1047);
+        assert(recFull.Last().peds[31].handle == 2031);
+
+        // ActorSpan computation & GetActorReplayState test:
+        Recording recSpan(10.0);
+        recSpan.Reserve(10.0, 60.0, 2);
+
+        Frame f1 = At(1.0f); // t = 0.0
+        f1.vehicleCount = 2;
+        f1.vehicles[0].handle = 101; f1.vehicles[0].pos[0] = 10.0f;
+        f1.vehicles[1].handle = 102; f1.vehicles[1].pos[0] = 50.0f;
+        f1.pedCount = 0;
+
+        Frame f2 = At(2.0f); // t = 0.5
+        f2.vehicleCount = 2;
+        f2.vehicles[0].handle = 101; f2.vehicles[0].pos[0] = 15.0f;
+        f2.vehicles[1].handle = 102; f2.vehicles[1].pos[0] = 55.0f;
+        f2.pedCount = 1;
+        f2.peds[0].handle = 201; f2.peds[0].pos[0] = 5.0f;
+
+        Frame f3 = At(3.0f); // t = 1.0
+        f3.vehicleCount = 1;
+        f3.vehicles[0].handle = 101; f3.vehicles[0].pos[0] = 20.0f;
+        f3.pedCount = 1;
+        f3.peds[0].handle = 201; f3.peds[0].pos[0] = 8.0f;
+
+        Frame f4 = At(4.0f); // t = 1.5
+        f4.vehicleCount = 0;
+        f4.pedCount = 1;
+        f4.peds[0].handle = 201; f4.peds[0].pos[0] = 12.0f;
+
+        recSpan.Add(f1, 0.0);
+        recSpan.Add(f2, 0.5);
+        recSpan.Add(f3, 0.5);
+        recSpan.Add(f4, 0.5);
+
+        std::map<int, ActorSpan> spans = ComputeActorSpans(recSpan);
+        assert(spans.size() == 3);
+
+        // Vehicle 101: 0.0s .. 1.0s
+        assert(spans[101].handle == 101 && !spans[101].isPed);
+        assert(std::fabs(spans[101].firstTime - 0.0) < 1e-5);
+        assert(std::fabs(spans[101].lastTime - 1.0) < 1e-5);
+        assert(spans[101].firstSample.pos[0] == 10.0f);
+        assert(spans[101].lastSample.pos[0] == 20.0f);
+
+        // Vehicle 102: 0.0s .. 0.5s
+        assert(spans[102].handle == 102 && !spans[102].isPed);
+        assert(std::fabs(spans[102].firstTime - 0.0) < 1e-5);
+        assert(std::fabs(spans[102].lastTime - 0.5) < 1e-5);
+        assert(spans[102].firstSample.pos[0] == 50.0f);
+        assert(spans[102].lastSample.pos[0] == 55.0f);
+
+        // Ped 201: 0.5s .. 1.5s
+        assert(spans[201].handle == 201 && spans[201].isPed);
+        assert(std::fabs(spans[201].firstTime - 0.5) < 1e-5);
+        assert(std::fabs(spans[201].lastTime - 1.5) < 1e-5);
+        assert(spans[201].firstSample.pos[0] == 5.0f);
+        assert(spans[201].lastSample.pos[0] == 12.0f);
+
+        // Visibility resolution queries:
+        // Vehicle 102 (span 0.0 .. 0.5):
+        assert(GetActorReplayState(spans[102], -0.2) == ActorReplayState::BeforeSpan);
+        assert(GetActorReplayState(spans[102], 0.0) == ActorReplayState::Active);
+        assert(GetActorReplayState(spans[102], 0.25) == ActorReplayState::Active);
+        assert(GetActorReplayState(spans[102], 0.5) == ActorReplayState::Active);
+        assert(GetActorReplayState(spans[102], 0.8) == ActorReplayState::AfterSpan);
+
+        // Ped 201 (span 0.5 .. 1.5):
+        assert(GetActorReplayState(spans[201], 0.2) == ActorReplayState::BeforeSpan);
+        assert(GetActorReplayState(spans[201], 0.5) == ActorReplayState::Active);
+        assert(GetActorReplayState(spans[201], 1.0) == ActorReplayState::Active);
+        assert(GetActorReplayState(spans[201], 1.5) == ActorReplayState::Active);
+        assert(GetActorReplayState(spans[201], 1.8) == ActorReplayState::AfterSpan);
     }
 
     std::cout << "replay tests passed\n";

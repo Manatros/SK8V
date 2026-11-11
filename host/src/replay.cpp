@@ -144,6 +144,7 @@ HudStyle g_hudStyle = HudStyle::Skate;
 
 struct LiveActorState {
     int handle = 0;
+    bool isPed = false;
     float pos[3] = {};
     float quat[4] = {0.0f, 0.0f, 0.0f, 1.0f};
     float vel[3] = {};
@@ -151,6 +152,27 @@ struct LiveActorState {
 };
 std::map<int, LiveActorState> g_savedLiveActors;
 std::set<int> g_pinnedEntities;
+std::map<int, std::uint64_t> g_pinnedLastSeen;
+std::map<int, ActorSpan> g_actorSpans;
+std::map<int, bool> g_actorActiveState;
+
+void SetActorVisibleAndSolid(int handle, bool visible, bool isPed) {
+    auto it = g_actorActiveState.find(handle);
+    if (it != g_actorActiveState.end() && it->second == visible) return;
+    g_actorActiveState[handle] = visible;
+
+    Call<void>(SET_ENTITY_VISIBLE, handle, visible ? TRUE : FALSE, FALSE);
+    Call<void>(SET_ENTITY_COLLISION, handle, visible ? TRUE : FALSE, FALSE);
+    if (!isPed) {
+        for (int seat = -1; seat < 6; ++seat) {
+            const int p = Call<int>(GET_PED_IN_VEHICLE_SEAT, handle, seat);
+            if (p && Call<BOOL>(DOES_ENTITY_EXIST, p)) {
+                Call<void>(SET_ENTITY_VISIBLE, p, visible ? TRUE : FALSE, FALSE);
+                Call<void>(SET_ENTITY_COLLISION, p, visible ? TRUE : FALSE, FALSE);
+            }
+        }
+    }
+}
 
 // ---- look -----------------------------------------------------------------
 
@@ -302,10 +324,12 @@ void Present(int ped, const Recording::Sample& s) {
         boardparts::Tick(false, SvBoardPose{});
     }
     if (!g_loaded) {
+        std::set<int> presentHandles;
         if (g_replayVehicles && a.vehicleCount > 0) {
             for (int i = 0; i < a.vehicleCount; ++i) {
                 const ActorSample& va = a.vehicles[i];
                 if (!va.handle || !Call<BOOL>(DOES_ENTITY_EXIST, va.handle)) continue;
+                presentHandles.insert(va.handle);
                 const ActorSample* vb = nullptr;
                 for (int j = 0; j < b.vehicleCount; ++j) {
                     if (b.vehicles[j].handle == va.handle) { vb = &b.vehicles[j]; break; }
@@ -323,13 +347,16 @@ void Present(int ped, const Recording::Sample& s) {
                 }
                 Call<void>(SET_ENTITY_COORDS_NO_OFFSET, va.handle, pos[0], pos[1], pos[2], 0, 0, 0);
                 Call<void>(SET_ENTITY_QUATERNION, va.handle, q.x, q.y, q.z, q.w);
-                Call<void>(SET_ENTITY_VISIBLE, va.handle, TRUE, FALSE);
+                Call<void>(SET_ENTITY_VELOCITY, va.handle, 0.0f, 0.0f, 0.0f);
+                Call<void>(FREEZE_ENTITY_POSITION, va.handle, TRUE);
+                SetActorVisibleAndSolid(va.handle, true, false);
             }
         }
         if (g_replayPeds && a.pedCount > 0) {
             for (int i = 0; i < a.pedCount; ++i) {
                 const ActorSample& pa = a.peds[i];
                 if (!pa.handle || !Call<BOOL>(DOES_ENTITY_EXIST, pa.handle)) continue;
+                presentHandles.insert(pa.handle);
                 const ActorSample* pb = nullptr;
                 for (int j = 0; j < b.pedCount; ++j) {
                     if (b.peds[j].handle == pa.handle) { pb = &b.peds[j]; break; }
@@ -347,7 +374,30 @@ void Present(int ped, const Recording::Sample& s) {
                 }
                 Call<void>(SET_ENTITY_COORDS_NO_OFFSET, pa.handle, pos[0], pos[1], pos[2], 0, 0, 0);
                 Call<void>(SET_ENTITY_QUATERNION, pa.handle, q.x, q.y, q.z, q.w);
-                Call<void>(SET_ENTITY_VISIBLE, pa.handle, TRUE, FALSE);
+                Call<void>(SET_ENTITY_VELOCITY, pa.handle, 0.0f, 0.0f, 0.0f);
+                Call<void>(FREEZE_ENTITY_POSITION, pa.handle, TRUE);
+                SetActorVisibleAndSolid(pa.handle, true, true);
+            }
+        }
+        for (const auto& kv : g_savedLiveActors) {
+            const int h = kv.first;
+            if (presentHandles.count(h) || !Call<BOOL>(DOES_ENTITY_EXIST, h)) continue;
+            const LiveActorState& st = kv.second;
+            const auto spanIt = g_actorSpans.find(h);
+            if (spanIt != g_actorSpans.end()) {
+                SetActorVisibleAndSolid(h, false, st.isPed);
+                const ActorSpan& span = spanIt->second;
+                const ActorSample& nearest = (g_head.time <= span.firstTime) ? span.firstSample : span.lastSample;
+                Call<void>(SET_ENTITY_COORDS_NO_OFFSET, h, nearest.pos[0], nearest.pos[1], nearest.pos[2], 0, 0, 0);
+                Call<void>(SET_ENTITY_QUATERNION, h, nearest.quat[0], nearest.quat[1], nearest.quat[2], nearest.quat[3]);
+                Call<void>(SET_ENTITY_VELOCITY, h, 0.0f, 0.0f, 0.0f);
+                Call<void>(FREEZE_ENTITY_POSITION, h, TRUE);
+            } else {
+                Call<void>(SET_ENTITY_COORDS_NO_OFFSET, h, st.pos[0], st.pos[1], st.pos[2], 0, 0, 0);
+                Call<void>(SET_ENTITY_QUATERNION, h, st.quat[0], st.quat[1], st.quat[2], st.quat[3]);
+                Call<void>(SET_ENTITY_VELOCITY, h, 0.0f, 0.0f, 0.0f);
+                Call<void>(FREEZE_ENTITY_POSITION, h, TRUE);
+                SetActorVisibleAndSolid(h, st.visible, st.isPed);
             }
         }
     }
@@ -1814,7 +1864,10 @@ void Clear() {
         }
     }
     g_pinnedEntities.clear();
+    g_pinnedLastSeen.clear();
     g_savedLiveActors.clear();
+    g_actorSpans.clear();
+    g_actorActiveState.clear();
     g_rec.Clear();
     g_lastTick = 0;
     g_editValid = false;
@@ -1859,27 +1912,28 @@ void Record(const SvOutput& o, const float* placed, const float* bones, int coun
     }
     f.bones.assign(bones, bones + static_cast<std::size_t>(count) * 16);
 
+    struct Cand { float d2; int handle; };
+    static Cand s_cands[1024];
+
     f.vehicleCount = 0;
     if (g_replayVehicles) {
-        static int vehPool[256];
-        const int nVeh = std::clamp(worldGetAllVehicles(vehPool, 256), 0, 256);
-        struct Cand { float d2; int handle; };
-        std::vector<Cand> cands;
-        cands.reserve(static_cast<std::size_t>(nVeh));
-        const float maxR2 = 45.0f * 45.0f;
+        static int s_vehPool[1024];
+        const int nVeh = std::clamp(worldGetAllVehicles(s_vehPool, 1024), 0, 1024);
+        int candCount = 0;
+        const float maxR2 = 140.0f * 140.0f;
         for (int i = 0; i < nVeh; ++i) {
-            const int v = vehPool[i];
+            const int v = s_vehPool[i];
             if (!v || !Call<BOOL>(DOES_ENTITY_EXIST, v)) continue;
             const Vector3 p = Call<Vector3>(GET_ENTITY_COORDS, v, 0);
             const float dx = p.x - f.root[0], dy = p.y - f.root[1], dz = p.z - f.root[2];
             const float d2 = dx * dx + dy * dy + dz * dz;
-            if (d2 <= maxR2) cands.push_back({d2, v});
+            if (d2 <= maxR2 && candCount < 1024) s_cands[candCount++] = {d2, v};
         }
-        std::sort(cands.begin(), cands.end(), [](const Cand& a, const Cand& b) { return a.d2 < b.d2; });
-        const int countVeh = std::min(static_cast<int>(cands.size()), kMaxTrackedVehicles);
+        std::sort(s_cands, s_cands + candCount, [](const Cand& a, const Cand& b) { return a.d2 < b.d2; });
+        const int countVeh = std::min(candCount, kMaxTrackedVehicles);
         f.vehicleCount = countVeh;
         for (int i = 0; i < countVeh; ++i) {
-            const int v = cands[static_cast<std::size_t>(i)].handle;
+            const int v = s_cands[i].handle;
             ActorSample& s = f.vehicles[i];
             s.handle = v;
             s.model = static_cast<std::uint32_t>(Call<int>(GET_ENTITY_MODEL, v));
@@ -1908,32 +1962,31 @@ void Record(const SvOutput& o, const float* placed, const float* bones, int coun
                 Call<void>(SET_ENTITY_AS_MISSION_ENTITY, v, TRUE, TRUE);
                 g_pinnedEntities.insert(v);
             }
+            g_pinnedLastSeen[v] = o.tick;
         }
     }
 
     f.pedCount = 0;
     if (g_replayPeds) {
-        static int pedPool[256];
-        const int nPed = std::clamp(worldGetAllPeds(pedPool, 256), 0, 256);
-        struct Cand { float d2; int handle; };
-        std::vector<Cand> cands;
-        cands.reserve(static_cast<std::size_t>(nPed));
-        const float maxR2 = 30.0f * 30.0f;
+        static int s_pedPool[1024];
+        const int nPed = std::clamp(worldGetAllPeds(s_pedPool, 1024), 0, 1024);
+        int candCount = 0;
+        const float maxR2 = 90.0f * 90.0f;
         const int playerPed = Call<int>(PLAYER_PED_ID);
         for (int i = 0; i < nPed; ++i) {
-            const int p = pedPool[i];
+            const int p = s_pedPool[i];
             if (!p || p == g_ped || p == playerPed || !Call<BOOL>(DOES_ENTITY_EXIST, p)) continue;
             if (Call<BOOL>(IS_PED_IN_ANY_VEHICLE, p, FALSE)) continue;
             const Vector3 coords = Call<Vector3>(GET_ENTITY_COORDS, p, 0);
             const float dx = coords.x - f.root[0], dy = coords.y - f.root[1], dz = coords.z - f.root[2];
             const float d2 = dx * dx + dy * dy + dz * dz;
-            if (d2 <= maxR2) cands.push_back({d2, p});
+            if (d2 <= maxR2 && candCount < 1024) s_cands[candCount++] = {d2, p};
         }
-        std::sort(cands.begin(), cands.end(), [](const Cand& a, const Cand& b) { return a.d2 < b.d2; });
-        const int countPed = std::min(static_cast<int>(cands.size()), kMaxTrackedPeds);
+        std::sort(s_cands, s_cands + candCount, [](const Cand& a, const Cand& b) { return a.d2 < b.d2; });
+        const int countPed = std::min(candCount, kMaxTrackedPeds);
         f.pedCount = countPed;
         for (int i = 0; i < countPed; ++i) {
-            const int p = cands[static_cast<std::size_t>(i)].handle;
+            const int p = s_cands[i].handle;
             ActorSample& s = f.peds[i];
             s.handle = p;
             s.model = static_cast<std::uint32_t>(Call<int>(GET_ENTITY_MODEL, p));
@@ -1962,26 +2015,24 @@ void Record(const SvOutput& o, const float* placed, const float* bones, int coun
                 Call<void>(SET_ENTITY_AS_MISSION_ENTITY, p, TRUE, TRUE);
                 g_pinnedEntities.insert(p);
             }
+            g_pinnedLastSeen[p] = o.tick;
         }
     }
 
     static int s_cleanCounter = 0;
     if (++s_cleanCounter >= 120 && !g_pinnedEntities.empty()) {
         s_cleanCounter = 0;
-        std::set<int> inRec;
-        const std::size_t recSize = g_rec.Size();
-        for (std::size_t i = 0; i < recSize; i += 6) {
-            const Frame& rf = g_rec.Get(i);
-            for (int v = 0; v < rf.vehicleCount; ++v) inRec.insert(rf.vehicles[v].handle);
-            for (int p = 0; p < rf.pedCount; ++p) inRec.insert(rf.peds[p].handle);
-        }
+        const std::uint64_t maxAgeTicks = static_cast<std::uint64_t>(g_seconds * 60.0) + 60;
         for (auto it = g_pinnedEntities.begin(); it != g_pinnedEntities.end();) {
             const int h = *it;
-            if (!inRec.count(h) || !Call<BOOL>(DOES_ENTITY_EXIST, h)) {
+            const auto lastIt = g_pinnedLastSeen.find(h);
+            const bool expired = (lastIt == g_pinnedLastSeen.end() || o.tick - lastIt->second > maxAgeTicks);
+            if (expired || !Call<BOOL>(DOES_ENTITY_EXIST, h)) {
                 if (Call<BOOL>(DOES_ENTITY_EXIST, h)) {
                     Entity ent = h;
                     Call<void>(SET_ENTITY_AS_NO_LONGER_NEEDED, &ent);
                 }
+                if (lastIt != g_pinnedLastSeen.end()) g_pinnedLastSeen.erase(lastIt);
                 it = g_pinnedEntities.erase(it);
             } else {
                 ++it;
@@ -2011,16 +2062,14 @@ bool Enter(int ped) {
     g_noticeUntil = 0.0;
 
     g_savedLiveActors.clear();
-    std::set<int> toSnapshot = g_pinnedEntities;
-    if (g_rec.Size()) {
-        const Frame& lastFrame = g_rec.Last();
-        for (int i = 0; i < lastFrame.vehicleCount; ++i) toSnapshot.insert(lastFrame.vehicles[i].handle);
-        for (int i = 0; i < lastFrame.pedCount; ++i) toSnapshot.insert(lastFrame.peds[i].handle);
-    }
-    for (int h : toSnapshot) {
+    static int s_poolVeh[1024];
+    const int nVeh = std::clamp(worldGetAllVehicles(s_poolVeh, 1024), 0, 1024);
+    for (int i = 0; i < nVeh; ++i) {
+        const int h = s_poolVeh[i];
         if (!h || !Call<BOOL>(DOES_ENTITY_EXIST, h)) continue;
         LiveActorState st{};
         st.handle = h;
+        st.isPed = false;
         const Vector3 p = Call<Vector3>(GET_ENTITY_COORDS, h, 0);
         st.pos[0] = p.x, st.pos[1] = p.y, st.pos[2] = p.z;
         Vector3 fwd{}, right{}, up{}, pos{};
@@ -2042,9 +2091,51 @@ bool Enter(int ped) {
         const Vector3 vel = Call<Vector3>(GET_ENTITY_VELOCITY, h);
         st.vel[0] = vel.x, st.vel[1] = vel.y, st.vel[2] = vel.z;
         st.visible = Call<BOOL>(IS_ENTITY_VISIBLE, h) != 0;
+        Call<void>(SET_ENTITY_VELOCITY, h, 0.0f, 0.0f, 0.0f);
         Call<void>(FREEZE_ENTITY_POSITION, h, TRUE);
         g_savedLiveActors[h] = st;
     }
+
+    static int s_poolPed[1024];
+    const int nPed = std::clamp(worldGetAllPeds(s_poolPed, 1024), 0, 1024);
+    const int playerPed = Call<int>(PLAYER_PED_ID);
+    for (int i = 0; i < nPed; ++i) {
+        const int h = s_poolPed[i];
+        if (!h || h == g_ped || h == playerPed || !Call<BOOL>(DOES_ENTITY_EXIST, h)) continue;
+        if (Call<BOOL>(IS_PED_IN_ANY_VEHICLE, h, FALSE)) continue;
+        LiveActorState st{};
+        st.handle = h;
+        st.isPed = true;
+        const Vector3 p = Call<Vector3>(GET_ENTITY_COORDS, h, 0);
+        st.pos[0] = p.x, st.pos[1] = p.y, st.pos[2] = p.z;
+        Vector3 fwd{}, right{}, up{}, pos{};
+        Call<void>(GET_ENTITY_MATRIX, h, &fwd, &right, &up, &pos);
+        const float sx = std::hypot(right.x, right.y, right.z);
+        const float sy = std::hypot(fwd.x, fwd.y, fwd.z);
+        const float sz = std::hypot(up.x, up.y, up.z);
+        if (sx > 1e-4f && sy > 1e-4f && sz > 1e-4f) {
+            posemath::M m{};
+            m.r[0][0] = right.x / sx; m.r[0][1] = right.y / sx; m.r[0][2] = right.z / sx;
+            m.r[1][0] = fwd.x / sy;   m.r[1][1] = fwd.y / sy;   m.r[1][2] = fwd.z / sy;
+            m.r[2][0] = up.x / sz;    m.r[2][1] = up.y / sz;    m.r[2][2] = up.z / sz;
+            const posemath::Q q = posemath::FromRows(m);
+            st.quat[0] = q.x, st.quat[1] = q.y, st.quat[2] = q.z, st.quat[3] = q.w;
+        } else {
+            st.quat[0] = st.quat[1] = st.quat[2] = 0.0f;
+            st.quat[3] = 1.0f;
+        }
+        const Vector3 vel = Call<Vector3>(GET_ENTITY_VELOCITY, h);
+        st.vel[0] = vel.x, st.vel[1] = vel.y, st.vel[2] = vel.z;
+        st.visible = Call<BOOL>(IS_ENTITY_VISIBLE, h) != 0;
+        Call<void>(SET_ENTITY_VELOCITY, h, 0.0f, 0.0f, 0.0f);
+        Call<void>(FREEZE_ENTITY_POSITION, h, TRUE);
+        g_savedLiveActors[h] = st;
+    }
+
+    g_actorSpans = ComputeActorSpans(g_rec);
+    g_actorActiveState.clear();
+    Call<void>(SET_VEHICLE_POPULATION_BUDGET, 0);
+    Call<void>(SET_PED_POPULATION_BUDGET, 0);
     if (!g_editValid || g_edit.In() < g_rec.Start() - 1e-6) {
         g_edit.Reset(g_rec.Start(), g_rec.End());
         g_editValid = true;
@@ -2137,9 +2228,23 @@ void Exit() {
             Call<void>(SET_ENTITY_VELOCITY, h, st.vel[0], st.vel[1], st.vel[2]);
             Call<void>(FREEZE_ENTITY_POSITION, h, FALSE);
             Call<void>(SET_ENTITY_VISIBLE, h, st.visible ? TRUE : FALSE, FALSE);
+            Call<void>(SET_ENTITY_COLLISION, h, TRUE, FALSE);
+            if (!st.isPed) {
+                for (int seat = -1; seat < 6; ++seat) {
+                    const int p = Call<int>(GET_PED_IN_VEHICLE_SEAT, h, seat);
+                    if (p && Call<BOOL>(DOES_ENTITY_EXIST, p)) {
+                        Call<void>(SET_ENTITY_VISIBLE, p, TRUE, FALSE);
+                        Call<void>(SET_ENTITY_COLLISION, p, TRUE, FALSE);
+                    }
+                }
+            }
         }
     }
     g_savedLiveActors.clear();
+    g_actorSpans.clear();
+    g_actorActiveState.clear();
+    Call<void>(SET_VEHICLE_POPULATION_BUDGET, 3);
+    Call<void>(SET_PED_POPULATION_BUDGET, 3);
     if (g_cam) {
         Call<void>(SET_CAM_ACTIVE, g_cam, 0);
         Call<void>(DESTROY_CAM, g_cam, 0);

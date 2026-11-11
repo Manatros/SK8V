@@ -3,6 +3,7 @@
 // skating showed (skater root, bone matrices, board, camera) and the
 // playhead over it. No GTA calls here, so it can be unit-tested.
 #include <cstdint>
+#include <map>
 #include <string>
 #include <vector>
 
@@ -10,8 +11,8 @@ namespace replay {
 
 // One presented frame. Bone and board matrices: 16 floats each, GTA world
 // space, RAGE row layout (as posehook::PublishPose takes them).
-static constexpr int kMaxTrackedVehicles = 12;
-static constexpr int kMaxTrackedPeds = 12;
+static constexpr int kMaxTrackedVehicles = 48;
+static constexpr int kMaxTrackedPeds = 32;
 
 struct ActorSample {
     int handle = 0;
@@ -23,6 +24,22 @@ struct ActorSample {
     bool visible = false;
 };
 
+struct ActorSpan {
+    int handle = 0;
+    bool isPed = false;
+    double firstTime = 1e9;
+    double lastTime = -1e9;
+    ActorSample firstSample{};
+    ActorSample lastSample{};
+};
+
+enum class ActorReplayState {
+    BeforeSpan,
+    Active,
+    AfterSpan,
+    Unrecorded,
+};
+
 enum class HudStyle {
     GTA = 0,
     Skate = 1,
@@ -30,6 +47,14 @@ enum class HudStyle {
 
 // Formats Skate 3 controller button badge prompts ([A], [B], [X], [Y], [LB/RB], [LT/RT], etc.)
 std::string FormatSkateBadges(const std::string& in);
+
+class Recording;
+
+// Computes life spans of all tracked vehicles and pedestrians in the recording.
+std::map<int, ActorSpan> ComputeActorSpans(const Recording& rec);
+
+// Determines whether an actor should be rendered active/visible, or hidden outside its span.
+ActorReplayState GetActorReplayState(const ActorSpan& span, double headTime, double tolerance = 0.05);
 
 struct FrameData {
     double time = 0.0;           // seconds since the recording began
