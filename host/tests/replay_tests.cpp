@@ -1,4 +1,5 @@
 #include "../src/replay_logic.cpp"
+#include "../src/pose_math.h"
 #include <cassert>
 #include <cmath>
 #include <iostream>
@@ -387,6 +388,84 @@ int main() {
         h.reverse = false;
         h.playing = false;
         assert(SoundRate(h, false) == 0.0);
+    }
+    {
+        // ActorSample and Frame world actors:
+        Frame fa = At(1.0f);
+        fa.vehicleCount = 2;
+        fa.vehicles[0].handle = 101;
+        fa.vehicles[0].pos[0] = 10.0f; fa.vehicles[0].pos[1] = 20.0f; fa.vehicles[0].pos[2] = 5.0f;
+        fa.vehicles[0].quat[0] = 0.0f; fa.vehicles[0].quat[1] = 0.0f; fa.vehicles[0].quat[2] = 0.0f; fa.vehicles[0].quat[3] = 1.0f;
+        fa.vehicles[1].handle = 102;
+        fa.vehicles[1].pos[0] = 50.0f; fa.vehicles[1].pos[1] = 0.0f; fa.vehicles[1].pos[2] = 0.0f;
+        fa.pedCount = 1;
+        fa.peds[0].handle = 201;
+        fa.peds[0].pos[0] = 2.0f; fa.peds[0].pos[1] = 3.0f; fa.peds[0].pos[2] = 1.0f;
+
+        Frame fb = At(2.0f);
+        fb.vehicleCount = 2;
+        fb.vehicles[0].handle = 101;
+        fb.vehicles[0].pos[0] = 20.0f; fb.vehicles[0].pos[1] = 20.0f; fb.vehicles[0].pos[2] = 5.0f;
+        fb.vehicles[0].quat[0] = 0.0f; fb.vehicles[0].quat[1] = 0.0f; fb.vehicles[0].quat[2] = 0.7071068f; fb.vehicles[0].quat[3] = 0.7071068f;
+        fb.vehicles[1].handle = 102;
+        fb.vehicles[1].pos[0] = 60.0f; fb.vehicles[1].pos[1] = 0.0f; fb.vehicles[1].pos[2] = 0.0f;
+        fb.pedCount = 1;
+        fb.peds[0].handle = 201;
+        fb.peds[0].pos[0] = 4.0f; fb.peds[0].pos[1] = 3.0f; fb.peds[0].pos[2] = 1.0f;
+
+        Recording rec(10.0);
+        rec.Reserve(10.0, 60.0, 2);
+        rec.Add(fa, 0.0);
+        rec.Add(fb, 0.5);
+        auto samp = rec.At(0.25);
+        assert(samp.a && samp.b);
+        assert(samp.a->vehicleCount == 2);
+        assert(samp.b->vehicleCount == 2);
+        assert(samp.a->vehicles[0].handle == 101);
+        assert(samp.b->vehicles[0].handle == 101);
+        assert(std::fabs(samp.t - 0.5f) < 1e-6f);
+
+        // Quaternion slerp test:
+        posemath::Q qa{fa.vehicles[0].quat[0], fa.vehicles[0].quat[1], fa.vehicles[0].quat[2], fa.vehicles[0].quat[3]};
+        posemath::Q qb{fb.vehicles[0].quat[0], fb.vehicles[0].quat[1], fb.vehicles[0].quat[2], fb.vehicles[0].quat[3]};
+        posemath::Q qhalf = posemath::Slerp(qa, qb, 0.5f);
+        // Angle should be half of 90 degrees = 45 degrees: sin(22.5) ~ 0.38268, cos(22.5) ~ 0.92388
+        assert(std::fabs(qhalf.z - 0.3826834f) < 1e-4f);
+        assert(std::fabs(qhalf.w - 0.9238795f) < 1e-4f);
+
+        // HudStyle enums:
+        assert(static_cast<int>(HudStyle::GTA) == 0);
+        assert(static_cast<int>(HudStyle::Skate) == 1);
+
+        // keyF4 edge detection:
+        Input inF4;
+        PadIn pad{};
+        KeysIn keys{};
+        keys.read = true;
+        inF4.Poll(pad, keys);  // baseline establishes unpressed state
+        keys.keyF4 = true;
+        Edges ed = inF4.Poll(pad, keys);
+        assert(ed.key.keyF4);
+        // Next frame, still held: no new edge:
+        ed = inF4.Poll(pad, keys);
+        assert(!ed.key.keyF4);
+        // Release:
+        keys.keyF4 = false;
+        ed = inF4.Poll(pad, keys);
+        assert(!ed.key.keyF4);
+        // Press again:
+        keys.keyF4 = true;
+        ed = inF4.Poll(pad, keys);
+        assert(ed.key.keyF4);
+
+        // FormatSkateBadges:
+        assert(FormatSkateBadges("RB Play/Pause   LT/RT Scrub   D-pad Left/Right Start/End   A Edit Timeline") ==
+               "[RB] Play/Pause   [LT/RT] Scrub   [D-PAD \xE2\x86\x90\xE2\x86\x92] Start/End   [A] Edit Timeline");
+        assert(FormatSkateBadges("A Select   B Back") == "[A] Select   [B] Back");
+        assert(FormatSkateBadges("Back Actions   B Cancel") == "[BACK] Actions   [B] Cancel");
+        assert(FormatSkateBadges("LB/RB Step Frame") == "[LB/RB] Step Frame");
+        assert(FormatSkateBadges("X Set Key   Y Delete Key   L3 Next Key") == "[X] Set Key   [Y] Delete Key   [LS] Next Key");
+        assert(FormatSkateBadges("a open   y delete   b back") == "[A] open   [Y] delete   [B] back");
     }
 
     std::cout << "replay tests passed\n";

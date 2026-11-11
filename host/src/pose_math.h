@@ -133,21 +133,28 @@ inline void ToRows(const Q& q, M& m) {
 }
 
 // `a` at t = 0, `b` at t = 1 (bones are rigid: unit axes).
-inline M Blend(const M& a, const M& b, float t) {
-    const Q qa = FromRows(a);
-    Q qb = FromRows(b);
+inline Q Slerp(const Q& qa, Q qb, float t) {
     float d = qa.x * qb.x + qa.y * qb.y + qa.z * qb.z + qa.w * qb.w;
     if (d < 0.0f) qb = {-qb.x, -qb.y, -qb.z, -qb.w}, d = -d;
     Q q;
     if (d > 0.9995f) {
         q = {qa.x + (qb.x - qa.x) * t, qa.y + (qb.y - qa.y) * t, qa.z + (qb.z - qa.z) * t, qa.w + (qb.w - qa.w) * t};
     } else {
-        const float th = std::acos(d), s = std::sin(th);
-        const float wa = std::sin((1 - t) * th) / s, wb = std::sin(t * th) / s;
+        const float th = std::acos(d < 1.0f ? (d > -1.0f ? d : -1.0f) : 1.0f);
+        const float s = std::sin(th);
+        const float wa = s > 1e-5f ? std::sin((1.0f - t) * th) / s : (1.0f - t);
+        const float wb = s > 1e-5f ? std::sin(t * th) / s : t;
         q = {qa.x * wa + qb.x * wb, qa.y * wa + qb.y * wb, qa.z * wa + qb.z * wb, qa.w * wa + qb.w * wb};
     }
     const float l = std::sqrt(q.x * q.x + q.y * q.y + q.z * q.z + q.w * q.w);
-    q = {q.x / l, q.y / l, q.z / l, q.w / l};
+    if (l > 1e-5f) q = {q.x / l, q.y / l, q.z / l, q.w / l};
+    return q;
+}
+
+inline M Blend(const M& a, const M& b, float t) {
+    const Q qa = FromRows(a);
+    const Q qb = FromRows(b);
+    const Q q = Slerp(qa, qb, t);
     M o = a;
     ToRows(q, o);
     for (int c = 0; c < 3; ++c) o.r[3][c] = a.r[3][c] + (b.r[3][c] - a.r[3][c]) * t;

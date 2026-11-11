@@ -97,6 +97,9 @@ struct Config {
     float replaySoundGainDb = -4.0f; // ReplaySoundGainDb: the replay plays the whole mix unplaced, so a little quieter
     bool replayFisheye = true;     // ReplayFisheye: the Fisheye lens bends the picture (0: a plain 120-degree view)
     bool blockModKeys = true;      // BlockModKeys: other mods get no keys while the replay or the F10 menu is open (modkeys.h)
+    bool replayVehicles = true;    // ReplayVehicles: replay moving vehicles in the replay (Phase 4 world actors)
+    bool replayPeds = true;        // ReplayPeds: replay moving pedestrians in the replay
+    std::string replayHudStyle = "Skate"; // ReplayHudStyle: Skate (controller binds) or GTA (clean text)
     bool boardShop = true;    // BoardShop: Skate 3's boards and parts for sale in street clothing stores (G)
     bool wheelsFromPaint = true; // WheelsFromPaint: painted wheels set the wheel hardness (matte soft .. metallic hard)
     bool vehicleShapes = true; // VehicleShapes: survey vehicles without an extracted bound (a roof to ride, a gap to hippie jump)
@@ -325,6 +328,9 @@ const Key kKeys[] = {
     {"ReplaySoundGainDb", Store<&Config::replaySoundGainDb>},
     {"ReplayFisheye", Store<&Config::replayFisheye>},
     {"BlockModKeys", Store<&Config::blockModKeys>},
+    {"ReplayVehicles", Store<&Config::replayVehicles>},
+    {"ReplayPeds", Store<&Config::replayPeds>},
+    {"ReplayHudStyle", Store<&Config::replayHudStyle>},
     {"BoardShop", Store<&Config::boardShop>},
     {"WheelsFromPaint", Store<&Config::wheelsFromPaint>},
     {"VehicleShapes", Store<&Config::vehicleShapes>},
@@ -955,6 +961,7 @@ replay::KeysIn ReplayKeys() {
     k.keyF1 = held(VK_F1);
     k.keyF2 = held(VK_F2);
     k.keyF3 = held(VK_F3);
+    k.keyF4 = held(VK_F4);
     k.faster = held(VK_UP);
     k.slower = held(VK_DOWN);
     k.mouseLeft = held(VK_LBUTTON);
@@ -4065,6 +4072,21 @@ std::vector<menu::Page> MenuPages(Session& s) {
                "Opens the replay when you close this menu (for keyboard players; works only while skating)."),
         Helped(Action("Replay: saved replays", [&s] { replay::OpenSavedReplaysOnEnter(); s.replayRequested = true; }),
                "Skate's Reel: opens your saved replays (Documents\\GTAxSkate\\Replays) when you close this menu; works only while skating."),
+        Helped(Choice("Replay HUD style", "ReplayHudStyle", {"Skate", "GTA"}, {"Skate 3 (controller binds)", "GTA (clean text)"},
+                      Bound("ReplayHudStyle", [] {
+                          replay::ConfigureHudStyle(g_config.replayHudStyle == "GTA" ? replay::HudStyle::GTA : replay::HudStyle::Skate);
+                      })),
+               "Toggle between Skate 3 HUD layout (showing prominent controller gamepad button badges) and GTA HUD (clean bottom text). Shortcut in replay: F4."),
+        Helped(Flag("Replay moving vehicles", "ReplayVehicles", D.replayVehicles,
+                    Bound("ReplayVehicles", [] {
+                        replay::ConfigureActors(g_config.replayVehicles, g_config.replayPeds);
+                    })),
+               "Replays moving traffic and cars from the live situation during playback and scrubbing instead of leaving them frozen. Toggle off for A/B testing."),
+        Helped(Flag("Replay moving pedestrians", "ReplayPeds", D.replayPeds,
+                    Bound("ReplayPeds", [] {
+                        replay::ConfigureActors(g_config.replayVehicles, g_config.replayPeds);
+                    })),
+               "Replays ambient pedestrians from the live situation during playback and scrubbing instead of leaving them frozen. Toggle off for A/B testing."),
         Choice("Board tracks", "BoardTracks", {"1", "0"}, {"On", "Off"}, Bound("BoardTracks")),
         Number("Glowing wheels", "WheelGlow", 0, 0, 1, 0.05f,
                [](float v) { return v == 0.0f ? std::string("Off") : Fixed("%.0f%%")(v * 100.0f); },
@@ -4888,6 +4910,8 @@ void ScriptMain() {
         collectibles::Start(g_gameDir, cfg.collectibles, Log);
         replay::Configure(cfg.replay, cfg.replaySeconds, cfg.replayWorldScale, Log);
         replay::ConfigureLook(cfg.replaySound, cfg.replaySoundGainDb, cfg.replayFisheye, cfg.filmFilterStrength);
+        replay::ConfigureActors(cfg.replayVehicles, cfg.replayPeds);
+        replay::ConfigureHudStyle(cfg.replayHudStyle == "GTA" ? replay::HudStyle::GTA : replay::HudStyle::Skate);
         replay::LoadTexts(std::filesystem::u8path(cfg.dataRoot).wstring() + L"\\private\\replay-text.txt");
         // The board shop's part models and the shop itself (garages in the game folder).
         if (cfg.drawBoard && boardparts::Start(std::filesystem::u8path(cfg.dataRoot).wstring(), Log) && cfg.boardShop)

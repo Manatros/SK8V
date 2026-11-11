@@ -3,12 +3,34 @@
 // skating showed (skater root, bone matrices, board, camera) and the
 // playhead over it. No GTA calls here, so it can be unit-tested.
 #include <cstdint>
+#include <string>
 #include <vector>
 
 namespace replay {
 
 // One presented frame. Bone and board matrices: 16 floats each, GTA world
 // space, RAGE row layout (as posehook::PublishPose takes them).
+static constexpr int kMaxTrackedVehicles = 12;
+static constexpr int kMaxTrackedPeds = 12;
+
+struct ActorSample {
+    int handle = 0;
+    std::uint32_t model = 0;
+    float pos[3] = {};
+    float quat[4] = {0.0f, 0.0f, 0.0f, 1.0f}; // x, y, z, w
+    float vel[3] = {};
+    float extra = 0.0f; // vehicle steering angle; ped heading/extra
+    bool visible = false;
+};
+
+enum class HudStyle {
+    GTA = 0,
+    Skate = 1,
+};
+
+// Formats Skate 3 controller button badge prompts ([A], [B], [X], [Y], [LB/RB], [LT/RT], etc.)
+std::string FormatSkateBadges(const std::string& in);
+
 struct FrameData {
     double time = 0.0;           // seconds since the recording began
     bool cut = false;            // a teleport or respawn led into this frame
@@ -20,6 +42,11 @@ struct FrameData {
     bool board = false;          // board matrices valid
     float boardEntity[16] = {};
     float boardWorld[7][16] = {};
+
+    int vehicleCount = 0;
+    ActorSample vehicles[kMaxTrackedVehicles] = {};
+    int pedCount = 0;
+    ActorSample peds[kMaxTrackedPeds] = {};
 };
 struct Frame : FrameData {
     std::vector<float> bones;    // bones x 16
@@ -111,7 +138,7 @@ struct KeysIn {                    // held this frame
     bool keyK = false, keyJ = false, keyZ = false, keyX = false;
     bool keyV = false, keyS = false, keyE = false;
     bool key1 = false, key2 = false, key3 = false, key4 = false;
-    bool keyF1 = false, keyF2 = false, keyF3 = false;
+    bool keyF1 = false, keyF2 = false, keyF3 = false, keyF4 = false;
     bool home = false, endKey = false;
     bool ctrl = false, alt = false, escape = false;
     bool mouseLeft = false, mouseRight = false;

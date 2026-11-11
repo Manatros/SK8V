@@ -17,6 +17,11 @@ bool Enabled();
 // INI: ReplaySound, ReplaySoundGainDb, ReplayFisheye, FilmFilterStrength
 // (design 2026-11-09-replay-look-sound).
 void ConfigureLook(bool sound, float soundGainDb, bool fisheye, float filterStrength);
+// INI: ReplayVehicles, ReplayPeds (world actors in replay).
+void ConfigureActors(bool vehicles, bool peds);
+// INI: ReplayHudStyle (GTA clean text vs Skate 3 controller binds).
+void ConfigureHudStyle(HudStyle style);
+HudStyle GetHudStyle();
 
 // Once per new Skate tick while skating and not in a replay: the output,
 // where the ped was placed (3 floats, null: the skater root), the published bone matrices (`count` x 16 floats, GTA world) and the

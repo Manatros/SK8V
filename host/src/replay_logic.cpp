@@ -182,7 +182,7 @@ Edges Input::Poll(const PadIn& pad, const KeysIn& in) {
                             &KeysIn::enter, &KeysIn::del, &KeysIn::pageUp, &KeysIn::pageDown, &KeysIn::keyT, &KeysIn::keyN,
                             &KeysIn::keyI, &KeysIn::keyO, &KeysIn::keyU, &KeysIn::keyK, &KeysIn::keyJ, &KeysIn::keyZ,
                             &KeysIn::keyX, &KeysIn::keyV, &KeysIn::keyS, &KeysIn::keyE, &KeysIn::key1, &KeysIn::key2,
-                            &KeysIn::key3, &KeysIn::key4, &KeysIn::keyF1, &KeysIn::keyF2, &KeysIn::keyF3,
+                            &KeysIn::key3, &KeysIn::key4, &KeysIn::keyF1, &KeysIn::keyF2, &KeysIn::keyF3, &KeysIn::keyF4,
                             &KeysIn::home, &KeysIn::endKey, &KeysIn::escape, &KeysIn::mouseLeft, &KeysIn::mouseRight})
         edge(k);
     e.key.shift = keys.shift;
@@ -243,6 +243,53 @@ double GameMsAt(const Recording::Sample& s) {
 double SoundRate(const Playhead& head, bool scrubbing) {
     if (!head.playing || head.reverse || scrubbing) return 0.0;
     return kSpeeds[head.speed];
+}
+
+std::string FormatSkateBadges(const std::string& in) {
+    static const std::pair<const char*, const char*> kReplacements[] = {
+        {"LB/RB", "[LB/RB]"},
+        {"LT/RT", "[LT/RT]"},
+        {"D-pad Left/Right", "[D-PAD \xE2\x86\x90\xE2\x86\x92]"},
+        {"D-pad Down/Up", "[D-PAD \xE2\x86\x93\xE2\x86\x91]"},
+        {"D-pad Up/Down", "[D-PAD \xE2\x86\x91\xE2\x86\x93]"},
+        {"D-pad Adjust", "[D-PAD] Adjust"},
+        {"D-pad", "[D-PAD]"},
+        {"Left Stick", "[LS]"},
+        {"Right Stick", "[RS]"},
+        {"RB", "[RB]"},
+        {"LB", "[LB]"},
+        {"RT", "[RT]"},
+        {"LT", "[LT]"},
+        {"R3", "[RS]"},
+        {"L3", "[LS]"},
+        {"Back Actions", "[BACK] Actions"},
+        {"Back Commit", "[BACK] Commit"},
+        {"A", "[A]"},
+        {"B", "[B]"},
+        {"X", "[X]"},
+        {"Y", "[Y]"},
+        {"a", "[A]"},
+        {"b", "[B]"},
+        {"y", "[Y]"},
+    };
+    std::string s = in;
+    for (const auto& rep : kReplacements) {
+        const std::string from = rep.first;
+        const std::string to = rep.second;
+        std::size_t pos = 0;
+        while ((pos = s.find(from, pos)) != std::string::npos) {
+            const bool beforeOk = (pos == 0 || s[pos - 1] == ' ');
+            const std::size_t end = pos + from.size();
+            const bool afterOk = (end == s.size() || s[end] == ' ');
+            if (beforeOk && afterOk) {
+                s.replace(pos, from.size(), to);
+                pos += to.size();
+            } else {
+                pos += from.size();
+            }
+        }
+    }
+    return s;
 }
 
 }  // namespace replay

@@ -9,10 +9,12 @@
 #include <fstream>
 #include <iterator>
 #include <map>
+#include <set>
 #include <thread>
 #include <utility>
 
 #include <windows.h>
+#include <main.h>
 #include <shlobj.h>
 
 #include "board_native.h"
@@ -134,6 +136,21 @@ Mode g_camEditBack = Mode::Timeline; // return to timeline or edit menu on camer
 float g_followHeading = 0.0f;  // the editor's Follow cameras: a steady heading (radians)
 bool g_followHeadingSet = false;
 int g_stickPrev = 0;         // Edit Menu / Finished: the left stick's last up/down step
+
+// World actors (Phase 4: vehicles and pedestrians)
+bool g_replayVehicles = true;
+bool g_replayPeds = true;
+HudStyle g_hudStyle = HudStyle::Skate;
+
+struct LiveActorState {
+    int handle = 0;
+    float pos[3] = {};
+    float quat[4] = {0.0f, 0.0f, 0.0f, 1.0f};
+    float vel[3] = {};
+    bool visible = true;
+};
+std::map<int, LiveActorState> g_savedLiveActors;
+std::set<int> g_pinnedEntities;
 
 // ---- look -----------------------------------------------------------------
 
@@ -283,6 +300,56 @@ void Present(int ped, const Recording::Sample& s) {
     } else {  // no board in this frame (carried, bailed away): none drawn
         boardnative::Tick(false, SvBoardPose{});
         boardparts::Tick(false, SvBoardPose{});
+    }
+    if (!g_loaded) {
+        if (g_replayVehicles && a.vehicleCount > 0) {
+            for (int i = 0; i < a.vehicleCount; ++i) {
+                const ActorSample& va = a.vehicles[i];
+                if (!va.handle || !Call<BOOL>(DOES_ENTITY_EXIST, va.handle)) continue;
+                const ActorSample* vb = nullptr;
+                for (int j = 0; j < b.vehicleCount; ++j) {
+                    if (b.vehicles[j].handle == va.handle) { vb = &b.vehicles[j]; break; }
+                }
+                float pos[3];
+                posemath::Q q;
+                if (vb) {
+                    Lerp3(va.pos, vb->pos, t, pos);
+                    const posemath::Q qa{va.quat[0], va.quat[1], va.quat[2], va.quat[3]};
+                    const posemath::Q qb{vb->quat[0], vb->quat[1], vb->quat[2], vb->quat[3]};
+                    q = posemath::Slerp(qa, qb, t);
+                } else {
+                    std::memcpy(pos, va.pos, sizeof(pos));
+                    q = {va.quat[0], va.quat[1], va.quat[2], va.quat[3]};
+                }
+                Call<void>(SET_ENTITY_COORDS_NO_OFFSET, va.handle, pos[0], pos[1], pos[2], 0, 0, 0);
+                Call<void>(SET_ENTITY_QUATERNION, va.handle, q.x, q.y, q.z, q.w);
+                Call<void>(SET_ENTITY_VISIBLE, va.handle, TRUE, FALSE);
+            }
+        }
+        if (g_replayPeds && a.pedCount > 0) {
+            for (int i = 0; i < a.pedCount; ++i) {
+                const ActorSample& pa = a.peds[i];
+                if (!pa.handle || !Call<BOOL>(DOES_ENTITY_EXIST, pa.handle)) continue;
+                const ActorSample* pb = nullptr;
+                for (int j = 0; j < b.pedCount; ++j) {
+                    if (b.peds[j].handle == pa.handle) { pb = &b.peds[j]; break; }
+                }
+                float pos[3];
+                posemath::Q q;
+                if (pb) {
+                    Lerp3(pa.pos, pb->pos, t, pos);
+                    const posemath::Q qa{pa.quat[0], pa.quat[1], pa.quat[2], pa.quat[3]};
+                    const posemath::Q qb{pb->quat[0], pb->quat[1], pb->quat[2], pb->quat[3]};
+                    q = posemath::Slerp(qa, qb, t);
+                } else {
+                    std::memcpy(pos, pa.pos, sizeof(pos));
+                    q = {pa.quat[0], pa.quat[1], pa.quat[2], pa.quat[3]};
+                }
+                Call<void>(SET_ENTITY_COORDS_NO_OFFSET, pa.handle, pos[0], pos[1], pos[2], 0, 0, 0);
+                Call<void>(SET_ENTITY_QUATERNION, pa.handle, q.x, q.y, q.z, q.w);
+                Call<void>(SET_ENTITY_VISIBLE, pa.handle, TRUE, FALSE);
+            }
+        }
     }
 }
 
@@ -506,8 +573,36 @@ void EditorInfo(const char* title, bool preview) {
     if (g_clock < g_noticeUntil) Txt(g_notice, 0.5f, 0.12f, 0.36f, true);
 }
 
+void DrawSkateFooter() {
+    if (g_hudStyle != HudStyle::Skate || g_hudHidden) return;
+    const float top = (g_mode == Mode::CameraEdit) ? 0.845f : 0.885f;
+    Rect(0.02f, top, 0.98f, 0.988f, 0.04f, 0.04f, 0.05f, 0.82f);
+    Rect(0.02f, top, 0.98f, top + 0.003f, 0.95f, 0.76f, 0.12f, 0.95f);
+}
+
 void Keys(const char* pad, const char* keyboard, float y = 0.95f) {
-    Txt(g_keyboard ? keyboard : pad, 0.5f, y, 0.3f, true);
+    if (g_hudStyle == HudStyle::GTA) {
+        Txt(g_keyboard ? keyboard : pad, 0.5f, y, 0.3f, true);
+        return;
+    }
+    const std::string padBadge = FormatSkateBadges(pad);
+    if (!g_keyboard) {
+        Txt(padBadge, 0.5f, y, 0.31f, true);
+    } else {
+        if (g_mode == Mode::CameraEdit) {
+            Txt(keyboard, 0.5f, y, 0.29f, true);
+        } else if (y < 0.93f) {
+            Txt(padBadge, 0.5f, y, 0.30f, true);
+        } else {
+            if (g_mode == Mode::EditMenu || g_mode == Mode::Effects || g_mode == Mode::Look ||
+                g_mode == Mode::CameraMenu || g_mode == Mode::Finished || g_mode == Mode::Reel || g_mode == Mode::Prompt) {
+                Txt(padBadge, 0.5f, 0.925f, 0.28f, true);
+                Txt(keyboard, 0.5f, 0.958f, 0.28f, true);
+            } else {
+                Txt(keyboard, 0.5f, y, 0.29f, true);
+            }
+        }
+    }
 }
 
 // A GTA-style list panel (A53: GTA-native menus) with Skate's entries.
@@ -573,9 +668,10 @@ void OpenHelp(const std::vector<std::pair<const char*, const char*>>& ids, Mode 
             "C / Shift+C cycles camera preset. E edits camera directly.^^"
             "1, 2, 3, 4 (or [ / ]) sets speed. F / Shift+F cycles filters. + and - adjust strength. V cycles camera shake. Shift+L cycles lenses.^^"
             "Ctrl+S (or F2) saves replay. R (or Ctrl+O) opens Saved Replays. Ctrl+R resets timeline.^^"
-            "Tab opens Replay Actions. L opens Look, P takes a photo, H hides HUD, and Escape goes back." :
+            "Tab opens Replay Actions. F4 toggles between Skate and GTA HUD styles. L opens Look, P takes a photo, H hides HUD, and Escape goes back." :
             "Press A to open the timeline. Scrub with the left stick and use the triggers to set the start and end.^^"
-            "Place a clip marker with D-pad Down, then press X on a clip to choose its camera and effects.");
+            "Place a clip marker with D-pad Down, then press X on a clip to choose its camera and effects.^^"
+            "Press F4 on keyboard to toggle between Skate and GTA HUD styles.");
     }
     for (const auto& [title, text] : ids) {
         const std::string page = T(text, "");
@@ -1077,6 +1173,9 @@ bool EditorTick(int ped, const PadIn& pad, const KeysIn& keys, float dt) {
         Ask(PromptAction::SaveReplay, T("ID_REPLAYEDITOR_BASIC_SAVE_REPLAY", "Save Replay"), T("ID_REPLAY_EDITOR_POPUP_REPLAYSAVE", "Save Replay?"));
     } else if (!g_photoTaking && shortcuts && (e.key.keyF3 || (e.key.ctrl && e.key.keyO))) {
         OpenReel(g_mode);
+    } else if (!g_photoTaking && shortcuts && e.key.keyF4) {
+        g_hudStyle = (g_hudStyle == HudStyle::Skate) ? HudStyle::GTA : HudStyle::Skate;
+        Notice(g_hudStyle == HudStyle::Skate ? "Editor HUD: Skate (controller binds)" : "Editor HUD: GTA (minimal)");
     } else if (!g_photoTaking && shortcuts && (e.key.keyU || e.key.keyF1)) {
         if (g_mode == Mode::CameraEdit) HelpForCamera(g_edit.ClipRef(g_editClip).camera, Mode::CameraEdit);
         else HelpForTimeline(g_mode);
@@ -1568,6 +1667,7 @@ bool EditorTick(int ped, const PadIn& pad, const KeysIn& keys, float dt) {
     }
     Strip(preview ? -1 : clipIndex, preview);
     EditorInfo(preview ? "Instant Replay" : g_mode == Mode::CameraEdit ? CameraKindName(clip.camera) : "Main Timeline", preview);
+    DrawSkateFooter();
     if (g_mode == Mode::Instant) {
         Keys("RB Play/Pause   LT/RT Scrub   D-pad Left/Right Start/End   A Edit Timeline",
              "Space/LClick Play   A/D or Wheel Scrub   Home/End Jump   Enter Timeline", 0.91f);
@@ -1693,7 +1793,28 @@ void ConfigureLook(bool sound, float soundGainDb, bool fisheye, float filterStre
     g_filterStrength = std::isfinite(filterStrength) ? std::clamp(filterStrength, 0.0f, 1.0f) : 0.85f;
 }
 
+void ConfigureActors(bool vehicles, bool peds) {
+    g_replayVehicles = vehicles;
+    g_replayPeds = peds;
+}
+
+void ConfigureHudStyle(HudStyle style) {
+    g_hudStyle = style;
+}
+
+HudStyle GetHudStyle() {
+    return g_hudStyle;
+}
+
 void Clear() {
+    for (int h : g_pinnedEntities) {
+        if (h && Call<BOOL>(DOES_ENTITY_EXIST, h)) {
+            Entity ent = h;
+            Call<void>(SET_ENTITY_AS_NO_LONGER_NEEDED, &ent);
+        }
+    }
+    g_pinnedEntities.clear();
+    g_savedLiveActors.clear();
     g_rec.Clear();
     g_lastTick = 0;
     g_editValid = false;
@@ -1737,6 +1858,137 @@ void Record(const SvOutput& o, const float* placed, const float* bones, int coun
         std::memcpy(f.boardWorld, board->world, sizeof(f.boardWorld));
     }
     f.bones.assign(bones, bones + static_cast<std::size_t>(count) * 16);
+
+    f.vehicleCount = 0;
+    if (g_replayVehicles) {
+        static int vehPool[256];
+        const int nVeh = std::clamp(worldGetAllVehicles(vehPool, 256), 0, 256);
+        struct Cand { float d2; int handle; };
+        std::vector<Cand> cands;
+        cands.reserve(static_cast<std::size_t>(nVeh));
+        const float maxR2 = 45.0f * 45.0f;
+        for (int i = 0; i < nVeh; ++i) {
+            const int v = vehPool[i];
+            if (!v || !Call<BOOL>(DOES_ENTITY_EXIST, v)) continue;
+            const Vector3 p = Call<Vector3>(GET_ENTITY_COORDS, v, 0);
+            const float dx = p.x - f.root[0], dy = p.y - f.root[1], dz = p.z - f.root[2];
+            const float d2 = dx * dx + dy * dy + dz * dz;
+            if (d2 <= maxR2) cands.push_back({d2, v});
+        }
+        std::sort(cands.begin(), cands.end(), [](const Cand& a, const Cand& b) { return a.d2 < b.d2; });
+        const int countVeh = std::min(static_cast<int>(cands.size()), kMaxTrackedVehicles);
+        f.vehicleCount = countVeh;
+        for (int i = 0; i < countVeh; ++i) {
+            const int v = cands[static_cast<std::size_t>(i)].handle;
+            ActorSample& s = f.vehicles[i];
+            s.handle = v;
+            s.model = static_cast<std::uint32_t>(Call<int>(GET_ENTITY_MODEL, v));
+            Vector3 fwd{}, right{}, up{}, pos{};
+            Call<void>(GET_ENTITY_MATRIX, v, &fwd, &right, &up, &pos);
+            s.pos[0] = pos.x, s.pos[1] = pos.y, s.pos[2] = pos.z;
+            const float sx = std::hypot(right.x, right.y, right.z);
+            const float sy = std::hypot(fwd.x, fwd.y, fwd.z);
+            const float sz = std::hypot(up.x, up.y, up.z);
+            if (sx > 1e-4f && sy > 1e-4f && sz > 1e-4f) {
+                posemath::M m{};
+                m.r[0][0] = right.x / sx; m.r[0][1] = right.y / sx; m.r[0][2] = right.z / sx;
+                m.r[1][0] = fwd.x / sy;   m.r[1][1] = fwd.y / sy;   m.r[1][2] = fwd.z / sy;
+                m.r[2][0] = up.x / sz;    m.r[2][1] = up.y / sz;    m.r[2][2] = up.z / sz;
+                const posemath::Q q = posemath::FromRows(m);
+                s.quat[0] = q.x, s.quat[1] = q.y, s.quat[2] = q.z, s.quat[3] = q.w;
+            } else {
+                s.quat[0] = s.quat[1] = s.quat[2] = 0.0f;
+                s.quat[3] = 1.0f;
+            }
+            const Vector3 vel = Call<Vector3>(GET_ENTITY_VELOCITY, v);
+            s.vel[0] = vel.x, s.vel[1] = vel.y, s.vel[2] = vel.z;
+            s.extra = 0.0f;
+            s.visible = Call<BOOL>(IS_ENTITY_VISIBLE, v) != 0;
+            if (!g_pinnedEntities.count(v)) {
+                Call<void>(SET_ENTITY_AS_MISSION_ENTITY, v, TRUE, TRUE);
+                g_pinnedEntities.insert(v);
+            }
+        }
+    }
+
+    f.pedCount = 0;
+    if (g_replayPeds) {
+        static int pedPool[256];
+        const int nPed = std::clamp(worldGetAllPeds(pedPool, 256), 0, 256);
+        struct Cand { float d2; int handle; };
+        std::vector<Cand> cands;
+        cands.reserve(static_cast<std::size_t>(nPed));
+        const float maxR2 = 30.0f * 30.0f;
+        const int playerPed = Call<int>(PLAYER_PED_ID);
+        for (int i = 0; i < nPed; ++i) {
+            const int p = pedPool[i];
+            if (!p || p == g_ped || p == playerPed || !Call<BOOL>(DOES_ENTITY_EXIST, p)) continue;
+            if (Call<BOOL>(IS_PED_IN_ANY_VEHICLE, p, FALSE)) continue;
+            const Vector3 coords = Call<Vector3>(GET_ENTITY_COORDS, p, 0);
+            const float dx = coords.x - f.root[0], dy = coords.y - f.root[1], dz = coords.z - f.root[2];
+            const float d2 = dx * dx + dy * dy + dz * dz;
+            if (d2 <= maxR2) cands.push_back({d2, p});
+        }
+        std::sort(cands.begin(), cands.end(), [](const Cand& a, const Cand& b) { return a.d2 < b.d2; });
+        const int countPed = std::min(static_cast<int>(cands.size()), kMaxTrackedPeds);
+        f.pedCount = countPed;
+        for (int i = 0; i < countPed; ++i) {
+            const int p = cands[static_cast<std::size_t>(i)].handle;
+            ActorSample& s = f.peds[i];
+            s.handle = p;
+            s.model = static_cast<std::uint32_t>(Call<int>(GET_ENTITY_MODEL, p));
+            Vector3 fwd{}, right{}, up{}, pos{};
+            Call<void>(GET_ENTITY_MATRIX, p, &fwd, &right, &up, &pos);
+            s.pos[0] = pos.x, s.pos[1] = pos.y, s.pos[2] = pos.z;
+            const float sx = std::hypot(right.x, right.y, right.z);
+            const float sy = std::hypot(fwd.x, fwd.y, fwd.z);
+            const float sz = std::hypot(up.x, up.y, up.z);
+            if (sx > 1e-4f && sy > 1e-4f && sz > 1e-4f) {
+                posemath::M m{};
+                m.r[0][0] = right.x / sx; m.r[0][1] = right.y / sx; m.r[0][2] = right.z / sx;
+                m.r[1][0] = fwd.x / sy;   m.r[1][1] = fwd.y / sy;   m.r[1][2] = fwd.z / sy;
+                m.r[2][0] = up.x / sz;    m.r[2][1] = up.y / sz;    m.r[2][2] = up.z / sz;
+                const posemath::Q q = posemath::FromRows(m);
+                s.quat[0] = q.x, s.quat[1] = q.y, s.quat[2] = q.z, s.quat[3] = q.w;
+            } else {
+                s.quat[0] = s.quat[1] = s.quat[2] = 0.0f;
+                s.quat[3] = 1.0f;
+            }
+            const Vector3 vel = Call<Vector3>(GET_ENTITY_VELOCITY, p);
+            s.vel[0] = vel.x, s.vel[1] = vel.y, s.vel[2] = vel.z;
+            s.extra = Call<float>(GET_ENTITY_HEADING, p);
+            s.visible = Call<BOOL>(IS_ENTITY_VISIBLE, p) != 0;
+            if (!g_pinnedEntities.count(p)) {
+                Call<void>(SET_ENTITY_AS_MISSION_ENTITY, p, TRUE, TRUE);
+                g_pinnedEntities.insert(p);
+            }
+        }
+    }
+
+    static int s_cleanCounter = 0;
+    if (++s_cleanCounter >= 120 && !g_pinnedEntities.empty()) {
+        s_cleanCounter = 0;
+        std::set<int> inRec;
+        const std::size_t recSize = g_rec.Size();
+        for (std::size_t i = 0; i < recSize; i += 6) {
+            const Frame& rf = g_rec.Get(i);
+            for (int v = 0; v < rf.vehicleCount; ++v) inRec.insert(rf.vehicles[v].handle);
+            for (int p = 0; p < rf.pedCount; ++p) inRec.insert(rf.peds[p].handle);
+        }
+        for (auto it = g_pinnedEntities.begin(); it != g_pinnedEntities.end();) {
+            const int h = *it;
+            if (!inRec.count(h) || !Call<BOOL>(DOES_ENTITY_EXIST, h)) {
+                if (Call<BOOL>(DOES_ENTITY_EXIST, h)) {
+                    Entity ent = h;
+                    Call<void>(SET_ENTITY_AS_NO_LONGER_NEEDED, &ent);
+                }
+                it = g_pinnedEntities.erase(it);
+            } else {
+                ++it;
+            }
+        }
+    }
+
     g_rec.Add(f, dt);
     g_lastTick = o.tick;
 }
@@ -1757,6 +2009,42 @@ bool Enter(int ped) {
     g_hudHidden = false;
     g_notice.clear();
     g_noticeUntil = 0.0;
+
+    g_savedLiveActors.clear();
+    std::set<int> toSnapshot = g_pinnedEntities;
+    if (g_rec.Size()) {
+        const Frame& lastFrame = g_rec.Last();
+        for (int i = 0; i < lastFrame.vehicleCount; ++i) toSnapshot.insert(lastFrame.vehicles[i].handle);
+        for (int i = 0; i < lastFrame.pedCount; ++i) toSnapshot.insert(lastFrame.peds[i].handle);
+    }
+    for (int h : toSnapshot) {
+        if (!h || !Call<BOOL>(DOES_ENTITY_EXIST, h)) continue;
+        LiveActorState st{};
+        st.handle = h;
+        const Vector3 p = Call<Vector3>(GET_ENTITY_COORDS, h, 0);
+        st.pos[0] = p.x, st.pos[1] = p.y, st.pos[2] = p.z;
+        Vector3 fwd{}, right{}, up{}, pos{};
+        Call<void>(GET_ENTITY_MATRIX, h, &fwd, &right, &up, &pos);
+        const float sx = std::hypot(right.x, right.y, right.z);
+        const float sy = std::hypot(fwd.x, fwd.y, fwd.z);
+        const float sz = std::hypot(up.x, up.y, up.z);
+        if (sx > 1e-4f && sy > 1e-4f && sz > 1e-4f) {
+            posemath::M m{};
+            m.r[0][0] = right.x / sx; m.r[0][1] = right.y / sx; m.r[0][2] = right.z / sx;
+            m.r[1][0] = fwd.x / sy;   m.r[1][1] = fwd.y / sy;   m.r[1][2] = fwd.z / sy;
+            m.r[2][0] = up.x / sz;    m.r[2][1] = up.y / sz;    m.r[2][2] = up.z / sz;
+            const posemath::Q q = posemath::FromRows(m);
+            st.quat[0] = q.x, st.quat[1] = q.y, st.quat[2] = q.z, st.quat[3] = q.w;
+        } else {
+            st.quat[0] = st.quat[1] = st.quat[2] = 0.0f;
+            st.quat[3] = 1.0f;
+        }
+        const Vector3 vel = Call<Vector3>(GET_ENTITY_VELOCITY, h);
+        st.vel[0] = vel.x, st.vel[1] = vel.y, st.vel[2] = vel.z;
+        st.visible = Call<BOOL>(IS_ENTITY_VISIBLE, h) != 0;
+        Call<void>(FREEZE_ENTITY_POSITION, h, TRUE);
+        g_savedLiveActors[h] = st;
+    }
     if (!g_editValid || g_edit.In() < g_rec.Start() - 1e-6) {
         g_edit.Reset(g_rec.Start(), g_rec.End());
         g_editValid = true;
@@ -1840,6 +2128,18 @@ void Exit() {
     g_active = false;
     g_mode = Mode::Instant;
     Call<void>(SET_TIME_SCALE, 1.0f);
+    for (const auto& kv : g_savedLiveActors) {
+        const int h = kv.first;
+        const LiveActorState& st = kv.second;
+        if (h && Call<BOOL>(DOES_ENTITY_EXIST, h)) {
+            Call<void>(SET_ENTITY_COORDS_NO_OFFSET, h, st.pos[0], st.pos[1], st.pos[2], 0, 0, 0);
+            Call<void>(SET_ENTITY_QUATERNION, h, st.quat[0], st.quat[1], st.quat[2], st.quat[3]);
+            Call<void>(SET_ENTITY_VELOCITY, h, st.vel[0], st.vel[1], st.vel[2]);
+            Call<void>(FREEZE_ENTITY_POSITION, h, FALSE);
+            Call<void>(SET_ENTITY_VISIBLE, h, st.visible ? TRUE : FALSE, FALSE);
+        }
+    }
+    g_savedLiveActors.clear();
     if (g_cam) {
         Call<void>(SET_CAM_ACTIVE, g_cam, 0);
         Call<void>(DESTROY_CAM, g_cam, 0);
