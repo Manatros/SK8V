@@ -168,7 +168,6 @@ void SetActorVisibleAndSolid(int handle, bool visible, bool isPed) {
             const int p = Call<int>(GET_PED_IN_VEHICLE_SEAT, handle, seat);
             if (p && Call<BOOL>(DOES_ENTITY_EXIST, p)) {
                 Call<void>(SET_ENTITY_VISIBLE, p, visible ? TRUE : FALSE, FALSE);
-                Call<void>(SET_ENTITY_COLLISION, p, visible ? TRUE : FALSE, FALSE);
             }
         }
     }
@@ -379,26 +378,16 @@ void Present(int ped, const Recording::Sample& s) {
                 SetActorVisibleAndSolid(pa.handle, true, true);
             }
         }
-        for (const auto& kv : g_savedLiveActors) {
+        for (const auto& kv : g_actorSpans) {
             const int h = kv.first;
             if (presentHandles.count(h) || !Call<BOOL>(DOES_ENTITY_EXIST, h)) continue;
-            const LiveActorState& st = kv.second;
-            const auto spanIt = g_actorSpans.find(h);
-            if (spanIt != g_actorSpans.end()) {
-                SetActorVisibleAndSolid(h, false, st.isPed);
-                const ActorSpan& span = spanIt->second;
-                const ActorSample& nearest = (g_head.time <= span.firstTime) ? span.firstSample : span.lastSample;
-                Call<void>(SET_ENTITY_COORDS_NO_OFFSET, h, nearest.pos[0], nearest.pos[1], nearest.pos[2], 0, 0, 0);
-                Call<void>(SET_ENTITY_QUATERNION, h, nearest.quat[0], nearest.quat[1], nearest.quat[2], nearest.quat[3]);
-                Call<void>(SET_ENTITY_VELOCITY, h, 0.0f, 0.0f, 0.0f);
-                Call<void>(FREEZE_ENTITY_POSITION, h, TRUE);
-            } else {
-                Call<void>(SET_ENTITY_COORDS_NO_OFFSET, h, st.pos[0], st.pos[1], st.pos[2], 0, 0, 0);
-                Call<void>(SET_ENTITY_QUATERNION, h, st.quat[0], st.quat[1], st.quat[2], st.quat[3]);
-                Call<void>(SET_ENTITY_VELOCITY, h, 0.0f, 0.0f, 0.0f);
-                Call<void>(FREEZE_ENTITY_POSITION, h, TRUE);
-                SetActorVisibleAndSolid(h, st.visible, st.isPed);
-            }
+            const ActorSpan& span = kv.second;
+            SetActorVisibleAndSolid(h, false, span.isPed);
+            const ActorSample& nearest = (g_head.time <= span.firstTime) ? span.firstSample : span.lastSample;
+            Call<void>(SET_ENTITY_COORDS_NO_OFFSET, h, nearest.pos[0], nearest.pos[1], nearest.pos[2], 0, 0, 0);
+            Call<void>(SET_ENTITY_QUATERNION, h, nearest.quat[0], nearest.quat[1], nearest.quat[2], nearest.quat[3]);
+            Call<void>(SET_ENTITY_VELOCITY, h, 0.0f, 0.0f, 0.0f);
+            Call<void>(FREEZE_ENTITY_POSITION, h, TRUE);
         }
     }
 }
@@ -974,7 +963,7 @@ void LeaveSaved(bool reload) {
 
 constexpr CameraKind kMenuCameras[] = {CameraKind::Game,      CameraKind::Follow,    CameraKind::Tripod, CameraKind::Free,
                                        CameraKind::AdvFollow, CameraKind::AdvTripod, CameraKind::AdvFree};
-enum EditMenuRow { CameraRow, EffectsRow, LookRow, DoneRow, CameraHelpRow, EditMenuRows };
+enum EditMenuRow { CameraRow, EffectsRow, LookRow, HudStyleRow, DoneRow, CameraHelpRow, EditMenuRows };
 enum EffectRow { SpeedRow, ShakeRow, EffectRows };
 enum LookSetting { FilterRow, StrengthRow, LensRow, LookRows };
 
@@ -995,7 +984,7 @@ void OpenLook() {
     g_hudHidden = false;
     g_head.playing = false;
 }
-enum ActionRow { PlayRow, PhotoRow, SaveRow, ReelRow, HelpRow, ResetRow, CloseSavedRow, ExitRow, ActionRows };
+enum ActionRow { PlayRow, PhotoRow, SaveRow, ReelRow, HudStyleActionRow, HelpRow, ResetRow, CloseSavedRow, ExitRow, ActionRows };
 
 void LeaveReplay() {
     if (g_loaded) {
@@ -1464,6 +1453,9 @@ bool EditorTick(int ped, const PadIn& pad, const KeysIn& keys, float dt) {
             g_mode = Mode::Effects;
         } else if (accept && g_menuSel == LookRow) {
             OpenLook();
+        } else if (g_menuSel == HudStyleRow && (accept || horizontal != 0)) {
+            g_hudStyle = (g_hudStyle == HudStyle::Skate) ? HudStyle::GTA : HudStyle::Skate;
+            Notice(std::string("Replay HUD: ") + (g_hudStyle == HudStyle::Skate ? "Skate 3 (controller binds)" : "GTA (clean text)"));
         } else if (accept && g_menuSel == DoneRow) {
             g_mode = Mode::Timeline;
         } else if (accept && g_menuSel == CameraHelpRow) {
@@ -1638,13 +1630,20 @@ bool EditorTick(int ped, const PadIn& pad, const KeysIn& keys, float dt) {
             break;
         }
         g_menuSel = Cycle(g_menuSel, vertical, g_loaded ? ActionRows : ActionRows - 1);
-        if (accept) {
-            const int action = !g_loaded && g_menuSel == CloseSavedRow ? ExitRow : g_menuSel;
+        if (horizontal != 0 && g_menuSel == HudStyleActionRow) {
+            g_hudStyle = (g_hudStyle == HudStyle::Skate) ? HudStyle::GTA : HudStyle::Skate;
+            Notice(std::string("Replay HUD: ") + (g_hudStyle == HudStyle::Skate ? "Skate 3 (controller binds)" : "GTA (clean text)"));
+        } else if (accept) {
+            const int action = (!g_loaded && g_menuSel == CloseSavedRow) ? ExitRow : g_menuSel;
             switch (action) {
             case PlayRow: g_head.time = g_edit.In(), g_head.playing = true, g_mode = Mode::Timeline; break;
             case PhotoRow: Ask(PromptAction::SavePhoto, T("ID_REPLAYEDITOR_TAKE_PHOTO", "Take Photo"), T("ID_REPLAY_EDITOR_POPUP_PHOTOSAVE", "Save Photo?")); break;
             case SaveRow: Ask(PromptAction::SaveReplay, T("ID_REPLAYEDITOR_BASIC_SAVE_REPLAY", "Save Replay"), T("ID_REPLAY_EDITOR_POPUP_REPLAYSAVE", "Save Replay?")); break;
             case ReelRow: OpenReel(Mode::Finished); break;
+            case HudStyleActionRow:
+                g_hudStyle = (g_hudStyle == HudStyle::Skate) ? HudStyle::GTA : HudStyle::Skate;
+                Notice(std::string("Replay HUD: ") + (g_hudStyle == HudStyle::Skate ? "Skate 3 (controller binds)" : "GTA (clean text)"));
+                break;
             case HelpRow: HelpForTimeline(Mode::Finished); break;
             case ResetRow: Ask(PromptAction::ResetTimeline, T("ID_REPLAY_EDITOR_RESET_TIMELINE", "Reset Timeline"), T("ID_REPLAY_EDITOR_POPUP_RESET", "This will remove all editing from this replay!^Continue?")); break;
             case CloseSavedRow: LeaveSaved(true); break;
@@ -1721,12 +1720,12 @@ bool EditorTick(int ped, const PadIn& pad, const KeysIn& keys, float dt) {
     if (g_mode == Mode::Instant) {
         Keys("RB Play/Pause   LT/RT Scrub   D-pad Left/Right Start/End   A Edit Timeline",
              "Space/LClick Play   A/D or Wheel Scrub   Home/End Jump   Enter Timeline", 0.91f);
-        Keys("X Photo   Y Help   R3 Hide   B Exit", "1..4 Speed   L Look   P Photo   F1/U Help   H Hide   Esc/RClick Exit");
+        Keys("X Photo   Y Help   R3 Hide   B Exit", "1..4 Speed   L Look   P Photo   F1/U Help   F4 HUD   H Hide   Esc/RClick Exit");
     } else if (g_mode == Mode::Timeline) {
         Keys("A Play/Pause   Left Stick Scrub   LT/RT In/Out   LB/RB Jump to Marker",
              "Space/LClick Play   A/D Scrub   Wheel/,/. Step   I/O In/Out   Shift+,/. Jump Marker   Home/End Jump", 0.91f);
         Keys("D-pad Down/Up Add/Delete Marker   X Edit Clip   Back Actions   R3 Hide   B Back",
-             "E Edit Cam   C Preset   1..4 Speed   F Filter   V Shake   N/Del Marker   Tab Actions   Ctrl+S Save");
+             "E Edit Cam   C Preset   1..4 Speed   F Filter   V Shake   N/Del Marker   Tab Actions   F4 HUD   Ctrl+S Save");
     } else if (g_mode == Mode::CameraEdit) {
         const CameraParams& camera = Shown();
         const bool fish = clip.lens == kLensFisheye;
@@ -1759,11 +1758,14 @@ bool EditorTick(int ped, const PadIn& pad, const KeysIn& keys, float dt) {
         const char* descriptions[] = {"Choose a camera and position it for this clip.",
                                       "Change playback speed and camera shake.",
                                       "Choose a filter, its strength, and a lens.",
+                                      "Toggle between Skate 3 controller HUD and GTA clean text HUD.",
                                       "Return to the timeline.", "Learn how to edit a clip."};
         Panel(("Edit Clip " + std::to_string(g_editClip + 1)).c_str(),
-              {std::string("Camera   ") + CameraKindName(clip.camera), "Effects", "Look", "Done", "Help"}, g_menuSel);
-        Txt(descriptions[g_menuSel], 0.072f, 0.51f, 0.33f);
-        Keys("A Select   B Back", "Enter/LClick Select   Backspace/Esc/RClick Back   E Edit Cam   L Look   P Photo");
+              {std::string("Camera   ") + CameraKindName(clip.camera), "Effects", "Look",
+               std::string("HUD Style   < ") + (g_hudStyle == HudStyle::Skate ? "Skate 3" : "GTA") + " >",
+               "Done", "Help"}, g_menuSel);
+        Txt(descriptions[g_menuSel], 0.072f, 0.54f, 0.33f);
+        Keys("A Select   D-pad Adjust   B Back", "Enter/LClick Select   Arrows Adjust   Backspace/Esc/RClick Back   E Edit Cam   L Look   P Photo   F4 HUD");
     } else if (g_mode == Mode::Effects) {
         static const char* speeds[] = {"1/4x", "1/2x", "1x", "2x"};
         static const char* shakes[] = {"Off", "Low", "Medium", "High"};
@@ -1794,12 +1796,14 @@ bool EditorTick(int ped, const PadIn& pad, const KeysIn& keys, float dt) {
         Keys("A Select   B Back", "Enter/LClick Select   Backspace/Esc/RClick Back   L Look   P Photo");
     } else if (g_mode == Mode::Finished) {
         std::vector<std::string> items = {"Play from In Point", T("ID_REPLAYEDITOR_TAKE_PHOTO", "Take Photo"),
-            T("ID_REPLAYEDITOR_BASIC_SAVE_REPLAY", "Save Replay"), "Saved Replays", T("ID_REPLAYEDITOR_HELP", "Help"),
+            T("ID_REPLAYEDITOR_BASIC_SAVE_REPLAY", "Save Replay"), "Saved Replays",
+            std::string("HUD Style   < ") + (g_hudStyle == HudStyle::Skate ? "Skate 3" : "GTA") + " >",
+            T("ID_REPLAYEDITOR_HELP", "Help"),
             T("ID_REPLAY_EDITOR_RESET_TIMELINE", "Reset Timeline")};
         if (g_loaded) items.emplace_back("Close Saved Replay");
         items.emplace_back("Exit Replay");
         Panel("Replay Actions", items, g_menuSel);
-        Keys("A Select   B Back", "Enter/LClick Select   Backspace/Esc/RClick Back");
+        Keys("A Select   D-pad Adjust   B Back", "Enter/LClick Select   Arrows Adjust   Backspace/Esc/RClick Back   F4 HUD");
     } else if (g_mode == Mode::Help) {
         HelpBox();
     } else if (g_mode == Mode::Reel) {
@@ -2061,16 +2065,23 @@ bool Enter(int ped) {
     g_notice.clear();
     g_noticeUntil = 0.0;
 
+    g_ped = ped;
+    const int playerPed = Call<int>(PLAYER_PED_ID);
+
     g_savedLiveActors.clear();
     static int s_poolVeh[1024];
     const int nVeh = std::clamp(worldGetAllVehicles(s_poolVeh, 1024), 0, 1024);
+    const float maxVehR2 = 140.0f * 140.0f;
     for (int i = 0; i < nVeh; ++i) {
         const int h = s_poolVeh[i];
         if (!h || !Call<BOOL>(DOES_ENTITY_EXIST, h)) continue;
+        const Vector3 p = Call<Vector3>(GET_ENTITY_COORDS, h, 0);
+        const float dx = p.x - last.root[0], dy = p.y - last.root[1], dz = p.z - last.root[2];
+        if (dx * dx + dy * dy + dz * dz > maxVehR2) continue;
+
         LiveActorState st{};
         st.handle = h;
         st.isPed = false;
-        const Vector3 p = Call<Vector3>(GET_ENTITY_COORDS, h, 0);
         st.pos[0] = p.x, st.pos[1] = p.y, st.pos[2] = p.z;
         Vector3 fwd{}, right{}, up{}, pos{};
         Call<void>(GET_ENTITY_MATRIX, h, &fwd, &right, &up, &pos);
@@ -2098,15 +2109,18 @@ bool Enter(int ped) {
 
     static int s_poolPed[1024];
     const int nPed = std::clamp(worldGetAllPeds(s_poolPed, 1024), 0, 1024);
-    const int playerPed = Call<int>(PLAYER_PED_ID);
+    const float maxPedR2 = 90.0f * 90.0f;
     for (int i = 0; i < nPed; ++i) {
         const int h = s_poolPed[i];
-        if (!h || h == g_ped || h == playerPed || !Call<BOOL>(DOES_ENTITY_EXIST, h)) continue;
+        if (!h || h == ped || h == g_ped || h == playerPed || !Call<BOOL>(DOES_ENTITY_EXIST, h)) continue;
         if (Call<BOOL>(IS_PED_IN_ANY_VEHICLE, h, FALSE)) continue;
+        const Vector3 p = Call<Vector3>(GET_ENTITY_COORDS, h, 0);
+        const float dx = p.x - last.root[0], dy = p.y - last.root[1], dz = p.z - last.root[2];
+        if (dx * dx + dy * dy + dz * dz > maxPedR2) continue;
+
         LiveActorState st{};
         st.handle = h;
         st.isPed = true;
-        const Vector3 p = Call<Vector3>(GET_ENTITY_COORDS, h, 0);
         st.pos[0] = p.x, st.pos[1] = p.y, st.pos[2] = p.z;
         Vector3 fwd{}, right{}, up{}, pos{};
         Call<void>(GET_ENTITY_MATRIX, h, &fwd, &right, &up, &pos);
@@ -2134,8 +2148,6 @@ bool Enter(int ped) {
 
     g_actorSpans = ComputeActorSpans(g_rec);
     g_actorActiveState.clear();
-    Call<void>(SET_VEHICLE_POPULATION_BUDGET, 0);
-    Call<void>(SET_PED_POPULATION_BUDGET, 0);
     if (!g_editValid || g_edit.In() < g_rec.Start() - 1e-6) {
         g_edit.Reset(g_rec.Start(), g_rec.End());
         g_editValid = true;
@@ -2144,7 +2156,6 @@ bool Enter(int ped) {
     Call<void>(SET_CAM_NEAR_CLIP, g_cam, 0.05f);  // close walls are not cut open
     g_lastEyeSet = false;
     g_detailState = 0;
-    g_ped = ped;
     Call<void>(SET_CAM_ACTIVE, g_cam, 1);
     Call<void>(RENDER_SCRIPT_CAMS, 1, 0, 0, 1, 0, 0);
     Call<void>(SET_TIME_SCALE, g_worldScale);
@@ -2174,6 +2185,10 @@ bool Tick(int ped, const PadIn& pad, const KeysIn& keys, float dt) {
     g_clock += dt;
     g_dt = dt;
     g_ped = ped;
+    // Suppress ambient traffic and ped spawning per-frame while replay is active:
+    Call<void>(SET_VEHICLE_DENSITY_MULTIPLIER_THIS_FRAME, 0.0f);
+    Call<void>(SET_RANDOM_VEHICLE_DENSITY_MULTIPLIER_THIS_FRAME, 0.0f);
+    Call<void>(SET_PED_DENSITY_MULTIPLIER_THIS_FRAME, 0.0f);
     // GTA's controls are taken by the caller as in skating (DisableSkateControls),
     // never all at once: that would stop GTA's own recorder.
     Call<void>(HIDE_HUD_AND_RADAR_THIS_FRAME);
@@ -2234,7 +2249,6 @@ void Exit() {
                     const int p = Call<int>(GET_PED_IN_VEHICLE_SEAT, h, seat);
                     if (p && Call<BOOL>(DOES_ENTITY_EXIST, p)) {
                         Call<void>(SET_ENTITY_VISIBLE, p, TRUE, FALSE);
-                        Call<void>(SET_ENTITY_COLLISION, p, TRUE, FALSE);
                     }
                 }
             }
@@ -2243,8 +2257,6 @@ void Exit() {
     g_savedLiveActors.clear();
     g_actorSpans.clear();
     g_actorActiveState.clear();
-    Call<void>(SET_VEHICLE_POPULATION_BUDGET, 3);
-    Call<void>(SET_PED_POPULATION_BUDGET, 3);
     if (g_cam) {
         Call<void>(SET_CAM_ACTIVE, g_cam, 0);
         Call<void>(DESTROY_CAM, g_cam, 0);

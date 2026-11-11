@@ -4251,6 +4251,11 @@ std::vector<menu::Page> MenuPages(Session& s) {
         })),
         Flag("Trick Analyzer", "TrickAnalyzer", D.trickAnalyzer,
              Bound("TrickAnalyzer", [] { hudoverlay::SetTrickAnalyzer(g_config.trickAnalyzer); })),
+        Helped(Choice("Replay HUD style", "ReplayHudStyle", {"Skate", "GTA"}, {"Skate 3 (controller binds)", "GTA (clean text)"},
+                      Bound("ReplayHudStyle", [] {
+                          replay::ConfigureHudStyle(g_config.replayHudStyle == "GTA" ? replay::HudStyle::GTA : replay::HudStyle::Skate);
+                      })),
+               "Toggle between Skate 3 HUD layout (showing prominent controller gamepad button badges) and GTA HUD (clean bottom text). Shortcut in replay: F4."),
     }});
 
     // GTAxSkate's interaction page (M on the keyboard): GPS destinations.
@@ -4530,7 +4535,7 @@ std::vector<menu::Page> MenuPages(Session& s) {
         if (page.title == "Interaction") return "World";
         if (page.title == "Audio") return "Audio and radio";
         if (page.title == "Controller and HUD") {
-            if (any({"KeyboardHints", "SkateHud", "Hud", "TrickAnalyzer"})) return "HUD";
+            if (any({"KeyboardHints", "SkateHud", "Hud", "TrickAnalyzer", "ReplayHudStyle"})) return "HUD";
             if (k == "RadioControls") return "Audio and radio";
             return "Controls";
         }
@@ -4658,7 +4663,7 @@ std::vector<menu::Page> MenuPages(Session& s) {
         {"Controls", {{"Keyboard", {"Keyboard", "PutAwayHoldMs"}},
                       {"Controller buttons", {"MenuButton", "GunButton", "AimButton", "FireButton", "BackwardsManChord"}},
                       {"Missions", {"BoardActionInMissions"}}}},
-        {"HUD", {{"On screen", {"SkateHud", "Hud", "TrickAnalyzer", "KeyboardHints"}},
+        {"HUD", {{"On screen", {"SkateHud", "Hud", "TrickAnalyzer", "KeyboardHints", "ReplayHudStyle"}},
                  {"Hall of Meat", {"HallOfMeat", "Show records"}}}},
         {"World", {{"World collision", {"World collision:", "Compare: plain GTA", "Mark this spot", "DetailedStairs", "StepRails", "TrackRails", "ObjectRails",
                                         "TubeRails", "VisualRails", "RailTops", "CurbBevels", "HighResParks", "VisibleRailings", "UnflaggedStairs", "DynamicWorld", "Reset all settings"}},
