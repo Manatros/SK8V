@@ -1378,7 +1378,7 @@ void LoadingSpinner(Session& s, bool on) {
 void ShowControlsGuide() {
     std::string pushKey = "A / X";
     std::string popKey = "Flick RS";
-    std::string dismountKey = "Hold Y / Triangle";
+    std::string dismountKey = "Tap Y / Triangle";
 
     const bool keyboardActive = g_keyboard && (!g_controller || Call<BOOL>(gta::IS_USING_KEYBOARD_AND_MOUSE, 2) != 0);
     if (keyboardActive) {
@@ -1396,7 +1396,7 @@ void ShowControlsGuide() {
                                        hints.find("mouse flick") != std::string::npos;
 
         if (!pop.empty() && pop != "-") {
-            popKey = pop;
+            popKey = "Hold and release " + pop;
         } else if (!ollie.empty() && ollie != "-") {
             popKey = ollie;
         } else if (mouseTricksActive) {
@@ -1408,7 +1408,7 @@ void ShowControlsGuide() {
         }
 
         const std::string y = g_runtime.KeyboardKey("y");
-        dismountKey = (!y.empty() && y != "-") ? ("Hold " + y) : "Hold E";
+        dismountKey = (!y.empty() && y != "-") ? ("Tap " + y) : "Tap Q";
     }
 
     Call<void>(gta::BEGIN_TEXT_COMMAND_DISPLAY_HELP, "CELL_EMAIL_BCON");

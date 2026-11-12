@@ -19,6 +19,30 @@ const KINDS: [&str; 4] = ["deck", "grip", "trucks", "wheels"];
 /// shop never runs dry).
 const KIND_SHARE: usize = 3;
 
+/// Material stems shared by the generated GTA brand parts and their griptapes.
+const GTA_BRAND_STEMS: [&str; 12] = [
+    "sprunk", "redwood", "ecola", "pisswas", "lscust", "prolaps",
+    "bravado", "pegassi", "grup6", "flyus", "burgers", "cluckin",
+];
+
+fn is_gta_brand_key(key: &str) -> bool {
+    let Some((kind, part)) = key.split_once(':') else { return false };
+    let stem = if kind == "grip" {
+        part.strip_prefix("c057").and_then(|id| id.strip_suffix('g'))
+    } else {
+        let suffix = match kind {
+            "deck" => "_d",
+            "trucks" => "_t",
+            "wheels" => "_w",
+            _ => return false,
+        };
+        part.split_once(':')
+            .and_then(|(_, material)| material.strip_prefix("c057_"))
+            .and_then(|material| material.strip_suffix(suffix))
+    };
+    stem.is_some_and(|stem| GTA_BRAND_STEMS.contains(&stem))
+}
+
 fn fnv(text: &str) -> u32 {
     text.bytes().fold(0x811c_9dc5u32, |h, b| (h ^ u32::from(b)).wrapping_mul(0x0100_0193))
 }
@@ -122,7 +146,7 @@ impl Secrets {
         let mut candidates: Vec<String> = more
             .order
             .iter()
-            .filter(|k| !self.secret.contains(*k))
+            .filter(|k| is_gta_brand_key(k) && !self.secret.contains(*k) && !self.unlocked.contains(*k))
             .cloned()
             .collect();
         // Prioritize scarce kinds (trucks, wheels, grips) over decks
@@ -139,7 +163,7 @@ impl Secrets {
         // Slot 61 onwards: replace unearned duplicate plain decks
         for i in 61..self.order.len() {
             let key = &self.order[i];
-            if !self.unlocked.contains(key) && key.starts_with("deck:") && !key.contains("c057") {
+            if !self.unlocked.contains(key) && key.starts_with("deck:") && !is_gta_brand_key(key) {
                 if let Some(new_key) = cand_iter.next() {
                     let old_key = std::mem::replace(&mut self.order[i], new_key.clone());
                     self.secret.remove(&old_key);
@@ -422,15 +446,21 @@ mod tests {
 
         let mut existing = Secrets::from_parts(order.clone(), unlocked.clone());
 
-        // Brand catalog offers brand trucks, wheels, grips and decks
-        let brand_keys: Vec<String> = (0..12).map(|i| format!("trucks:t:c057_brand_{i}_t"))
-            .chain((0..12).map(|i| format!("wheels:w:c057_brand_{i}_w")))
-            .chain((0..12).map(|i| format!("grip:c057brand{i}g")))
-            .chain((0..12).map(|i| format!("deck:m:c057_brand_{i}_d")))
-            .collect();
-        let brand_catalog = Secrets::choose(brand_keys, 48);
+        let catalog = Secrets::from_parts(
+            vec![
+                order[61].clone(),
+                "deck:plain:unseen".into(),
+                "deck:custom:c057_other_d".into(),
+                "grip:c057otherg".into(),
+                "trucks:t:c057_sprunk_t".into(),
+                "wheels:w:c057_grup6_w".into(),
+                "grip:c057clucking".into(),
+                "deck:m:c057_pisswas_d".into(),
+            ],
+            BTreeSet::new(),
+        );
 
-        let changed = existing.upgrade_unearned_duplicates(&brand_catalog);
+        let changed = existing.upgrade_unearned_duplicates(&catalog);
         assert!(changed, "upgrade should replace unearned plain decks");
 
         // Invariant 1: First 61 items must remain 100% identical
@@ -441,11 +471,13 @@ mod tests {
         assert!(existing.is_unlocked(&order[70]));
         assert_eq!(existing.order()[70], order[70], "unlocked item 70 must not be replaced");
 
-        // Invariant 3: Unearned item 61 was replaced with a brand truck
-        assert_ne!(existing.order()[61], order[61]);
-        assert!(existing.order()[61].starts_with("trucks:"));
+        // Only the four brand items replaced decks, in scarcity order.
+        assert_eq!(&existing.order()[61..65], &catalog.order()[4..8]);
+        assert_eq!(&existing.order()[65..], &order[65..]);
 
-        // Invariant 4: Running upgrade again does nothing (idempotent)
-        assert!(!existing.upgrade_unearned_duplicates(&brand_catalog));
+        let saved = existing.to_text();
+        let mut reloaded = Secrets::from_text(&saved);
+        assert!(!reloaded.upgrade_unearned_duplicates(&catalog));
+        assert_eq!(reloaded.to_text(), saved);
     }
 }
