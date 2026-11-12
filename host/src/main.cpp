@@ -1408,7 +1408,7 @@ void ShowControlsGuide() {
         }
 
         const std::string y = g_runtime.KeyboardKey("y");
-        dismountKey = (!y.empty() && y != "-") ? ("Tap " + y) : "Tap Q";
+        dismountKey = (!y.empty() && y != "-") ? ("Tap " + y) : "Unbound";
     }
 
     Call<void>(gta::BEGIN_TEXT_COMMAND_DISPLAY_HELP, "CELL_EMAIL_BCON");
@@ -4659,7 +4659,7 @@ std::vector<menu::Page> MenuPages(Session& s) {
         {"BailTimeLimit", "Lie on the ground at most this long after a bail (0 = no limit)."},
         {"SkitchStandoff", "Distance kept behind a car while skitching."},
         {"SwimDepth", "Water depth where GTA's swimming takes over."},
-        {"PutAwayHoldMs", "How long Y (keyboard: the get-off key, Q by default) must be held to put the board away."},
+        {"PutAwayHoldMs", "How long to hold Y or the keyboard dismount key to put the board away."},
         {"BoardTracks", "Marks the board leaves on the ground."},
         {"WheelGlow", "Lights the wheels and the ground under them. Off by default; raise it for brighter glow."},
         {"CollisionView", "Draws what Skate collides with: green floor, cyan bank, red wall, purple underside, grey no grind (curb bevels, stair steps), orange moving objects, yellow grind rails."},
