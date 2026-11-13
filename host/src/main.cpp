@@ -1242,7 +1242,6 @@ struct Session {
     // GTA ped state saved on entry and restored on leaving.
     bool savedCanRagdoll = true;
     bool savedVisible = true;
-    bool savedCollisionDisabled = false;
     DWORD lastPedAudit = 0;
     std::uint32_t pedAuthorityCorrections = 0;
     // Where the script last put the ped: a ped found elsewhere was moved by something
@@ -1455,12 +1454,16 @@ void ApplyHold(Ped ped, bool hold, bool collisionOn, bool ragdollAfter) {
 void HoldPed(Session& s, bool hold) {
     const Ped ped = s.ped;
     if (hold) {
-        // Restore GTA's pre-existing ragdoll and collision settings on leaving.
+        // Restore GTA's pre-existing ragdoll and visibility settings on leaving.
+        // Always restore collision on exit: if a prior model swap or interrupted
+        // exit left collisionDisabled=1 on entry, preserving it would drop the
+        // player through the floor on foot.
         s.savedCanRagdoll = Call<BOOL>(gta::CAN_PED_RAGDOLL, ped) != 0;
         s.savedVisible = Call<BOOL>(gta::IS_ENTITY_VISIBLE, ped) != 0;
-        s.savedCollisionDisabled = Call<BOOL>(gta::GET_ENTITY_COLLISION_DISABLED, ped) != 0;
+        if (Call<BOOL>(gta::GET_ENTITY_COLLISION_DISABLED, ped) != 0)
+            Log("SkateV Legacy: warning: ped collision was already disabled before entering skate mode");
     }
-    ApplyHold(ped, hold, !hold && !s.savedCollisionDisabled, s.savedCanRagdoll);
+    ApplyHold(ped, hold, !hold, s.savedCanRagdoll);
     Logf("SkateV Legacy: ped collision %s (GTA reports disabled=%d)", hold ? "removed" : "restored",
          static_cast<int>(Call<BOOL>(gta::GET_ENTITY_COLLISION_DISABLED, ped)));
 }
@@ -1673,6 +1676,13 @@ void Leave(Session& s, const Config& cfg, const char* why, bool voluntary) {
             Call<void>(gta::SET_GAMEPLAY_CAM_RELATIVE_HEADING, 0.0f);
             Call<void>(gta::SET_GAMEPLAY_CAM_RELATIVE_PITCH, 0.0f, 1.0f);
         }
+    }
+    const Ped current = Call<Ped>(gta::PLAYER_PED_ID);
+    if (current && current != s.ped && Call<BOOL>(gta::DOES_ENTITY_EXIST, current) &&
+        Call<BOOL>(gta::GET_ENTITY_COLLISION_DISABLED, current) != 0) {
+        ApplyHold(current, false, true, s.savedCanRagdoll);
+        Logf("SkateV Legacy: new player ped collision restored (GTA reports disabled=%d)",
+             static_cast<int>(Call<BOOL>(gta::GET_ENTITY_COLLISION_DISABLED, current)));
     }
     Call<void>(gta::CLEAR_FOCUS);
     s.suppressEnterUntil = GetTickCount() + 750;
