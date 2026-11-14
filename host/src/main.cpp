@@ -53,6 +53,7 @@
 #include "object_dropper.h"
 #include "collision_view.h"
 #include "interaction_menu_logic.h"
+#include "tutorial_teleport.h"
 #include "ped_speech.h"
 #include "runtime_bridge.h"
 #include "injuries.h"
@@ -4352,6 +4353,47 @@ std::vector<menu::Page> MenuPages(Session& s) {
         Helped(Action("Object dropper: remove all objects", [] { objectdropper::RequestClear(); }),
                "Removes every object you dropped."),
     }});
+
+    const bool hasTutorialPack = tutorial::HasTutorialPack(g_gameDir);
+    const auto tutorialTravel = [&s, hasTutorialPack](const char* label, const char* helpText, std::array<float, 3> target) {
+        auto item = Helped(Action(label, [&s, target, hasTutorialPack] {
+            if (!hasTutorialPack) return;
+            const Ped ped = Call<Ped>(gta::PLAYER_PED_ID);
+            const bool resume = SkateOwnsPlayer(s);
+            const bool offshore = tutorial::IsInTutorialZone(target[0], target[1]);
+            EndReplay(s, g_config);
+            s.keepPlace = true;
+            if (resume) Leave(s, g_config, "tutorial travel", false);
+            s.keepPlace = false;
+            if (Call<BOOL>(gta::IS_PED_IN_ANY_VEHICLE, ped, 0))
+                Call<void>(gta::CLEAR_PED_TASKS_IMMEDIATELY, ped);
+            Call<void>(gta::REQUEST_COLLISION_AT_COORD, target[0], target[1], target[2]);
+            Call<void>(gta::SET_ENTITY_COORDS_NO_OFFSET, ped, target[0], target[1], target[2], 0, 0, 0);
+            s.placedValid = false;
+            s.lastGroundValid = false;
+            // Offshore districts have no base GTA map: freeze/wait until runtime + DLC collision load.
+            const bool waitCollision = resume || offshore;
+            s.teleportWait = waitCollision;
+            if (waitCollision) {
+                Call<void>(gta::FREEZE_ENTITY_POSITION, ped, 1);
+                TryEnter(s, g_config, false);
+            }
+        }), helpText);
+        item.visible = [hasTutorialPack] { return hasTutorialPack; };
+        return item;
+    };
+    pages.back().items.push_back(tutorialTravel(
+        "Travel to Skate School",
+        "Teleports to the optional Skate School island plaza (requires skate_school add-on).",
+        tutorial::kSkateSchoolSpawn));
+    pages.back().items.push_back(tutorialTravel(
+        "Travel to StartPark",
+        "Teleports to the optional StartPark island (requires skate_school add-on).",
+        tutorial::kStartParkSpawn));
+    pages.back().items.push_back(tutorialTravel(
+        "Return to Los Santos (Vespucci)",
+        "Returns from the optional Skate School islands back to Vespucci Skatepark.",
+        tutorial::kVespucciParkReturn));
 
     pages.push_back({"Dev", {
         Choice("Show inputs on screen (keys and pad)", "ShowInputs", {"0", "1"}, {"Off", "On"}, Bound("ShowInputs")),

@@ -23,6 +23,7 @@ pub mod skin;
 mod worker;
 mod crash;
 pub mod world;
+mod tutorial_zone;
 pub mod live;
 pub mod baked;
 pub mod tiles;
