@@ -979,6 +979,19 @@ fn cstr_buf(bytes: &[u8]) -> String {
     String::from_utf8_lossy(&bytes[..end]).into_owned()
 }
 
+fn finite_or_zero(v: f32) -> f32 {
+    if v.is_finite() { v } else { 0.0 }
+}
+
+fn clear_replay_frame(hud: &mut HudShared) {
+    if hud.replay_active {
+        hud.replay_active = false;
+        hud.visible = false;
+        hud.frame = Arc::default();
+        hud.serial += 1;
+    }
+}
+
 fn build_replay_data(s: &SvReplayHudState) -> ReplayHudData {
     let nclips = (s.clip_count as usize).min(s.clips.len());
     let nkeys = (s.key_count as usize).min(s.keys.len());
@@ -992,9 +1005,9 @@ fn build_replay_data(s: &SvReplayHudState) -> ReplayHudData {
         over_clip_marker: s.flags & 8 != 0,
         can_show_hide: s.flags & 16 != 0,
         selected_clip: s.selected_clip,
-        playhead: s.playhead,
-        trim_in: s.trim_in,
-        trim_out: s.trim_out,
+        playhead: finite_or_zero(s.playhead),
+        trim_in: finite_or_zero(s.trim_in),
+        trim_out: finite_or_zero(s.trim_out),
         encoded_time: cstr_buf(&s.encoded_time_utf8),
         zoom_text: cstr_buf(&s.zoom_utf8),
         title_text: cstr_buf(&s.title_utf8),
@@ -1030,12 +1043,7 @@ pub unsafe extern "C" fn sv_set_replay_hud(rt: *mut c_void, state: *const SvRepl
             let (slot, was_active) = {
                 let mut sh = shared.lock().unwrap();
                 let was = sh.hud.replay_active;
-                if was {
-                    sh.hud.replay_active = false;
-                    sh.hud.visible = false;
-                    sh.hud.frame = Arc::default();
-                    sh.hud.serial += 1;
-                }
+                clear_replay_frame(&mut sh.hud);
                 (sh.hud.replay.clone(), was)
             };
             if was_active {
@@ -1054,15 +1062,12 @@ pub unsafe extern "C" fn sv_set_replay_hud(rt: *mut c_void, state: *const SvRepl
         };
         let Some(slot) = slot else {
             let mut sh = shared.lock().unwrap();
-            if sh.hud.replay_active {
-                sh.hud.replay_active = false;
-                sh.hud.visible = false;
-                sh.hud.frame = Arc::default();
-                sh.hud.serial += 1;
-            }
+            clear_replay_frame(&mut sh.hud);
             return 0;
         };
         let Some(layout) = layout_for(&viewport) else {
+            let mut sh = shared.lock().unwrap();
+            clear_replay_frame(&mut sh.hud);
             return 0;
         };
         let data = build_replay_data(s);
@@ -1113,12 +1118,7 @@ pub unsafe extern "C" fn sv_set_replay_hud(rt: *mut c_void, state: *const SvRepl
             sh.hud.serial += 1;
             1
         } else {
-            if sh.hud.replay_active {
-                sh.hud.replay_active = false;
-                sh.hud.visible = false;
-                sh.hud.frame = Arc::default();
-                sh.hud.serial += 1;
-            }
+            clear_replay_frame(&mut sh.hud);
             0
         }
     })
@@ -1340,5 +1340,74 @@ mod tests {
             0
         );
         assert_eq!(unsafe { sv_set_replay_hud(std::ptr::null_mut(), std::ptr::null()) }, 0);
+    }
+
+    #[test]
+    fn build_replay_data_clamps_overflow_counts_and_non_finite_floats() {
+        let mut s = SvReplayHudState::default();
+        s.clip_count = 99;
+        s.key_count = 99;
+        s.marker_count = 99;
+        s.selected_key = -1;
+        s.playhead = f32::NAN;
+        s.trim_in = f32::INFINITY;
+        s.trim_out = f32::NEG_INFINITY;
+        let d = build_replay_data(&s);
+        assert_eq!(d.clips.len(), 32);
+        assert_eq!(d.keys.len(), 48);
+        assert!(d.keys.iter().all(|&(_, sel)| !sel));
+        assert_eq!(d.markers.len(), 24);
+        assert_eq!(d.playhead, 0.0);
+        assert_eq!(d.trim_in, 0.0);
+        assert_eq!(d.trim_out, 0.0);
+    }
+
+    #[test]
+    fn sv_set_replay_hud_rejects_short_state_and_clears_active_flag_without_viewport() {
+        let dir = std::env::temp_dir().to_string_lossy().into_owned();
+        let c_dir = std::ffi::CString::new(dir).unwrap();
+        let info = crate::SvCreateInfo {
+            size: size_of::<crate::SvCreateInfo>() as u32,
+            abi_version: crate::SKATEV_ABI_VERSION,
+            reserved: [0; 32],
+            data_root_utf8: c_dir.as_ptr(),
+            world_cache_utf8: c_dir.as_ptr(),
+            log_path_utf8: std::ptr::null(),
+            skater_triangle_budget: 0,
+            presentation_flags: 0,
+        };
+        let rt = unsafe { crate::sv_create(&info) };
+        assert!(!rt.is_null());
+        let shared = runtime_shared(rt).unwrap();
+
+        let mut short = SvReplayHudState::default();
+        short.size = (size_of::<SvReplayHudState>() - 4) as u32;
+        short.active = 1;
+        {
+            let mut sh = shared.lock().unwrap();
+            sh.hud.replay_active = true;
+            sh.hud.visible = true;
+            sh.hud.serial = 5;
+        }
+        assert_eq!(unsafe { sv_set_replay_hud(rt, &short) }, 0);
+        {
+            let sh = shared.lock().unwrap();
+            assert!(!sh.hud.replay_active);
+            assert!(!sh.hud.visible);
+            assert_eq!(sh.hud.serial, 6);
+        }
+
+        // Also clear stale replay_active when replay slot is absent or viewport is disabled.
+        let mut active_state = SvReplayHudState::default();
+        active_state.active = 1;
+        shared.lock().unwrap().hud.replay_active = true;
+        assert_eq!(unsafe { sv_set_replay_hud(rt, &active_state) }, 0);
+        assert!(!shared.lock().unwrap().hud.replay_active);
+
+        shared.lock().unwrap().hud.replay_active = true;
+        assert_eq!(unsafe { sv_set_replay_hud(rt, std::ptr::null()) }, 0);
+        assert!(!shared.lock().unwrap().hud.replay_active);
+
+        unsafe { crate::sv_destroy(rt) };
     }
 }

@@ -39,7 +39,7 @@ struct ReplayHudInput {
 namespace detail {
 inline void CopyUtf8(char* dst, std::size_t cap, const std::string& src) {
     if (!cap) return;
-    std::size_t n = std::min(src.size(), cap - 1);
+    std::size_t n = (std::min)(src.size(), cap - 1);
     if (n < src.size() && (static_cast<unsigned char>(src[n]) & 0xC0u) == 0x80u) {
         while (n > 0 && (static_cast<unsigned char>(src[n - 1]) & 0xC0u) == 0x80u) --n;
         if (n > 0) --n;
@@ -120,7 +120,7 @@ inline SvReplayHudState BuildReplayHudState(const ReplayHudInput& in) {
     if (in.screen == ReplayHudScreen::CameraEdit && IsAdvanced(clip.camera)) {
         double bestDist = 0.25 + 1e-6;
         int bestIdx = -1;
-        const int lim = static_cast<int>(std::min<std::size_t>(clip.keys.size(), 48));
+        const int lim = static_cast<int>((std::min)(clip.keys.size(), std::size_t{48}));
         for (int k = 0; k < lim; ++k) {
             const double d = std::fabs(clip.keys[static_cast<std::size_t>(k)].time - in.playheadTime);
             if (d <= bestDist) {
@@ -152,7 +152,7 @@ inline SvReplayHudState BuildReplayHudState(const ReplayHudInput& in) {
     } else {
         st.trim_in = Norm(in.edit->In());
         st.trim_out = Norm(in.edit->Out());
-        const std::uint32_t clipCount = static_cast<std::uint32_t>(std::min<std::size_t>(clips.size(), 32));
+        const std::uint32_t clipCount = static_cast<std::uint32_t>((std::min)(clips.size(), std::size_t{32}));
         st.clip_count = clipCount;
         st.selected_clip = clips.empty() ? -1 : safeClipIdx;
         for (std::uint32_t i = 0; i < clipCount; ++i) {
@@ -160,12 +160,12 @@ inline SvReplayHudState BuildReplayHudState(const ReplayHudInput& in) {
             st.clips[i] = {Norm(in.edit->ClipStart(idx)), Norm(in.edit->ClipEnd(idx)),
                            static_cast<std::uint32_t>(clips[i].camera), idx == safeClipIdx ? 1u : 0u};
         }
-        const std::uint32_t keyCount = static_cast<std::uint32_t>(std::min<std::size_t>(clip.keys.size(), 48));
+        const std::uint32_t keyCount = static_cast<std::uint32_t>((std::min)(clip.keys.size(), std::size_t{48}));
         st.key_count = keyCount;
         for (std::uint32_t k = 0; k < keyCount; ++k) st.keys[k] = Norm(clip.keys[k].time);
 
         const auto& markers = in.edit->Markers();
-        const std::uint32_t markerCount = static_cast<std::uint32_t>(std::min<std::size_t>(markers.size(), 24));
+        const std::uint32_t markerCount = static_cast<std::uint32_t>((std::min)(markers.size(), std::size_t{24}));
         st.marker_count = markerCount;
         for (std::uint32_t m = 0; m < markerCount; ++m) st.markers[m] = Norm(markers[m]);
 
