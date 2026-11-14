@@ -4356,8 +4356,9 @@ std::vector<menu::Page> MenuPages(Session& s) {
     }});
 
     const bool hasTutorialPack = tutorial::HasTutorialPack(g_gameDir);
-    const auto tutorialTravel = [&s, hasTutorialPack](const char* label, const char* helpText, std::array<float, 3> target) {
-        auto item = Helped(Action(label, [&s, target, hasTutorialPack] {
+    const auto tutorialTravel = [&s, hasTutorialPack](const char* label, const char* helpText, std::array<float, 3> target,
+                                                    const char* greeting = nullptr, bool startLessons = false) {
+        auto item = Helped(Action(label, [&s, target, hasTutorialPack, greeting, startLessons] {
             if (!hasTutorialPack) return;
             const Ped ped = Call<Ped>(gta::PLAYER_PED_ID);
             const bool resume = SkateOwnsPlayer(s);
@@ -4379,10 +4380,18 @@ std::vector<menu::Page> MenuPages(Session& s) {
                 Call<void>(gta::FREEZE_ENTITY_POSITION, ped, 1);
                 TryEnter(s, g_config, false);
             }
+            if (startLessons) tutorial::CommandLessons(SV_TUTORIAL_START);
+            if (greeting) Notify(s, greeting, 6000);
         }), helpText);
         item.visible = [hasTutorialPack] { return hasTutorialPack; };
         return item;
     };
+    pages.back().items.push_back(tutorialTravel(
+        "Call Coach Frank (Travel to Skate School)",
+        "Calls Coach Frank on your phone to travel to Skate School Island and start your lesson.",
+        tutorial::kSkateSchoolSpawn,
+        "Coach Frank: Hop on over to Skate School, kid! Welcome to Port Carverton.",
+        true));
     pages.back().items.push_back(tutorialTravel(
         "Travel to Skate School",
         "Teleports to the optional Skate School island plaza (requires skate_school add-on).",
@@ -4672,6 +4681,10 @@ std::vector<menu::Page> MenuPages(Session& s) {
         const auto labelIs = [&item](std::initializer_list<const char*> labels) {
             return item.key.empty() && std::any_of(labels.begin(), labels.end(), [&item](const char* l) { return item.label.rfind(l, 0) == 0; });
         };
+        if (labelIs({"Call Coach Frank", "Travel to Skate School", "Travel to StartPark", "Return to Los Santos",
+                     "Start / Pause Coach Frank", "Next Tutorial Lesson", "Previous Tutorial Lesson", "Restart Tutorial Progress"})) {
+            return "Progress";
+        }
         if (page.title == "Dev") {
             // Collision switches, test marks, resets and diagnostics are developer
             // rows (B136); the player-facing ones stay on their player page.
@@ -4957,7 +4970,9 @@ std::vector<menu::Page> MenuPages(Session& s) {
                       {"Missions", {"BoardActionInMissions"}}}},
         {"HUD", {{"On screen", {"SkateHud", "Hud", "TrickAnalyzer", "KeyboardHints"}},
                  {"Hall of Meat", {"HallOfMeat"}}}},
-        {"Progress", {{"Collectibles", {"Collectibles", "Collectibles:", "Unlock all collectibles"}},
+        {"Progress", {{"Coach Frank & Skate School", {"Call Coach Frank", "Travel to Skate School", "Travel to StartPark", "Return to Los Santos",
+                                                      "Start / Pause Coach Frank", "Next Tutorial Lesson", "Previous Tutorial Lesson", "Restart Tutorial Progress"}},
+                      {"Collectibles", {"Collectibles", "Collectibles:", "Unlock all collectibles"}},
                       {"Records board", {"Show records"}},
                       {"On the map", {"SkateSpots"}}}},
         {"World", {{"What the board hits", {"DynamicWorld", "VehiclePush", "ObjectPush", "VehicleDamage", "BoardScratches"}},

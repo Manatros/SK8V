@@ -5,6 +5,7 @@ param(
     [ValidateSet('Install', 'Verify', 'Uninstall')]
     [string]$Mode = 'Verify',
     [string]$SourceTutorialDir = '',
+    [string]$SourceDlcRpf = '',
     [string]$GtaDir = ''
 )
 
@@ -35,8 +36,27 @@ if ([string]::IsNullOrWhiteSpace($GtaDir) -or -not (Test-Path -LiteralPath (Join
 }
 Assert-GtaClosed
 
-$targetDir = Join-Path $GtaDir 'SK8V\tutorial'
 $iniPath = Join-Path $GtaDir 'SkateVLegacy.ini'
+$cacheRoot = Join-Path $GtaDir 'SK8V'
+if (Test-Path -LiteralPath $iniPath) {
+    $wcLine = Get-Content -LiteralPath $iniPath | Where-Object { $_ -match '^WorldCache=' } | Select-Object -First 1
+    if ($wcLine) {
+        $wcVal = ($wcLine -replace '^WorldCache=', '').Trim().Trim('"')
+        if ($wcVal) {
+            if ($wcVal.EndsWith('.svwc', [StringComparison]::OrdinalIgnoreCase)) {
+                $cacheRoot = Split-Path -Parent $wcVal
+            } else {
+                $cacheRoot = $wcVal
+            }
+        }
+    }
+}
+$targetDir = Join-Path $cacheRoot 'addons\skate_school'
+$dlcTarget = Join-Path $GtaDir 'update\x64\dlcpacks\skate_school\dlc.rpf'
+if ([string]::IsNullOrWhiteSpace($SourceDlcRpf)) {
+    $candidateDlc = Join-Path (Split-Path -Parent $PSScriptRoot) 'local\m1-tutorial-dlc\dlc.rpf'
+    if (Test-Path -LiteralPath $candidateDlc) { $SourceDlcRpf = $candidateDlc }
+}
 
 if ($Mode -eq 'Install') {
     $manifest = Join-Path $SourceTutorialDir 'm0-tutorial-manifest.json'
@@ -48,11 +68,15 @@ if ($Mode -eq 'Install') {
 
     New-Item -ItemType Directory -Force -Path $targetDir | Out-Null
     Copy-Item -Path (Join-Path $SourceTutorialDir '*') -Destination $targetDir -Recurse -Force
+    if (-not [string]::IsNullOrWhiteSpace($SourceDlcRpf) -and (Test-Path -LiteralPath $SourceDlcRpf)) {
+        New-Item -ItemType Directory -Force -Path (Split-Path -Parent $dlcTarget) | Out-Null
+        Copy-Item -LiteralPath $SourceDlcRpf -Destination $dlcTarget -Force
+    }
     $receipt = [ordered]@{
         schema = 1
         addon = 'gtaxskate-tutorial-island'
         installedUtc = [DateTime]::UtcNow.ToString('o')
-        targetSubdir = 'SK8V\tutorial'
+        targetSubdir = 'addons\skate_school'
     }
     [IO.File]::WriteAllText((Join-Path $targetDir 'addon-installed.json'), ($receipt | ConvertTo-Json -Depth 4), [Text.UTF8Encoding]::new($false))
     if (Test-Path -LiteralPath $iniPath) {
@@ -68,6 +92,9 @@ if ($Mode -eq 'Install') {
 if ($Mode -eq 'Uninstall') {
     if (Test-Path -LiteralPath $targetDir) {
         Remove-Item -LiteralPath $targetDir -Recurse -Force
+    }
+    if (Test-Path -LiteralPath $dlcTarget) {
+        Remove-Item -LiteralPath (Split-Path -Parent $dlcTarget) -Recurse -Force
     }
     if (Test-Path -LiteralPath $iniPath) {
         [string[]]$lines = @(Get-Content -LiteralPath $iniPath | Where-Object { $_ -notmatch '^(TutorialRoot|SkateTutorialPack)=' })

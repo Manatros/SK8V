@@ -336,12 +336,12 @@ def export(args):
               'chunks': len(drawables), 'geometry': reports, 'commands': commands,
               'mode': 'xml-only' if args.xml_only else 'dry-run' if args.dry_run else 'ready'}
     report_path = out / 'build-report.json'
-    report_path.write_text(json.dumps(result, indent=2), encoding='utf-8')
+    report_path.write_text(json.dumps(result, indent=2, default=float), encoding='utf-8')
     if not (args.xml_only or args.dry_run):
         for command in commands:
             subprocess.run(command, check=True)
         result['mode'] = 'packed'
-        report_path.write_text(json.dumps(result, indent=2), encoding='utf-8')
+        report_path.write_text(json.dumps(result, indent=2, default=float), encoding='utf-8')
     return result
 
 
