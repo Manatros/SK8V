@@ -31,6 +31,7 @@ RAGE = REPO / 'build/tools/rage.exe'  # GTA's keys and the ped collider tools; e
 RPF = 'sk8v-rpf.exe'
 # Per stage: rough seconds on a fast PC (the setup window's progress bar) and what the window shows.
 STEPS = {'disc': (20, 'Reading the Skate 3 disc'), 'convert': (17, 'Converting Skate 3 data'),
+         'tutorial': (12, 'Preparing optional Skate School & StartPark add-on'),
          'audio': (17, 'Converting Skate 3 audio'), 'audio-tuning': (1, 'Reading audio tuning'),
          'hom-hud': (5, 'Preparing the Hall of Meat HUD'), 'hom-xray': (1, 'Preparing the x-ray view'),
          'board': (1, 'Preparing the board'), 'trick-analyser': (1, 'Preparing the Trick Analyzer'), 'replay-text': (1, 'Reading the replay editor texts'), 'gta-vehicles': (3, 'Reading GTA V vehicles'),
@@ -84,7 +85,7 @@ class Prepare:
     # chains are independent and run side by side; join needs both (and writes into skate-data only after
     # convert has renamed it into place).
     def stages(self):
-        return [
+        base = [
             ('disc', 'skate', ['xiso.py'], self.stage_disc),
             ('convert', 'skate', ['convert-skate-data.py'], lambda: py(
                 'convert-skate-data.py', '--xex', self.disc / 'default.xex', '--out', self.out / 'skate-data')),
@@ -110,6 +111,11 @@ class Prepare:
             ('wheel-icon', 'gta', ['build-board-icon.py'], self.stage_icon),
             ('verify', 'join', [], self.verify),
         ]
+        if getattr(self.a, 'with_tutorial', False):
+            # Optional expansion: only runs when player opts in with --with-tutorial.
+            base.insert(1, ('tutorial', 'skate', ['prepare-tutorial.py'],
+                            lambda: py('prepare-tutorial.py', '--skate', self.disc, '--out', self.out / 'tutorial')))
+        return base
 
     def stage_disc(self):
         if self.a.skate.is_dir():
@@ -333,10 +339,13 @@ class Prepare:
     def plan(self):
         files = {'SkateVLegacy.asi': PACKAGE / 'SkateVLegacy.asi', 'SkateVRuntime.dll': PACKAGE / 'SkateVRuntime.dll',
                  PACK + r'\dlc.rpf': self.clip / 'dlc.rpf', PACK + r'\hud.gfx': self.clip / 'hud.gfx'}
+        ini = {'DataRoot': str(self.assets), 'WorldCache': str(self.world), 'AudioCache': str(self.audio),
+               'PedCache': str(self.peds), 'PedPoseCollision': 1, 'LiveClip': int(bool(self.clip_ok)),
+               'Stance': self.a.stance or 'Regular', 'Line': ''}
+        if getattr(self.a, 'with_tutorial', False):
+            ini['TutorialRoot'] = str(self.out / 'tutorial')
         return {'files': {k: str(v) for k, v in files.items()},
-                'ini': {'DataRoot': str(self.assets), 'WorldCache': str(self.world), 'AudioCache': str(self.audio),
-                        'PedCache': str(self.peds), 'PedPoseCollision': 1, 'LiveClip': int(bool(self.clip_ok)),
-                        'Stance': self.a.stance or 'Regular', 'Line': ''},
+                'ini': ini,
                 'keep': ['Line'] + (['Stance'] if self.a.stance is None else [])}  # a reinstall keeps the player's
 
 
@@ -346,6 +355,7 @@ def main():
     ap.add_argument('--gta', type=Path, required=True, help='GTA V Legacy folder (holds GTA5.exe)')
     ap.add_argument('--out', type=Path, help='where the prepared data lives (default: <GTA folder>/SK8V)')
     ap.add_argument('--install', action='store_true', help='then install into the GTA folder')
+    ap.add_argument('--with-tutorial', action='store_true', help='optional: also prepare the Skate School + StartPark island add-on')
     ap.add_argument('--stance', choices=['Regular', 'Goofy'])
     ap.add_argument('--redo', help='rerun this stage and everything after it')
     ap.add_argument('--clean', action='store_true', help='afterwards delete the intermediates (disc and GTA extractions)')

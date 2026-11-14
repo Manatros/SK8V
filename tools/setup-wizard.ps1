@@ -4,7 +4,7 @@
 # "SK8V Setup.cmd" starts it. ASCII only: 5.1 reads a BOM-less script as ANSI.
 # -Disc/-Folder/-Ride/-Start: the restart as administrator carries the choices over and goes straight on.
 # (Not -Skate/-Gta/-Stance: PowerShell names ignore case, and those are the window's controls.)
-param([string]$Disc = '', [string]$Folder = '', [string]$Ride = 'Regular', [switch]$Start)
+param([string]$Disc = '', [string]$Folder = '', [string]$Ride = 'Regular', [switch]$Tutorial, [switch]$Start)
 $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName System.Windows.Forms, System.Drawing
 [Windows.Forms.Application]::EnableVisualStyles()
@@ -52,7 +52,7 @@ function Set-Flat($button, $back, $fore) {
 }
 
 $form = New-Object Windows.Forms.Form -Property @{
-  Text = 'SK8V Setup'; ClientSize = '640,420'; StartPosition = 'CenterScreen'; FormBorderStyle = 'FixedSingle'
+  Text = 'SK8V Setup'; ClientSize = '640,452'; StartPosition = 'CenterScreen'; FormBorderStyle = 'FixedSingle'
   MaximizeBox = $false; Font = (New-Font 9.5); BackColor = (& $rgb 247 247 249); ForeColor = $ink
 }
 $header = Add Panel @{ Location = '0,0'; Size = '640,96'; BackColor = (& $rgb 20 20 24) }
@@ -83,7 +83,12 @@ $gta = Add-Row 'GTA V Legacy folder' $(if ($Folder) { $Folder } else { Find-Gta 
 [void](Add Label @{ Text = 'Stance'; Location = "24,$($y + 4)"; Size = '140,22' })
 $stance = Add ComboBox @{ Location = "164,$y"; Size = '120,26'; DropDownStyle = 'DropDownList'; FlatStyle = 'Flat' }
 [void]$stance.Items.AddRange(@('Regular', 'Goofy')); $stance.SelectedIndex = [int]($Ride -eq 'Goofy')
-$y += 40
+$y += 34
+$tutorialBox = Add CheckBox @{
+  Text = 'Include Skate School & StartPark Islands (optional tutorial & Coach Frank)';
+  Location = "164,$y"; Size = '452,24'; Checked = [bool]$Tutorial
+}
+$y += 34
 [void](Add Label @{ Location = "24,$y"; Size = '592,52'; ForeColor = $muted; Font = (New-Font 8.75)
   Text = "Needs GTA V Legacy 1.0.3889.0 with ScriptHookV, your own Skate 3 (Xbox 360) disc image and about 7 GB free on the GTA drive (about 2 GB stays, in the GTA folder's SK8V folder). Close GTA V first. Setup can take several minutes, longer on slower PCs and hard drives; if it stops, press Install again and it picks up where it left off." })
 $y += 62
@@ -214,8 +219,10 @@ function Start-Prepare {
   # that install's modules: "DLL load failed while importing _ctypes" next to an Anaconda install.
   if ($bundled) { $env:PYTHONHOME = Join-Path $Root 'python'; $env:PYTHONPATH = $null }
   $status.Text = 'Starting...'
-  Start-Logged @($py, '-B', '-u', (Join-Path $Root 'tools\prepare.py'), '--skate', $skate.Text,
-                 '--gta', $gta.Text, '--stance', $stance.SelectedItem, '--install', '--clean')
+  $prepArgs = @($py, '-B', '-u', (Join-Path $Root 'tools\prepare.py'), '--skate', $skate.Text,
+                '--gta', $gta.Text, '--stance', $stance.SelectedItem, '--install', '--clean')
+  if ($tutorialBox.Checked) { $prepArgs += '--with-tutorial' }
+  Start-Logged $prepArgs
 }
 
 $install.Add_Click({
@@ -229,8 +236,10 @@ $install.Add_Click({
     $ask = "Windows only lets administrators change this GTA V folder (a GTA download or repair sets that).`n`n" +
            "Restart setup as administrator? Your choices carry over."
     if ([Windows.Forms.MessageBox]::Show($ask, 'SK8V Setup', 'YesNo', 'Question') -ne 'Yes') { return }
-    $words = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $Self, '-Disc', $skate.Text, '-Folder', $gta.Text,
-               '-Ride', $stance.SelectedItem, '-Start') | ForEach-Object { '"' + ([string]$_).TrimEnd('\') + '"' }
+    $restartArgs = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $Self, '-Disc', $skate.Text, '-Folder', $gta.Text,
+                     '-Ride', $stance.SelectedItem, '-Start')
+    if ($tutorialBox.Checked) { $restartArgs += '-Tutorial' }
+    $words = $restartArgs | ForEach-Object { '"' + ([string]$_).TrimEnd('\') + '"' }
     try { # not -WindowStyle Hidden: Windows applies that to this window's first show as well
       Start-Process powershell.exe -Verb RunAs -ArgumentList ($words -join ' ')
       $form.Close()
