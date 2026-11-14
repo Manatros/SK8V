@@ -4584,41 +4584,56 @@ std::vector<menu::Page> MenuPages(Session& s) {
             Action("Custom - save current settings", [] { SaveCustomPreset(); }),
             Action("Custom - restore saved settings", [] { RestoreCustomPreset(); }),
         }},
-        {"Skating", {}}, {"Board", {}}, {"Camera", {}},
+        {"Skate", {}}, {"Board", {}}, {"Camera", {}},
         {"Controls", {
             Helped(Action("Show beginner controls guide", [] { ShowControlsGuide(); }),
                    "Displays on-screen tutorial card with essential skating and menu controls.")
         }},
-        {"HUD", {}},
-        {"World", {}}, {"Audio and radio", {}}, {"Advanced", {}},
+        {"Progress", {}},
+        {"World", {}}, {"Audio", {}}, {"Advanced", {}},
         // Sub-pages are listed as rows on their parent (Back returns there).
         {"Board in hand", {}, "Board"}, {"Keyboard keys", {}, "Controls"},
-        {"Skate physics", {}, "Advanced"}, {"Peds and vehicles", {}, "Advanced"},
-        {"Hall of Meat details", {}, "Advanced"}, {"BackwardsMan", {}, "Advanced"}, {"Developer", {}, "Advanced"},
+        {"Object dropper", {}, "World"}, {"GPS", {}, "World"},
+        {"Skate physics", {}, "Advanced"}, {"HUD", {}, "Advanced"}, {"Peds and vehicles", {}, "Advanced"},
+        {"Hall of Meat details", {}, "Advanced"}, {"BackwardsMan", {}, "Advanced"},
+        // Developer stays hidden until "Developer options" is on (B136).
+        {"Developer", {}, "Advanced", [] { return g_config.devOptions; }},
+        {"Collision switches", {}, "Developer", [] { return g_config.devOptions; }},
+        {"Test marks", {}, "Developer", [] { return g_config.devOptions; }},
+        {"Collectible tests", {}, "Developer", [] { return g_config.devOptions; }},
     };
     const auto destination = [](const Page& page, const Item& item) -> std::string {
         const std::string& k = item.key;
         const auto any = [&k](std::initializer_list<const char*> keys) {
             return std::any_of(keys.begin(), keys.end(), [&k](const char* x) { return k == x; });
         };
+        const auto labelIs = [&item](std::initializer_list<const char*> labels) {
+            return item.key.empty() && std::any_of(labels.begin(), labels.end(), [&item](const char* l) { return item.label.rfind(l, 0) == 0; });
+        };
         if (page.title == "Dev") {
-            // All world collision rows in one place at the top of World
-            // (Manatros 2026-10-26: "idk what the settings do anymore and what
-            // settings are best"); the technical ones only with DevOptions.
+            // Collision switches, test marks, resets and diagnostics are developer
+            // rows (B136); the player-facing ones stay on their player page.
+            if (k == "DynamicWorld") return "World";
             if (std::any_of(std::begin(kWorldSwitches), std::end(kWorldSwitches),
-                            [&k](const WorldSwitch& w) { return k == w.key; })) return "World";
-            if (k.empty()) for (const char* label : {"World collision:", "Compare: plain GTA", "Mark", "Go to this mark", "Show fixed marks", "Delete this mark", "Reset all settings"})
-                if (item.label.rfind(label, 0) == 0) return "World";
-            if (any({"GpsWhileSkating", "SkateSpots", "Collectibles"}) || item.label.rfind("Collectibles:", 0) == 0) return "World";
+                            [&k](const WorldSwitch& w) { return k == w.key; })) return "Collision switches";
+            if (any({"CollisionView", "CollisionViewRange"}) || labelIs({"World collision:", "Compare: plain GTA"})) return "Collision switches";
+            if (labelIs({"Mark", "Go to this mark", "Show fixed marks", "Delete this mark"})) return "Test marks";
+            if (k == "GpsWhileSkating") return "GPS";
+            if (k == "SkateSpots" || k == "Collectibles" || labelIs({"Collectibles:"})) return "Progress";
+            if (labelIs({"Collectible", "Go to this collectible", "Skate Shop seller", "Reset collectibles"})) return "Collectible tests";
             if (k == "DevOptions") return "Advanced";
             if (any({"BoardShop", "WheelsFromPaint"})) return "Board";
             return "Developer";
         }
-        if (page.title == "Interaction") return "World";
-        if (page.title == "Audio") return "Audio and radio";
+        if (page.title == "Interaction") {
+            if (labelIs({"GPS:"})) return "GPS";
+            return "Object dropper";
+        }
+        if (page.title == "Audio") return "Audio";
         if (page.title == "Controller and HUD") {
-            if (any({"KeyboardHints", "SkateHud", "Hud", "TrickAnalyzer", "ReplayHudStyle"})) return "HUD";
-            if (k == "RadioControls") return "Audio and radio";
+            if (any({"KeyboardHints", "SkateHud", "Hud", "TrickAnalyzer"})) return "HUD";
+            if (k == "ReplayHudStyle") return "Camera";
+            if (k == "RadioControls") return "Audio";
             return "Controls";
         }
         if (page.title == "Peds and vehicles") {
@@ -4627,18 +4642,20 @@ std::vector<menu::Page> MenuPages(Session& s) {
         }
         if (page.title == "Hall of Meat and records") {
             if (k == "Injuries") return "World";
-            if (k == "HallOfMeat" || k.empty()) return "HUD";
+            if (k == "HallOfMeat") return "HUD";
+            if (any({"BailPain", "GetUpSpeech", "NearMissSpeech"})) return "Audio";
+            if (k.empty()) return "Progress";  // Show records board
             return "Hall of Meat details";
         }
         if (page.title == "Skating") {
             if (any({"Camera", "CameraFovScale"})) return ""; // already on Camera
-            if (any({"Replay", "ReplaySeconds"}) || item.label.rfind("Replay:", 0) == 0) return "Camera";
-            if (k == "SkateRadio") return "Audio and radio";
+            if (any({"Replay", "ReplaySeconds", "ReplayHudStyle", "ReplayVehicles", "ReplayPeds"}) || labelIs({"Replay:"})) return "Camera";
+            if (k == "SkateRadio") return "Audio";
             if (k == "PutAwayHoldMs") return "Controls";
             if (any({"GtaDelegation", "SwimDepth", "BoardAim", "Stamina"})) return "World";
             if (any({"BoardTracks", "WheelGlow", "WheelGlowColour", "BoardMaterial", "Snow"})) return "Board";
             if (k.empty() || any({"Stance", "Difficulty", "Posture", "RidingStyle", "TruckTightness", "WheelHardness", "Pop", "GrindPop",
-                                  "HippieJump", "EmoteUp", "EmoteDown", "EmoteLeft", "EmoteRight"})) return "Skating";
+                                  "HippieJump", "EmoteUp", "EmoteDown", "EmoteLeft", "EmoteRight"})) return "Skate";
             return "Skate physics";
         }
         return page.title;
@@ -4744,6 +4761,100 @@ std::vector<menu::Page> MenuPages(Session& s) {
         {"HighResParks", "Visible high-resolution collision for skatepark bowls."},
         {"VisibleRailings", "Physical collision from visible railing bars instead of GTA boxes."},
         {"UnflaggedStairs", "Detect and step unflagged staircases (experimental)."},
+        {"BailPain", "Which grunt the skater makes when a bail hits hard."},
+        {"GetUpSpeech", "The skater's voice line when getting up after a bail."},
+        {"NearMissSpeech", "The skater's voice line after a near miss."},
+        {"PedGetUpSpeech", "The voice line of a pedestrian you knocked over when they get up."},
+        {"DynamicRadius", "How far around you cars, people and props are made solid for the board."},
+        {"PedHitboxes", "People are hit as separate body parts instead of one capsule."},
+        {"PedLaunchScale", "How far hit people fly."},
+        {"PedLaunchLift", "How much hit people are lifted into the air."},
+        {"PedLaunchSpin", "How much hit people tumble."},
+        {"VehicleDamageScale", "Overall strength of the dents the board makes."},
+        {"VehicleDamageRadius", "Size of each dent."},
+        {"VehicleDamageMin", "Hits lighter than this leave no dent."},
+        {"BackwardsManRemountDelay", "Seconds before BackwardsMan puts the skater back on the board."},
+        {"CarryX", "Moves the carried board sideways in the hand."},
+        {"CarryY", "Moves the carried board forward or back in the hand."},
+        {"CarryZ", "Moves the carried board along the hand's handle."},
+        {"CarryTurnX", "Turns the carried board about the X axis."},
+        {"CarryTurnY", "Turns the carried board about the Y axis."},
+        {"CarryTurnZ", "Turns the carried board about the Z axis."},
+        {"ShowInputs", "Developer: draws the pressed keys and pad buttons on screen."},
+        {"GunIK", "Developer: how much of the body follows the gun (0 off, 1 arms, 2 arms, torso and head)."},
+        {"AimTwist", "Developer: the most the upper body twists to aim."},
+        {"GunProbe", "Developer: writes GTA's gun state to the log."},
+        {"GtaCamera", "Developer: skate with GTA's own camera to compare frame cost."},
+        {"ShowDebug", "Developer: shows a text debug HUD."},
+        {"VerboseLog", "Developer: writes much more detail to the log."},
+        {"ThreadCensus", "Developer: scans thread CPU use for the log (can stutter)."},
+        {"PedZOffset", "Developer: raises or lowers the posed GTA character on the board."},
+        {"TrackWidth", "Developer: width of the marks the board leaves."},
+        {"BailHitSpeed", "Developer: impact speed from which a hit counts as a bail."},
+        {"BailScreamSpeed", "Developer: impact speed from which the skater screams."},
+        {"PedPain", "Developer: the pain reason given to a struck pedestrian (-1 none)."},
+        {"BackgroundPrepare", "Developer: prepare Skate while GTA loads."},
+        {"Runtime", "Developer: load the Skate runtime at all."},
+        {"BoardNative", "Developer: use the native board object."},
+        {"DrawBoard", "Developer: draw the board."},
+        {"PosePed", "Developer: pose the GTA character on the board."},
+        {"PedPoseCollision", "Developer: keep collision on the posed character."},
+        {"LiveClip", "Developer: use the owned live animation clip."},
+        {"AudioGtaPlacement", "Developer: where Skate sounds are placed in GTA's audio."},
+        {"AudioEditorTone", "Developer: plays the editor test tone."},
+        {"StallSampler", "Developer: samples stalls for the log."},
+        {"VehicleShapes", "Surveys vehicle shapes so the board hits them accurately."},
+        {"DrawSkater", "Draws a fallback board mesh when the board is missing."},
+        {"GtaCharacter", "Uses your GTA character as the skater."},
+        {"SkaterTriangles", "Developer: triangle limit of the Skate skater model."},
+        {"CharacterTriangles", "Developer: triangle limit of the GTA character."},
+    };
+    // Rows without an INI key (actions, key bindings, test marks), matched by label start.
+    static const std::vector<std::pair<std::string, std::string>> labelHelp = {
+        {"Skate on / off", "Takes the board out or puts it away (closes the menu)."},
+        {"GTAxSkate", "Applies the recommended GTAxSkate setup; every value stays adjustable."},
+        {"SK8V", "Applies the official SK8V default settings."},
+        {"RP", "Applies grounded values with no Skate overlays."},
+        {"User -", "Restores the settings you had before applying a preset."},
+        {"Custom - save", "Saves the current settings as your Custom preset."},
+        {"Custom - restore", "Applies your saved Custom preset."},
+        {"Replay: watch", "Opens the replay when you close this menu (works only while skating)."},
+        {"Replay: saved", "Opens your saved replays when you close this menu (works only while skating)."},
+        {"GPS: nearest clothing", "Sets the GPS route to the nearest board shop."},
+        {"GPS: nearest skate", "Sets the GPS route to the nearest skate spot."},
+        {"GPS: remove", "Clears the GPS route."},
+        {"Object dropper key", "The key that opens and closes the object dropper."},
+        {"Object dropper: build", "Drop ramps, rails and benches around you."},
+        {"Object dropper: remove", "Removes every object you dropped."},
+        {"Show records", "Shows the Hall of Meat records board (closes the menu)."},
+        {"Trigger now", "Runs the BackwardsMan trick right now (skating, BackwardsMan on)."},
+        {"Play showcase", "Developer: plays the showcase line."},
+        {"Next showcase", "Developer: moves to the next showcase line."},
+        {"Sound list", "Developer: shows the list of Skate sounds on screen."},
+        {"World collision:", "Developer: applies the best world collision switches."},
+        {"Compare: plain GTA", "Developer: temporarily uses plain GTA collision to compare."},
+        {"Mark this spot", "Developer: saves your position, place and facing as a test mark."},
+        {"Mark fixed", "On when this spot works now; fixed marks are skipped unless Show fixed marks is on."},
+        {"Mark", "Left/Right: previous/next test mark."},
+        {"Go to this mark", "Developer: teleports you to the selected test mark."},
+        {"Show fixed marks", "Developer: includes marks already marked fixed when browsing."},
+        {"Delete this mark", "Removes the selected mark (closes the menu)."},
+        {"Reset all settings", "Developer: every setting back to the GTAxSkate defaults."},
+        {"Reset collectibles", "Developer: hides every collectible again and locks their shop parts."},
+        {"Collectibles:", "Sets the GPS to the nearest collectible you found but did not reach yet."},
+        {"Collectible", "Developer: Left/Right chooses a collectible to check."},
+        {"Go to this collectible", "Developer: travels to the selected collectible."},
+        {"Skate Shop seller", "Developer: saves where you stand as the Skate Shop seller's spot."},
+        {"Reset this page", "Puts every setting on this page back to its default."},
+        {"Show beginner", "Displays an on-screen card with the essential controls."},
+        {"Trigger", "Runs the action."},
+        {"GTA - Shift", "Standard keyboard layout: Shift push, Space pop, arrow tricks."},
+        {"Twin Stick", "Twin-stick keyboard layout: WASD and IJKL, Space pushes."},
+        {"Mouse Flick", "Mouse layout: hold CapsLock for tricks."},
+        {"Arcade", "Arcade layout: Space ollie, U/O flips, H/L shoves."},
+        {"Save my personal", "Saves the current key bindings as your personal set."},
+        {"Restore my personal", "Applies your saved personal key bindings."},
+        {"Restore bindings", "Restores the key bindings you had before presets."},
     };
     for (Page& page : pages) for (Item& item : page.items) {
         const std::string target = destination(page, item);
@@ -4752,8 +4863,13 @@ std::vector<menu::Page> MenuPages(Session& s) {
             const bool duplicate = !item.key.empty() && std::any_of(out.items.begin(), out.items.end(),
                 [&](const Item& previous) { return previous.key == item.key; });
             if (!duplicate) {
-                if (item.help.empty())
+                if (item.help.empty() && !item.key.empty())
                     if (const auto h = help.find(item.key); h != help.end()) item.help = h->second;
+                if (item.help.empty() && item.key.empty() && item.kind != menu::Kind::Key)
+                    for (const auto& [prefix, text] : labelHelp)
+                        if (item.label.rfind(prefix, 0) == 0) { item.help = text; break; }
+                if (item.help.empty() && item.kind == menu::Kind::Key)
+                    item.help = "The keyboard key for: " + item.label + ".";
                 out.items.push_back(std::move(item));
             }
             break;
@@ -4764,7 +4880,7 @@ std::vector<menu::Page> MenuPages(Session& s) {
     // that match no group follow under "More".
     using Groups = std::vector<std::pair<const char*, std::vector<const char*>>>;
     const std::map<std::string, Groups> groups = {
-        {"Skating", {{"Basics", {"Skate on", "Stance", "Difficulty"}},
+        {"Skate", {{"Basics", {"Skate on", "Stance", "Difficulty"}},
                      {"Board feel", {"TruckTightness", "WheelHardness", "Pop", "GrindPop", "HippieJump"}},
                      {"Style and emotes", {"Posture", "RidingStyle", "EmoteUp", "EmoteDown", "EmoteLeft", "EmoteRight"}}}},
         {"Board", {{"Look", {"WheelGlow", "WheelGlowColour", "BoardMaterial"}},
@@ -4772,24 +4888,27 @@ std::vector<menu::Page> MenuPages(Session& s) {
                    {"Board shop", {"BoardShop", "WheelsFromPaint"}}}},
         {"Camera", {{"Views", {"CameraView", "CameraRemember", "Camera", "CameraFovScale"}},
                     {"Cinematic camera (R)", {"CinemaFilter", "FilmerFilter", "FilmFilterStrength"}},
-                    {"Replay (tap Back)", {"Replay", "ReplaySeconds", "Replay:"}}}},
+                    {"Instant replay and saved replays", {"Replay", "ReplaySeconds", "Replay:", "ReplayHudStyle", "ReplayVehicles", "ReplayPeds"}}}},
         {"Controls", {{"Tutorial", {"Show beginner controls guide"}},
                       {"Keyboard", {"Keyboard", "PutAwayHoldMs"}},
                       {"Controller buttons", {"MenuButton", "GunButton", "AimButton", "FireButton", "BackwardsManChord"}},
                       {"Missions", {"BoardActionInMissions"}}}},
-        {"HUD", {{"On screen", {"SkateHud", "Hud", "TrickAnalyzer", "KeyboardHints", "ReplayHudStyle"}},
-                 {"Hall of Meat", {"HallOfMeat", "Show records"}}}},
-        {"World", {{"World collision", {"World collision:", "Compare: plain GTA", "Mark this spot", "DetailedStairs", "StepRails", "TrackRails", "ObjectRails",
-                                        "TubeRails", "VisualRails", "RailTops", "CurbBevels", "HighResParks", "VisibleRailings", "UnflaggedStairs", "DynamicWorld", "Reset all settings"}},
-                   {"Test marks", {"Mark", "Go to this mark", "Show fixed marks", "Delete this mark"}},
-                   {"What the board hits", {"VehiclePush", "ObjectPush", "VehicleDamage", "BoardScratches"}},
-                   {"People", {"PedsSurvive", "PedLaunch", "PedBumpImpulse", "Injuries"}},
-                   {"On foot", {"GtaDelegation", "SwimDepth", "BoardAim", "Stamina"}},
-                   {"Build a park", {"Object dropper"}},
-                   {"GPS", {"GPS", "GpsWhileSkating", "SkateSpots"}},
-                   {"Collectibles", {"Collectibles", "Collectibles:"}}}},
-        {"Audio and radio", {{"Radio", {"SkateRadio", "RadioControls"}},
-                             {"Skate sound", {"AudioGtaGainDb", "AudioMasterGain", "AudioOutput"}}}},
+        {"HUD", {{"On screen", {"SkateHud", "Hud", "TrickAnalyzer", "KeyboardHints"}},
+                 {"Hall of Meat", {"HallOfMeat"}}}},
+        {"Progress", {{"Collectibles", {"Collectibles", "Collectibles:"}},
+                      {"Records board", {"Show records"}},
+                      {"On the map", {"SkateSpots"}}}},
+        {"World", {{"What the board hits", {"DynamicWorld", "VehiclePush", "ObjectPush", "VehicleDamage", "BoardScratches"}},
+                   {"People and injuries", {"PedsSurvive", "PedLaunch", "PedBumpImpulse", "Injuries"}},
+                   {"On foot, swimming and aim", {"GtaDelegation", "SwimDepth", "BoardAim", "Stamina"}}}},
+        {"GPS", {{"GPS", {"GPS", "GpsWhileSkating"}}}},
+        {"Audio", {{"Radio while skating", {"SkateRadio", "RadioControls"}},
+                   {"Skate sound mix", {"AudioGtaGainDb", "AudioMasterGain", "AudioOutput"}},
+                   {"Voice lines", {"BailPain", "GetUpSpeech", "NearMissSpeech"}}}},
+        {"Collision switches", {{"Collision", {"World collision:", "Compare: plain GTA", "CollisionView", "CollisionViewRange"}},
+                                {"Switches", {"DetailedStairs", "StepRails", "TrackRails", "ObjectRails", "TubeRails", "VisualRails", "RailTops",
+                                              "CurbBevels", "HighResParks", "VisibleRailings", "UnflaggedStairs"}}}},
+        {"Test marks", {{"Test marks", {"Mark this spot", "Mark", "Go to this mark", "Show fixed marks", "Delete this mark"}}}},
     };
     for (Page& page : sorted) {
         const auto found = groups.find(page.title);
@@ -4815,6 +4934,19 @@ std::vector<menu::Page> MenuPages(Session& s) {
             for (Item& item : rest) out.push_back(std::move(item));
         }
         page.items = std::move(out);
+    }
+    // "Reset this page" on every page that has settings of its own (U3); it keeps the menu open.
+    for (Page& page : sorted) {
+        const bool settings = std::any_of(page.items.begin(), page.items.end(), [](const Item& item) {
+            return !item.key.empty() && item.kind != menu::Kind::Link;
+        });
+        if (!settings) continue;
+        const std::string title = page.title;
+        auto reset = Helped(Action("Reset this page", [title] { menu::ResetPage(title); }),
+                            "Puts every setting on this page back to its default.");
+        reset.keepOpen = true;
+        page.items.push_back(menu::Heading("This page"));
+        page.items.push_back(std::move(reset));
     }
     return sorted;
 

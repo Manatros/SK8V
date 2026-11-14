@@ -693,7 +693,7 @@ void Navigate() {
     } else if (it.kind == Kind::Action) {
         if (accept) {
             Beep("SELECT");
-            g_open = false;  // actions act on the game: give the controls back first
+            if (!it.keepOpen) g_open = false;  // actions act on the game: give the controls back first
             if (it.run) it.run();
         }
     } else if (it.kind == Kind::Chord || it.kind == Kind::Key) {
@@ -704,6 +704,21 @@ void Navigate() {
     }
 }
 }  // namespace
+
+void ResetPage(const std::string& pageTitle) {
+    int changed = 0;
+    for (Page& page : g_pages) {
+        if (page.title != pageTitle) continue;
+        for (Item& it : page.items) {
+            if (it.key.empty() || (it.kind != Kind::Flag && it.kind != Kind::Number && it.kind != Kind::Choice && it.kind != Kind::Chord)) continue;
+            if (ReadIni(it) == it.def) continue;
+            Commit(it, it.def);
+            ++changed;
+        }
+        break;
+    }
+    Status(changed ? pageTitle + ": " + std::to_string(changed) + " setting(s) reset to default." : pageTitle + ": already at the defaults.");
+}
 
 void Start(const std::wstring& ini, std::vector<Page> pages, std::function<unsigned()> padButtons, LogFn log) {
     g_ini = ini, g_pages = std::move(pages), g_pad = std::move(padButtons), g_log = log;

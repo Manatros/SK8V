@@ -85,6 +85,38 @@ int wmain(int argc, wchar_t** argv) {
     menu::Commit(menu::g_pages[0].items[0], menu::g_pages[0].items[0].def);
     assert(menu::ReadIni(menu::g_pages[0].items[0]) == "0");
 
+    // Developer gate (B136): the page and its link on the parent follow the predicate.
+    bool dev = false;
+    std::vector<menu::Page> gated = pages;
+    gated[3].visible = [&] { return dev; };
+    menu::Start(ini, gated, {}, nullptr);
+    assert(menu::g_top.size() == 2);
+    assert(!menu::PageShown(menu::g_pages[3]) && !menu::Shown(menu::g_pages[1].items[1]));
+    assert(menu::Rows(menu::g_pages[1].items).size() == 1);
+    dev = true;
+    assert(menu::PageShown(menu::g_pages[3]) && menu::Shown(menu::g_pages[1].items[1]));
+    assert(menu::Rows(menu::g_pages[1].items).size() == 2);
+
+    // Reset this page: only the keyed rows of that page return to their defaults.
+    menu::Start(ini, pages, {}, nullptr);
+    WritePrivateProfileStringW(L"Preset.User", nullptr, nullptr, ini.c_str());
+    menu::Commit(menu::g_pages[0].items[0], "1");   // Skating: HoldFakie
+    menu::Commit(menu::g_pages[2].items[0], "1.5"); // Skate physics: Grip
+    assert(menu::ReadIni(menu::g_pages[0].items[0]) == "1" && menu::ReadIni(menu::g_pages[2].items[0]) == "1.5");
+    menu::ResetPage("Skating");
+    assert(menu::ReadIni(menu::g_pages[0].items[0]) == "0");
+    wchar_t resetValue[32]{};
+    GetPrivateProfileStringW(L"SkateV", L"HoldFakie", L"x", resetValue, 32, ini.c_str());
+    assert(std::wstring(resetValue) == L"0");
+    assert(menu::ReadIni(menu::g_pages[2].items[0]) == "1.5");  // other pages untouched
+    menu::ResetPage("No such page");  // no crash
+
+    // Every row has help text (links fall back to the page hint).
+    for (const auto& page : menu::g_pages)
+        for (const auto& item : page.items) assert(!menu::ItemHelp(item).empty());
+    for (const char* title : {"Skate", "Progress", "Audio", "Skating", "Developer", "World", "Advanced"})
+        assert(std::string(menu::PageHint(title)) != "Back or F10 closes");
+
     std::wcout << L"menu pages tests passed\n";
     return 0;
 }

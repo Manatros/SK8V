@@ -37,6 +37,7 @@ struct Item {
     std::string help;                                // shown in the box under the rows when selected
     std::string target;                              // Link: the title of the page it opens
     std::function<bool()> visible;                   // unset: always; hidden rows keep their setting
+    bool keepOpen = false;                           // Action: the menu stays open when it runs
 };
 
 // A keyboard key: Accept waits for the next key (Esc cancels) and hands its
@@ -203,26 +204,32 @@ constexpr const char* kHint = "Left/Right change   Back: categories   * restart 
 inline std::string PageHint(const std::string& title) {
     static const std::pair<const char*, const char*> kHints[] = {
         {"Presets", "GTAxSkate is the recommended default. SK8V, RP, User and Custom apply other complete setups. Keyboard bindings stay personal."},
+        {"Skate", "Skate on or off, stance, difficulty, riding style, posture, board feel and emotes."},
         {"Board", "How the board looks and the marks it leaves; the board shop and the board in your hand."},
-        {"Controls", "Keyboard, controller buttons and the keyboard key list."},
-        {"World", "What the board hits (cars, objects), people, swimming, object dropper and GPS. Enable 'Developer options' on Advanced for collision tuning."},
-        {"Audio and radio", "The radio while skating and the Skate sound mix."},
-        {"Advanced", "Fine tuning in sub-pages: physics, peds and vehicles, Hall of Meat, board in hand, developer."},
+        {"Controls", "Beginner guide, keyboard and mouse, controller buttons and the keyboard key list."},
+        {"Progress", "Collectibles, the records board and skate spot blips on the map."},
+        {"World", "What the board hits (cars, objects), people and injuries, swimming, object dropper and GPS."},
+        {"Audio and radio", "The radio while skating, the Skate sound mix and the skater's voice lines."},
+        {"Advanced", "Fine tuning in sub-pages: physics, HUD, peds and vehicles, Hall of Meat, BackwardsMan. Developer needs 'Developer options' on."},
         {"World and roleplay", "Gentle pedestrian collisions, vehicle damage, injuries and GTA integration."},
-        {"Camera", "Choose the starting view, mouse camera and cinematic look."},
+        {"Camera", "Standard view, camera height, film looks, instant replay and saved replays."},
         {"Keyboard keys", "Choose a layout or press Enter on an action to bind its key."},
         {"GPS", "GPS routes to board shops and skate spots."},
+        {"Object dropper", "Build a park: drop ramps, rails and benches around you."},
+        {"Collision switches", "Developer: world collision and grind-rail switches, collision view."},
+        {"Test marks", "Developer: save, visit and review test positions."},
+        {"Collectible tests", "Developer: travel to collectibles, seller spot and collectible reset."},
         {"Controller", "Controller button combinations, missions and keyboard on/off."},
         {"HUD", "What Skate shows on screen: trick display, key list, Hall of Meat."},
         {"Skate physics", "Fine tuning of pushing, steering, grip and the Skate rules."},
-        {"Hall of Meat details", "Hall of Meat panels, x-ray and skater voice lines."},
+        {"Hall of Meat details", "Hall of Meat panels and the broken-bone x-ray."},
         {"Board in hand", "Where the carried board sits in the hand."},
-        {"Developer", "Diagnostics and test switches. Leave these alone unless testing."},
+        {"Developer", "Diagnostics, collision switches and test marks. Leave these alone unless testing."},
         {"Skating", "Skate on or off, stance, difficulty, how the board feels, posture and emotes."},
         {"Hall of Meat and records", "Hall of Meat bail records and the records display."},
         {"Peds and vehicles", "Collision, launch and dent settings for pedestrians and vehicles."},
         {"BackwardsMan", "BackwardsMan trick model, direction and remount."},
-        {"Audio", "Skate sound mix, played through GTA's audio."},
+        {"Audio", "Radio while skating, Skate sound mix and the skater's voice lines."},
         {"Controller and HUD", "Controller chords and the on-screen HUD."},
         {"Dev", "Developer options. Leave these alone unless testing."},
     };
@@ -250,6 +257,8 @@ bool SaveCustomPreset();
 bool RestoreCustomPreset();
 // Opens the menu straight on the page titled `title` (closes it when open).
 void OpenPage(const std::string& title);
+// Puts every keyed row on the page titled `title` back to its default (INI included).
+void ResetPage(const std::string& pageTitle);
 bool IsOpen();
 // The INI key of the selected row on an open settings page ("" otherwise).
 std::string SelectedKey();

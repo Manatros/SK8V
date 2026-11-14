@@ -103,25 +103,35 @@ int wmain(int argc, wchar_t** argv) {
     }
     Session session{};
     auto pages = MenuPages(session);
-    auto dev = std::find_if(pages.begin(), pages.end(), [](const auto& page) { return page.title == "World"; });
+    auto dev = std::find_if(pages.begin(), pages.end(), [](const auto& page) { return page.title == "Collision switches"; });
     assert(dev != pages.end());
-    assert(dev->items[0].kind == menu::Kind::Heading && dev->items[0].label == "World collision");
-    assert(menu::Label(dev->items[1]) == "World collision: best");
-    auto& compare = dev->items[2];
+    assert(dev->items[0].kind == menu::Kind::Heading && dev->items[0].label == "Collision");
+    assert(dev->items[1].key == "CollisionView" && dev->items[2].key == "CollisionViewRange");
+    assert(menu::Label(dev->items[3]) == "World collision: best");
+    auto& compare = dev->items[4];
     assert(compare.label == "Compare: plain GTA collision" && compare.kind == menu::Kind::Flag && compare.key.empty());
-    assert(dev->items[3].label.find("Mark this spot") == 0);
-    for (unsigned i = 0; i < std::size(kWorldSwitches); ++i) {
-        assert(dev->items[4 + i].key == kWorldSwitches[i].key);
-        assert(dev->items[4 + i].help.find("best:") != std::string::npos);
+    assert(dev->items[5].kind == menu::Kind::Heading && dev->items[5].label == "Switches");
+    const size_t switchBase = 6;
+    for (unsigned i = 0, colIdx = 0; i < std::size(kWorldSwitches); ++i) {
+        if (std::string(kWorldSwitches[i].key) == "DynamicWorld") continue;
+        assert(dev->items[switchBase + colIdx].key == kWorldSwitches[i].key);
+        assert(dev->items[switchBase + colIdx].help.find("best:") != std::string::npos);
+        ++colIdx;
     }
-    assert(dev->items[4 + std::size(kWorldSwitches)].label == "Reset all settings to GTAxSkate defaults");
-    // Test marks (design 2026-10-31-mark-travel): own section under World collision.
-    const size_t marksAt = 5 + std::size(kWorldSwitches);
-    assert(dev->items[marksAt].kind == menu::Kind::Heading && dev->items[marksAt].label == "Test marks");
+    auto devRoot = std::find_if(pages.begin(), pages.end(), [](const auto& page) { return page.title == "Developer"; });
+    assert(devRoot != pages.end() && devRoot->visible);
+    assert(std::any_of(devRoot->items.begin(), devRoot->items.end(), [](const menu::Item& it) {
+        return it.label == "Reset all settings to GTAxSkate defaults";
+    }));
+    // Test marks (design 2026-10-31-mark-travel): own sub-page under Developer.
+    auto marksPage = std::find_if(pages.begin(), pages.end(), [](const auto& page) { return page.title == "Test marks"; });
+    assert(marksPage != pages.end());
+    assert(marksPage->items[0].kind == menu::Kind::Heading && marksPage->items[0].label == "Test marks");
+    assert(marksPage->items[1].label.find("Mark this spot") == 0);
     const char* markRows[] = {"Mark", "Go to this mark", "Mark fixed", "Show fixed marks", "Delete this mark"};
     for (unsigned i = 0; i < std::size(markRows); ++i) {
-        assert(dev->items[marksAt + 1 + i].label == markRows[i]);
-        assert(dev->items[marksAt + 1 + i].key.empty());  // never saved to the INI or a preset
+        assert(marksPage->items[2 + i].label == markRows[i]);
+        assert(marksPage->items[2 + i].key.empty());  // never saved to the INI or a preset
     }
     unsigned nearbyRows = 0;
     for (const auto& page : pages) for (const auto& item : page.items)
@@ -130,26 +140,30 @@ int wmain(int argc, wchar_t** argv) {
     g_config = saved;
     compare.apply("1");
     assert(g_plainGtaCompare && !g_config.stepRails && !g_config.highResParks);
-    assert(menu::Label(dev->items[1]) == "World collision: COMPARE (plain GTA)");
+    assert(menu::Label(dev->items[3]) == "World collision: COMPARE (plain GTA)");
     compare.apply("0");
     assert(!g_plainGtaCompare && !g_config.stepRails && !g_config.highResParks);
     HideUnavailable(pages);
     g_config.devOptions = false;
-    assert(!dev->items[4].visible()); // DetailedStairs is technical.
-    assert(!dev->items[5].visible()); // StepRails is technical.
-    assert(!dev->items[6].visible()); // TrackRails is technical.
-    assert(!dev->items[7].visible()); // ObjectRails is technical.
-    assert(!dev->items[8].visible()); // TubeRails is technical.
+    assert(!devRoot->visible() && !dev->visible() && !marksPage->visible());
+    assert(!dev->items[switchBase + 0].visible()); // DetailedStairs is technical.
+    assert(!dev->items[switchBase + 1].visible()); // StepRails is technical.
+    assert(!dev->items[switchBase + 2].visible()); // TrackRails is technical.
+    assert(!dev->items[switchBase + 3].visible()); // ObjectRails is technical.
+    assert(!dev->items[switchBase + 4].visible()); // TubeRails is technical.
     g_config.devOptions = true;
-    assert(dev->items[4].visible() && dev->items[5].visible() && dev->items[6].visible() && dev->items[7].visible() && dev->items[8].visible());
+    assert(devRoot->visible() && dev->visible() && marksPage->visible());
+    assert(dev->items[switchBase + 0].visible() && dev->items[switchBase + 1].visible() &&
+           dev->items[switchBase + 2].visible() && dev->items[switchBase + 3].visible() &&
+           dev->items[switchBase + 4].visible());
     WritePrivateProfileStringW(L"SkateV", L"ObjectPush", L"0.75", ini.c_str());
     menu::Start(ini, pages, {}, nullptr);
     g_config.objectPush = 0.75f;
-    dev->items[1].run();
+    dev->items[3].run();
     assert(WorldAtBest(g_config) && !g_plainGtaCompare && g_config.objectPush == 0.75f);
     g_config = saved;
     compare.apply("1");
-    dev->items[1].run();
+    dev->items[3].run();
     assert(WorldAtBest(g_config) && !g_plainGtaCompare);
     std::cout << "world settings tests passed; local test baseline=" << kTestWorldBaseline << "\n";
 }
