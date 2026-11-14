@@ -1239,6 +1239,33 @@ fn replace_park(tris: &mut Vec<Tri>, stairs: &[Tri], visible: &[[[f32; 3]; 3]], 
             d > HOVER_OFF && d <= HOVER_REACH && (q - v3(near[k][0])).dot(normal(near[k])) > 0.0
         })
     };
+    // Cut remnants (`area <= 0.25 m2`) that poke through or lie inverted behind
+    // an owned upward visible floor/ramp (1114-3 sloped bank shard through flat
+    // floor, 1105-4/9 inverted cut remnants). Excludes vertical risers (n.z < 0.20)
+    // and never touches uncut `neighbours`.
+    let protrudes_or_inverted_on_owned = |piece: &[[f32; 3]; 3]| -> bool {
+        let p = piece.map(v3);
+        let area = (p[1] - p[0]).cross(p[2] - p[0]).length() / 2.0;
+        if area > 0.25 { return false; }
+        let n = normal(piece);
+        let inverted = n.z < -0.25;
+        if !inverted && n.z < 0.20 { return false; }
+        let z_tol = if inverted { 0.30 } else { 0.08 };
+        let min_un_z = if inverted { 0.30 } else { 0.70 };
+        piece_points(piece).iter().all(|&q| {
+            let covers = |v: &[[f32; 3]; 3]| {
+                let un = normal(v);
+                if un.z < min_un_z || is_sliver(v) { return false; }
+                let (a, b, e) = (v3(v[0]), v3(v[1]), v3(v[2]));
+                let d = (q - a).dot(un);
+                if d.abs() > z_tol { return false; }
+                let s = q - un * d;
+                [(a, b), (b, e), (e, a)].iter().all(|&(g, h)| (h - g).cross(s - g).dot(un) >= -1e-4)
+            };
+            vis_grid.at(q).iter().any(|&k| covers(&used[k as usize].v))
+                || chamfer_grid.at(q).iter().any(|&k| covers(&chamfers[k as usize].v))
+        })
+    };
     // Snapping can squeeze a piece into a sliver: those go too (they broke the
     // lip test of a park curb, 2026-10-26).
     let changed: Vec<(usize, Vec<[[f32; 3]; 3]>)> = changed.into_iter().map(|(i, pieces)| {
@@ -1253,6 +1280,7 @@ fn replace_park(tris: &mut Vec<Tri>, stairs: &[Tri], visible: &[[[f32; 3]; 3]], 
                 area >= PIECE_AREA && area / longest >= PIECE_WIDTH && !on_owned(t, chord_n, true) && !hovering(t, chord_n)
                     && !under_sloped_top(t, chord_n)
                     && !(2.0 * area / longest < REMNANT_WIDTH && on_owned(t, chord_n, false))
+                    && !protrudes_or_inverted_on_owned(t)
             })
             .collect();
         (i, kept)
@@ -2651,5 +2679,25 @@ mod tests {
         for f in &floor {
             assert!(gta.iter().any(|t| t.v == f.v), "flat floor over buried skirt stays whole: {:?}", f.v);
         }
+    }
+
+    #[test]
+    fn sloped_cut_remnant_protruding_through_owned_floor_is_dropped() {
+        let (x0, y0) = (-1350.0f32, -1440.0f32);
+        let mut gta: Vec<Tri> = square(x0 - 2.0, x0 + 5.0, y0 - 2.0, y0 + 5.0, 3.31)
+            .into_iter()
+            .map(|v| Tri { v, material: 1 })
+            .collect();
+        // Sloped GTA bank shard (~0.06 m2, n.z ~ 0.35) poking 1 cm through the flat floor.
+        gta.push(Tri {
+            v: [[x0 + 1.0, y0 + 1.0, 3.29], [x0 + 1.35, y0 + 1.0, 3.29], [x0 + 1.0, y0 + 1.05, 3.32]],
+            material: 1,
+        });
+        let vis = square(x0, x0 + 3.0, y0, y0 + 3.0, 3.31);
+        let out = run(&mut gta, &[], &vis);
+        let sloped_cut: Vec<_> = out.added.iter().zip(&out.cut)
+            .filter(|(t, c)| **c && t.v.iter().any(|p| (p[2] - 3.31).abs() > 1e-3))
+            .collect();
+        assert!(sloped_cut.is_empty(), "sloped cut shard inside owned visible floor must drop: {sloped_cut:?}");
     }
 }

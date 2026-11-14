@@ -672,6 +672,8 @@ fn build_area_rules(center: Vec3, tris: impl Iterator<Item = ([[f32; 3]; 3], u32
     // (stacked rim lines under a bowl's cap, a coping under a deck) go.
     let mut found = off_buried(found, &gta, &rail_grid);
     join_along_edges(&mut found, &gta, &rail_grid);
+    crate::rails::dedupe_metres(&mut found);
+    crate::rails::join_ends(&mut found);
     let mut tracks = off_buried(tracks, &gta, &rail_grid);
     // Fewer points on the final lines (the cuts and the two track edges
     // carry many collinear ones): Skate's grind index holds 65,535 segments
@@ -684,10 +686,11 @@ fn build_area_rules(center: Vec3, tris: impl Iterator<Item = ([[f32; 3]; 3], u32
     // stairs, 2026-10-24 bake). Track lines are never noses: at a junction
     // the edge lines of neighbouring tracks at other heights climb like a
     // flight (design 2026-11-03-metro-rail-snap), so they join afterwards.
-    let (found, flight_noses) = crate::rails::off_flight_noses_split(found);
+    let (mut found, flight_noses) = crate::rails::off_flight_noses_split(found);
     noses.extend(flight_noses);
+    // Drop short fragments (< MIN_PIECE) left by post-dedupe cuts and flight splits.
+    found.retain(|r| r.windows(2).map(|w| w[0].distance(w[1])).sum::<f32>() >= MIN_PIECE);
     // StepRails: every nose grindable (Manatros 2026-10-24: some prefer it).
-    let mut found = found;
     if crate::live::STEP_RAILS.load(std::sync::atomic::Ordering::Relaxed) {
         found.append(&mut noses);
     }

@@ -52,8 +52,8 @@ const SUPPORT_IN: f32 = 8.0;
 const MIN_TURN_COS: f32 = -0.342_02;
 /// Straightest continuation threshold at T/X intersections in `chain` (~45 degrees).
 const BRANCH_STRAIGHT_COS: f32 = 0.707_107;
-/// Maximum vertical pitch jump across one chained or corner-joined joint (35 degrees).
-const MAX_PITCH_JUMP: f32 = 35.0 * std::f32::consts::PI / 180.0;
+/// Maximum vertical pitch jump across one chained or corner-joined joint (40 degrees).
+const MAX_PITCH_JUMP: f32 = 40.0 * std::f32::consts::PI / 180.0;
 /// SkateV: a face across the edge rising more than about one degree above
 /// the walkable face's plane makes the edge concave (sin 1 degree).
 const CONCAVE_SIN: f32 = 0.017_452;
@@ -880,7 +880,7 @@ fn join_ends_inner(rails: &mut Vec<Vec<Vec3>>, gap: f32, bridge: &dyn Fn(Vec3, V
     let min_dot = 35.0f32.to_radians().cos();
     let tier_dot = 25.0f32.to_radians().cos();
     let corner_dot = 105.0f32.to_radians().cos();
-    let max_pitch_jump = 35.0f32.to_radians();
+    let max_pitch_jump = 40.0f32.to_radians();
     let pitch_of = |v: Vec3| v.z.atan2(Vec3::new(v.x, v.y, 0.).length());
     let yaw_dot = |a: Vec3, b: Vec3| {
         let axy = Vec3::new(a.x, a.y, 0.).normalize_or_zero();
@@ -913,7 +913,7 @@ fn join_ends_inner(rails: &mut Vec<Vec<Vec3>>, gap: f32, bridge: &dyn Fn(Vec3, V
                     let h_align = yaw_dot(direction, incoming);
                     if distance>join_gap {continue;}
                     if (pitch_of(direction) - pitch_of(incoming)).abs() > max_pitch_jump { continue; }
-                    let is_corner = alignment < min_dot;
+                    let is_corner = h_align < min_dot;
                     if is_corner {
                         // Touching corners across a tile/slice boundary (<= 3.5 cm) or
                         // geometry-backed corner vertices (<= 14 cm) continue as one rail,
@@ -931,7 +931,7 @@ fn join_ends_inner(rails: &mut Vec<Vec<Vec3>>, gap: f32, bridge: &dyn Fn(Vec3, V
                     // the next piece starts a little to the inside.
                     let mean=(direction+incoming).normalize_or_zero();
                     let delta=q-p; let along=delta.dot(mean);
-                    if along<0.0 {
+                    if along<0.0 && !(is_corner && distance <= 0.035) {
                         if is_corner { continue; }
                         let lateral=(delta-mean*along).length();
                         let lengths=polyline_len(r).min(polyline_len(&rails[j]));
@@ -967,8 +967,16 @@ fn join_ends_inner(rails: &mut Vec<Vec<Vec3>>, gap: f32, bridge: &dyn Fn(Vec3, V
                     // edges 12 mm apart across a tile border, the connector
                     // along the border).
                     if distance>=0.03 {
-                        let connector=(q-p)/distance;
-                        if connector.dot(direction)<min_dot || connector.dot(incoming)<min_dot {continue;}
+                        let d_xy = (q - p).truncate().length();
+                        let dz = (q.z - p.z).abs();
+                        if distance <= 0.22 && (0.04..=0.20).contains(&dz) && d_xy >= 0.04 {
+                            if yaw_dot(q - p, direction) < min_dot || yaw_dot(q - p, incoming) < min_dot {
+                                continue;
+                            }
+                        } else {
+                            let connector=(q-p)/distance;
+                            if connector.dot(direction)<min_dot || connector.dot(incoming)<min_dot {continue;}
+                        }
                     }
                     let tier: u8 = if alignment >= tier_dot { 0 } else { 1 };
                     candidates.push((tier,distance,-alignment,i,side,j,other));
@@ -2512,4 +2520,32 @@ mod tests {
         assert_eq!(at_top.len(), 2, "freestanding handrail keeps its edges despite wall 18 cm behind open air: {rails:?}");
     }
 
+    #[test]
+    fn steep_36_degree_stair_joint_and_touching_corner_and_vertical_step_join() {
+        let v = Vec3::new;
+        // 1. 36.2 degree stair flight meeting a flat landing with a 10 cm gap.
+        let dz = 2.0 * 36.2f32.to_radians().tan();
+        let mut r_steep = vec![
+            vec![v(-2.0, 0.0, 0.0), v(0.0, 0.0, 0.0)],
+            vec![v(0.10, 0.0, 0.07), v(2.10, 0.0, 0.07 + dz)],
+        ];
+        join_ends(&mut r_steep);
+        assert_eq!(r_steep.len(), 1, "36.2 deg stair flight joins flat landing: {r_steep:?}");
+
+        // 2. Touching 90-degree corner with 1 cm overshoot (along < 0).
+        let mut r_corner = vec![
+            vec![v(0.0, 0.0, 0.0), v(2.01, 0.0, 0.0)],
+            vec![v(2.00, 0.01, 0.0), v(2.00, 2.00, 0.0)],
+        ];
+        join_ends(&mut r_corner);
+        assert_eq!(r_corner.len(), 1, "touching 90-deg corner joins despite tiny overshoot: {r_corner:?}");
+
+        // 3. Visible-to-finder 12 cm vertical step over 12 cm horizontal gap.
+        let mut r_step = vec![
+            vec![v(0.0, 0.0, 0.0), v(2.0, 0.0, 0.0)],
+            vec![v(2.12, 0.0, 0.12), v(4.0, 0.0, 0.12)],
+        ];
+        join_ends(&mut r_step);
+        assert_eq!(r_step.len(), 1, "12 cm vertical transition over 12 cm run joins cleanly: {r_step:?}");
+    }
 }

@@ -881,6 +881,8 @@ pub fn clean_static(tris: &mut Vec<Tri>, stairs: &[bool], tubes: &[(svwc::bounds
     // Switchable variants (steps, unflagged ramps) neither go nor cover.
     let tag = |t: &Tri| cleaned.tags.get(&svwc::surfaces::key(&t.v)).copied().unwrap_or(0);
     let switchable = |t: &Tri| tag(t) & (STEP_TAG | URAMP_TAG) != 0;
+    svwc::clean::drop_tilted_slivers(tris, |t| switchable(t) || (tag(t) & (RAMP_TAG | USTEP_TAG)) != 0);
+    svwc::clean::drop_road_seam_walls(tris);
     census.hidden = svwc::clean::drop_hidden_layers(tris, |t| !switchable(t), |t| !switchable(t));
     // The parks' visible surfaces after every cleanup pass: the repeat and
     // coplanar-layer passes dropped some of them as layers of the visible

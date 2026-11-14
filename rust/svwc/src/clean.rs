@@ -243,6 +243,169 @@ pub fn drop_hidden_layers(tris: &mut Vec<Tri>, droppable: impl Fn(&Tri) -> bool,
     before - tris.len()
 }
 
+/// Drops near-vertical asphalt seam walls left where two GTA road tiles overlap
+/// at slightly different heights (e.g. 1029-M4, 1.5–22 cm), and replaces each
+/// removed seam wall with a 0.35 m smooth asphalt ramp (`n.z > 0.883`) so there
+/// is neither an invisible curb nor a sharp drop-off. Real concrete sidewalk
+/// curbs (`1110-11..13`, material 1/2) and bridge edges are left untouched.
+pub fn drop_road_seam_walls(tris: &mut Vec<Tri>) -> usize {
+    let is_road = |m: u8| matches!(m, 4 | 5 | 6 | 26 | 30);
+    let normals: Vec<[f32; 3]> = tris.iter().map(unit_normal).collect();
+    let mut road_grid: HashMap<(i32, i32), Vec<usize>> = HashMap::default();
+    for (i, t) in tris.iter().enumerate() {
+        if !is_road(t.material) || normals[i][2] <= 0.90 || !t.v.iter().flatten().all(|x| x.is_finite()) {
+            continue;
+        }
+        for cell in cells(t) {
+            road_grid.entry(cell).or_default().push(i);
+        }
+    }
+    if road_grid.is_empty() {
+        return 0;
+    }
+    let road_z_near = |x: f32, y: f32, target_z: f32, tol: f32| -> bool {
+        let cell = ((x / CELL).floor() as i32, (y / CELL).floor() as i32);
+        let Some(cands) = road_grid.get(&cell) else { return false };
+        cands.iter().any(|&j| {
+            floor_at(&tris[j], [x, y]).is_some_and(|z| (z - target_z).abs() <= tol)
+        })
+    };
+    let mut keep = vec![true; tris.len()];
+    let mut ramps: Vec<Tri> = Vec::new();
+    for (i, t) in tris.iter().enumerate() {
+        if !is_road(t.material) || normals[i][2].abs() >= 0.35 || !t.v.iter().flatten().all(|x| x.is_finite()) {
+            continue;
+        }
+        let z_min = t.v.iter().map(|p| p[2]).fold(f32::MAX, f32::min);
+        let z_max = t.v.iter().map(|p| p[2]).fold(f32::MIN, f32::max);
+        let dz = z_max - z_min;
+        if !(0.015..=0.22).contains(&dz) {
+            continue;
+        }
+        let h_len = (normals[i][0] * normals[i][0] + normals[i][1] * normals[i][1]).sqrt();
+        if h_len < 0.5 {
+            continue;
+        }
+        let nx = normals[i][0] / h_len;
+        let ny = normals[i][1] / h_len;
+        let ramp_w = (dz * 2.5).max(0.35);
+        let top_tol = (dz * 0.2).min(0.01);
+        let top_verts: Vec<[f32; 3]> = t.v.iter().copied().filter(|p| (z_max - p[2]).abs() <= top_tol).collect();
+        let mx = (t.v[0][0] + t.v[1][0] + t.v[2][0]) / 3.0;
+        let my = (t.v[0][1] + t.v[1][1] + t.v[2][1]) / 3.0;
+        let covered_at = |x: f32, y: f32| {
+            road_z_near(x - nx * 0.05, y - ny * 0.05, z_max, 0.04)
+                && road_z_near(x - nx * 0.05, y - ny * 0.05, z_min, 0.04)
+                && road_z_near(x + nx * 0.05, y + ny * 0.05, z_min, 0.04)
+                && road_z_near(x + nx * ramp_w, y + ny * ramp_w, z_min, 0.06)
+        };
+        if !covered_at(mx, my) { continue; }
+        if top_verts.len() == 2 {
+            let (a, b) = (top_verts[0], top_verts[1]);
+            let span_xy = ((b[0] - a[0]).powi(2) + (b[1] - a[1]).powi(2)).sqrt();
+            if span_xy < 0.05 || !covered_at(a[0], a[1]) || !covered_at(b[0], b[1]) {
+                continue;
+            }
+            keep[i] = false;
+            let c = [b[0] + nx * ramp_w, b[1] + ny * ramp_w, z_min];
+            let d = [a[0] + nx * ramp_w, a[1] + ny * ramp_w, z_min];
+            let mut push_up = |p0: [f32; 3], p1: [f32; 3], p2: [f32; 3]| {
+                let mut tri = Tri { v: [p0, p1, p2], material: t.material };
+                if unit_normal(&tri)[2] < 0.0 {
+                    tri.v.swap(1, 2);
+                }
+                ramps.push(tri);
+            };
+            push_up(a, b, c);
+            push_up(a, c, d);
+        } else {
+            // Lower triangle of a quad: drop only if its centroid & bottom vertices
+            // also sit inside the same overlap band.
+            let bot_verts: Vec<[f32; 3]> = t.v.iter().copied().filter(|p| (p[2] - z_min).abs() <= top_tol).collect();
+            if bot_verts.len() == 2 && covered_at(bot_verts[0][0], bot_verts[0][1]) && covered_at(bot_verts[1][0], bot_verts[1][1]) {
+                keep[i] = false;
+            }
+        }
+    }
+    let before = tris.len();
+    let mut k = 0;
+    tris.retain(|_| {
+        k += 1;
+        keep[k - 1]
+    });
+    let removed = before - tris.len();
+    tris.extend(ramps);
+    removed
+}
+
+/// Drops small isolated tilted floor slivers (`area <= 0.12 m²`, `n.z > 0.70`)
+/// lying on top of a large flat walkable floor (`area >= 0.50 m²`, `n.z > 0.96`)
+/// within `±0.12 m` vertically (e.g. `1114-1..2` live boardwalk shard). Preserves
+/// any facet welded to a steeper rising neighbour (`n.z < 0.85`).
+pub fn drop_tilted_slivers(tris: &mut Vec<Tri>, skip: impl Fn(&Tri) -> bool) -> usize {
+    let normals: Vec<[f32; 3]> = tris.iter().map(unit_normal).collect();
+    let tri_area = |t: &Tri| -> f32 {
+        let [a, b, c] = t.v;
+        let e1 = [b[0] - a[0], b[1] - a[1], b[2] - a[2]];
+        let e2 = [c[0] - a[0], c[1] - a[1], c[2] - a[2]];
+        let cr = [e1[1] * e2[2] - e1[2] * e2[1], e1[2] * e2[0] - e1[0] * e2[2], e1[0] * e2[1] - e1[1] * e2[0]];
+        0.5 * (cr[0] * cr[0] + cr[1] * cr[1] + cr[2] * cr[2]).sqrt()
+    };
+    let areas: Vec<f32> = tris.iter().map(tri_area).collect();
+    let mut floor_grid: HashMap<(i32, i32), Vec<usize>> = HashMap::default();
+    let quant = |p: [f32; 3]| [(p[0] * 1000.0).round() as i32, (p[1] * 1000.0).round() as i32, (p[2] * 1000.0).round() as i32];
+    let mut vtx_map: HashMap<[i32; 3], Vec<usize>> = HashMap::default();
+    for (i, t) in tris.iter().enumerate() {
+        if !t.v.iter().flatten().all(|x| x.is_finite()) { continue; }
+        for &p in &t.v {
+            vtx_map.entry(quant(p)).or_default().push(i);
+        }
+        if normals[i][2] > 0.96 && areas[i] >= 0.50 {
+            for cell in cells(t) {
+                floor_grid.entry(cell).or_default().push(i);
+            }
+        }
+    }
+    if floor_grid.is_empty() {
+        return 0;
+    }
+    let mut keep = vec![true; tris.len()];
+    for (i, t) in tris.iter().enumerate() {
+        if skip(t) || areas[i] > 0.12 || !(0.70..0.96).contains(&normals[i][2]) || !t.v.iter().flatten().all(|x| x.is_finite()) {
+            continue;
+        }
+        let c = [
+            (t.v[0][0] + t.v[1][0] + t.v[2][0]) / 3.0,
+            (t.v[0][1] + t.v[1][1] + t.v[2][1]) / 3.0,
+            (t.v[0][2] + t.v[1][2] + t.v[2][2]) / 3.0,
+        ];
+        let inset = t.v.map(|p| [p[0] + (c[0] - p[0]) * 0.02, p[1] + (c[1] - p[1]) * 0.02, p[2] + (c[2] - p[2]) * 0.02]);
+        let covered = inset.iter().all(|&q| {
+            let cell = ((q[0] / CELL).floor() as i32, (q[1] / CELL).floor() as i32);
+            floor_grid.get(&cell).is_some_and(|cands| {
+                cands.iter().any(|&j| j != i && floor_at(&tris[j], [q[0], q[1]]).is_some_and(|zj| (q[2] - zj).abs() <= 0.12))
+            })
+        });
+        if !covered { continue; }
+        // Preserve facets welded to a steeper rising ramp/curb neighbour.
+        let welded_to_riser = t.v.iter().any(|&p| {
+            vtx_map.get(&quant(p)).is_some_and(|adj| {
+                adj.iter().any(|&j| j != i && normals[j][2] < 0.85)
+            })
+        });
+        if !welded_to_riser {
+            keep[i] = false;
+        }
+    }
+    let before = tris.len();
+    let mut k = 0;
+    tris.retain(|_| {
+        k += 1;
+        keep[k - 1]
+    });
+    before - tris.len()
+}
+
 const CELL: f32 = 2.0;
 /// Solid floor at most this far under a foliage triangle's centroid: bushes
 /// and hedges (Rockford Hills hedges stand 3-4 m) reach higher than grass,
@@ -1585,5 +1748,39 @@ mod hidden_layer_tests {
         let dropped = drop_hidden_layers(&mut t, |_| true, |_| true);
         assert_eq!(dropped, 2, "only B goes (both its triangles); C was covered by B alone, A is 40 cm off: {t:?}");
         assert!(t.iter().any(|t| t.v[0][2] == 0.8), "C stays");
+    }
+
+    #[test]
+    fn road_seam_wall_between_overlapping_asphalt_is_smoothed_while_sidewalk_curb_stays() {
+        let asphalt = |x0: f32, x1: f32, y0: f32, y1: f32, z: f32| -> Vec<Tri> {
+            floor(x0, x1, y0, y1, z).into_iter().map(|t| Tri { material: 4, ..t }).collect()
+        };
+        let mut t = asphalt(0., 4., 0., 4., 1.00);
+        t.extend(asphalt(0., 2., 0., 4., 1.13));
+        // Vertical seam wall at x = 2.0 facing +X from z = 1.00 to 1.13.
+        t.push(Tri { v: [[2., 0., 1.00], [2., 4., 1.00], [2., 4., 1.13]], material: 4 });
+        t.push(Tri { v: [[2., 0., 1.00], [2., 4., 1.13], [2., 0., 1.13]], material: 4 });
+        let removed = drop_road_seam_walls(&mut t);
+        assert_eq!(removed, 2, "both seam wall triangles removed");
+        assert!(t.iter().any(|tri| {
+            let n = super::unit_normal(tri);
+            n[2] > 0.88 && n[2] < 0.99
+        }), "smooth 0.35 m asphalt transition ramp emitted");
+
+        // Concrete sidewalk curb (material 1) must stay untouched.
+        let mut curb = floor(0., 4., 0., 4., 1.00);
+        curb.extend(floor(0., 2., 0., 4., 1.13));
+        curb.push(Tri { v: [[2., 0., 1.00], [2., 4., 1.00], [2., 4., 1.13]], material: 1 });
+        curb.push(Tri { v: [[2., 0., 1.00], [2., 4., 1.13], [2., 0., 1.13]], material: 1 });
+        assert_eq!(drop_road_seam_walls(&mut curb), 0, "real concrete sidewalk curb stays");
+    }
+
+    #[test]
+    fn isolated_tilted_floor_sliver_over_flat_floor_is_dropped() {
+        let mut t = floor(0., 4., 0., 4., 1.00);
+        // 0.05 m2 tilted shard (n.z ~ 0.91) sitting on top of the flat floor.
+        t.push(Tri { v: [[1.0, 1.0, 1.01], [1.5, 1.0, 1.01], [1.0, 1.2, 1.10]], material: 1 });
+        let dropped = drop_tilted_slivers(&mut t, |_| false);
+        assert_eq!(dropped, 1, "isolated tilted floor sliver over flat boardwalk is dropped");
     }
 }
