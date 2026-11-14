@@ -1782,8 +1782,9 @@ bool EditorTick(int ped, const PadIn& pad, const KeysIn& keys, float dt) {
     }
     auto CompactKeyboardHint = [&](const char* keyboardText) {
         if (!g_keyboard || g_hudHidden) return;
-        Rect(0.02f, 0.952f, 0.98f, 0.988f, 0.04f, 0.04f, 0.05f, 0.72f);
-        Txt(keyboardText, 0.5f, 0.958f, 0.27f, true);
+        Rect(0.02f, 0.950f, 0.98f, 0.988f, 0.04f, 0.04f, 0.05f, 0.78f);
+        Rect(0.02f, 0.950f, 0.98f, 0.952f, 0.95f, 0.72f, 0.16f, 0.70f);
+        Txt(keyboardText, 0.5f, 0.957f, 0.29f, true);
     };
     if (g_mode == Mode::Instant) {
         if (!aptHudDrawn) {
@@ -1791,7 +1792,7 @@ bool EditorTick(int ped, const PadIn& pad, const KeysIn& keys, float dt) {
                  "Space/LClick Play   A/D or Wheel Scrub   Home/End Jump   Enter Timeline", 0.91f);
             Keys("X Photo   Y Help   R3 Hide   B Exit", "1..4 Speed   L Look   P Photo   F1/U Help   F4 HUD   H Hide   Esc/RClick Exit");
         } else {
-            CompactKeyboardHint("Space/LClick Play   A/D or Wheel Scrub   Enter Timeline   1..4 Speed   L Look   P Photo   F1 Help   F4 HUD   H Hide   Esc Exit");
+            CompactKeyboardHint("Space Play  |  A/D Scrub  |  Enter Timeline  |  1-4 Speed  |  L Look  |  P Photo  |  F1 Help  |  H Hide  |  Esc Exit");
         }
     } else if (g_mode == Mode::Timeline) {
         if (!aptHudDrawn) {
@@ -1800,7 +1801,7 @@ bool EditorTick(int ped, const PadIn& pad, const KeysIn& keys, float dt) {
             Keys("D-pad Down/Up Add/Delete Marker   X Edit Clip   Back Actions   R3 Hide   B Back",
                  "E Edit Cam   C Preset   1..4 Speed   F Filter   V Shake   N/Del Marker   Tab Actions   F4 HUD   Ctrl+S Save");
         } else {
-            CompactKeyboardHint("Space Play   A/D Scrub   I/O Trim   N/Del Marker   E Cam   C Preset   1..4 Speed   F Filter   Tab Actions   F4 HUD   Ctrl+S Save");
+            CompactKeyboardHint("Space Play  |  A/D Scrub  |  I/O Trim  |  N/Del Marker  |  E Cam  |  C Preset  |  Tab Actions  |  Ctrl+S Save");
         }
     } else if (g_mode == Mode::CameraEdit) {
         const CameraParams& camera = Shown();
