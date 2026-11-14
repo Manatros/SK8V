@@ -32,16 +32,20 @@ struct Site {
 constexpr Site kSites[6] = {{0x963f6a, kMount},   {0x963f7d, kFinish},  {0x13682f8, kEntries},
                             {0x136839d, kNames}, {0x169b992, 0x169e5e0}, {0x169bc19, 0x169e5e0}};
 constexpr char kItem[] = "dlcpacks:/skatev/";
+constexpr char kSchoolItem[] = "dlcpacks:/skate_school/";
 
 inline std::uintptr_t g_base = 0;
 inline bool g_listed = false;
+inline bool g_schoolListed = false;
 inline std::wstring g_pack;
+inline std::wstring g_schoolPack;
 inline util::LogFn g_log = nullptr;
 
 inline std::uintptr_t Base() { return reinterpret_cast<std::uintptr_t>(GetModuleHandleW(nullptr)); }
 
 inline void __fastcall OnMount(void* mgr, const char* path) {
     if (path && !_strnicmp(path, kItem, sizeof(kItem) - 2)) g_listed = true;
+    if (path && !_strnicmp(path, kSchoolItem, sizeof(kSchoolItem) - 2)) g_schoolListed = true;
     reinterpret_cast<void(__fastcall*)(void*, const char*)>(g_base + kMount)(mgr, path);
 }
 
@@ -109,6 +113,14 @@ inline void __fastcall OnFinish(void* mgr) {
     } else {
         util::Logf(g_log, "pack loader: %s missing; board weapon, live clip and wheel icon unavailable",
                    util::Narrow(g_pack).c_str());
+    }
+    // B151: the tutorial island is an optional, separately installed pack.
+    if (!g_schoolPack.empty() && GetFileAttributesW(g_schoolPack.c_str()) != INVALID_FILE_ATTRIBUTES && !g_schoolListed) {
+        char item[sizeof(kSchoolItem)];
+        std::memcpy(item, kSchoolItem, sizeof(kSchoolItem));
+        reinterpret_cast<void(__fastcall*)(void*, const char*)>(g_base + kMount)(mgr, item);
+        g_schoolListed = true;
+        util::Logf(g_log, "pack loader: mounted %s", kSchoolItem);
     }
     reinterpret_cast<void(__fastcall*)(void*)>(g_base + kFinish)(mgr);
 }
@@ -195,6 +207,7 @@ inline void Install(const std::wstring& gameDir, util::LogFn log) {
     g_log = log;
     g_base = Base();
     g_pack = gameDir + L"update\\x64\\dlcpacks\\skatev\\dlc.rpf";
+    g_schoolPack = gameDir + L"update\\x64\\dlcpacks\\skate_school\\dlc.rpf";
     if (GetFileAttributesW((gameDir + L"update\\x64\\dlcpacks\\skatev\\hud.gfx").c_str()) != INVALID_FILE_ATTRIBUTES)
         g_hud = streaming::NarrowAnsi(gameDir + L"update\\x64\\dlcpacks\\skatev\\hud.gfx");
     if (Matches(g_base)) {

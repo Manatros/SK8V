@@ -134,12 +134,11 @@ fn drop_exact_copies(rails: &mut Vec<Vec<Vec3>>, tolerance: f32) {
     rails.retain(|_| { let keep = k.peek() == Some(&i); if keep { k.next(); } i += 1; keep });
 }
 
-#[cfg(test)]
-fn normalize_assembled_rails(rails: &mut Vec<Vec<[f32; 3]>>) {
+pub(crate) fn normalize_assembled_rails(rails: &mut Vec<Vec<[f32; 3]>>) {
     normalize_assembled_rails_with_tris(rails, &[]);
 }
 
-fn normalize_assembled_rails_with_tris(rails: &mut Vec<Vec<[f32; 3]>>, tris: &[[[f32; 3]; 3]]) {
+pub(crate) fn normalize_assembled_rails_with_tris(rails: &mut Vec<Vec<[f32; 3]>>, tris: &[[[f32; 3]; 3]]) {
     let mut gta: Vec<Vec<Vec3>> = rails.iter().map(|r| r.iter()
         .map(|&p| coords::from_skate(Vec3::from_array(p))).collect()).collect();
     // Trim before coverage sampling, then join even tiny uncovered tails:
@@ -189,6 +188,7 @@ pub struct StaticWorld {
     live: Option<crate::live::Level>,
     tiles: std::path::PathBuf,
     tile_cache: crate::tiles::Cache,
+    tutorial: Option<crate::tutorial_zone::TutorialZone>,
     /// What the last build found, reused where nothing nearby changed.
     reuse: crate::reuse::AreaCache,
     /// The sidecar reads (recovered surfaces, ground joints) depend on the
@@ -212,6 +212,7 @@ impl StaticWorld {
             live: None,
             tile_cache: Default::default(),
             tiles: path.parent().unwrap_or(Path::new(".")).join("tiles"),
+            tutorial: crate::tutorial_zone::TutorialZone::open(path.parent().unwrap_or(Path::new("."))),
             reuse: Default::default(),
             sidecars_at: None,
             recovered_area: Default::default(),
@@ -244,6 +245,11 @@ impl StaticWorld {
     /// Collision and rails around GTA point `center`, from GTA's loaded
     /// collision (which already holds whatever map states are active).
     pub fn around(&mut self, center: Vec3) -> Result<Area, String> {
+        if let Some(zone) = &self.tutorial {
+            if let Some(area) = zone.around(center) {
+                return area.map(|mut area| { area.fixed = self.fixed_version; area });
+            }
+        }
         let mut area = self.around_with_tiles(center, crate::BAKED_WORLD.load(std::sync::atomic::Ordering::Relaxed))?;
         let dropped = cap_rail_segments(&mut area.rails, coords::to_skate(center), STATIC_RAIL_SEGMENTS);
         if dropped > 0 {
@@ -253,6 +259,9 @@ impl StaticWorld {
     }
 
     pub fn prefetch(&mut self, center: Vec3, lead: Vec3) {
+        if self.tutorial.is_some() && crate::tutorial_zone::district(center).is_some() {
+            return;
+        }
         if crate::BAKED_WORLD.load(std::sync::atomic::Ordering::Relaxed) {
             self.tile_cache.prefetch(&self.tiles, [center.x,center.y], [lead.x,lead.y], RADIUS);
         }

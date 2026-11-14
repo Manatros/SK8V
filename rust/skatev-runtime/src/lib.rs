@@ -23,6 +23,9 @@ pub mod skin;
 mod worker;
 mod crash;
 pub mod world;
+mod tutorial_zone;
+pub mod tutorial_lessons;
+pub use tutorial_lessons::{SvTutorialInput, SvTutorialStatus, sv_tutorial_command, sv_tutorial_step};
 pub mod live;
 pub mod baked;
 pub mod tiles;
@@ -350,6 +353,7 @@ impl Default for SvScoreState {
 }
 
 struct Runtime {
+    tutorial: Mutex<tutorial_lessons::TutorialEngine>,
     jobs: mpsc::Sender<Job>,
     shared: Arc<Mutex<Shared>>,
     /// Signalled with `Shared::steps_done`; `steps_sent` counts sv_step's jobs.
@@ -502,6 +506,7 @@ pub unsafe extern "C" fn sv_create(info: *const SvCreateInfo) -> *mut c_void {
         let (jobs, shared) =
             worker::spawn(root, cache, budget, board_only, hall_of_meat, natural_stance, Arc::clone(&log));
         Box::into_raw(Box::new(Runtime {
+            tutorial: Mutex::new(tutorial_lessons::TutorialEngine::default()),
             jobs,
             shared,
             steps_sent: AtomicU64::new(0),
