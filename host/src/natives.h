@@ -406,6 +406,8 @@ inline void Text(const char* s, float x, float y, float scale, int r, int g, int
         Call<void>(SET_TEXT_RIGHT_JUSTIFY, 1);
     } else if (align == Align::Wrap) {
         Call<void>(SET_TEXT_WRAP, x, edge);
+    } else {
+        Call<void>(SET_TEXT_WRAP, 0.0f, 1.0f);
     }
     Call<void>(BEGIN_TEXT_COMMAND_DISPLAY_TEXT, "STRING");
     Call<void>(ADD_TEXT_COMPONENT_SUBSTRING_PLAYER_NAME, s);

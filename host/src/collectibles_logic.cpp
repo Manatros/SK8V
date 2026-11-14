@@ -646,17 +646,34 @@ std::string TravelTick(TravelSession& session, const TravelGuard& guard, unsigne
         float off[2] = {0, 0};
         TravelCandidateOffset(i, off);
         const float req[2] = {session.targetPos[0] + off[0], session.targetPos[1] + off[1]};
-        float nav[3] = {0, 0, 0};
-        if (!api.getSafeCoord || !api.getSafeCoord(req[0], req[1], session.targetPos[2], nav, api.ctx)) continue;
-        if (!TravelCheckSafeCoord(session.targetPos, req, nav)) continue;
+        float nav[3] = {req[0], req[1], session.targetPos[2]};
+        float zTop = session.targetPos[2] + 2.5f;
+        float zBottom = session.targetPos[2] - 4.0f;
+        float safeCoord[3] = {0, 0, 0};
+        bool usedSafeCoord = false;
+        if (api.getSafeCoord && api.getSafeCoord(req[0], req[1], session.targetPos[2], safeCoord, api.ctx) &&
+            TravelCheckSafeCoord(session.targetPos, req, safeCoord)) {
+            nav[0] = safeCoord[0];
+            nav[1] = safeCoord[1];
+            nav[2] = safeCoord[2];
+            zTop = nav[2] + 0.30f;
+            zBottom = nav[2] - 0.30f;
+            usedSafeCoord = true;
+        }
         if (!api.probeFloor) continue;
         TravelLosSample samples[5]{};
         for (int s = 0; s < 5; ++s) {
             samples[s] = api.probeFloor(nav[0] + kSampleOffsets[s][0], nav[1] + kSampleOffsets[s][1],
-                                        nav[2] + 0.30f, nav[2] - 0.30f, guard.ped, api.ctx);
+                                        zTop, zBottom, guard.ped, api.ctx);
         }
         float supportZ = 0.0f;
-        if (!TravelCheckFloorSupport(nav[2], samples, supportZ)) continue;
+        const float expectedZ = usedSafeCoord ? nav[2] : samples[0].z;
+        if (!usedSafeCoord) {
+            if (samples[0].status != 2 || !samples[0].hit || !std::isfinite(samples[0].z)) continue;
+            const float dz = samples[0].z - session.targetPos[2];
+            if (dz < -2.5f || dz > 0.5f) continue;
+        }
+        if (!TravelCheckFloorSupport(expectedZ, samples, supportZ)) continue;
         float z1 = 0.0f, z2 = 0.0f;
         TravelCapsuleSpheres(supportZ, session.clearance, z1, z2);
         if (!api.startCapsule || !api.pollCapsule) continue;

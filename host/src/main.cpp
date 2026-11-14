@@ -4531,13 +4531,13 @@ std::vector<menu::Page> MenuPages(Session& s) {
             item.help = "Left/Right: previous/next collectible (GTAxSkate\\collectibles.tsv).";
             return item;
         }(),
-        Helped(Action("Skate Shop seller: stand here", [&s] { Notify(s, boardshop::SellerHere(), 4000); }),
-               "Saves where you stand as the Skate Shop seller's spot (SkateShopSeller in the INI)."),
         Action("Go to this collectible", [&s] {
             const std::string msg = collectibles::RequestTravel(CurrentTravelGuard(s, g_config));
             if (!msg.empty()) Notify(s, msg, 5000);
             else Notify(s, "Checking safe floor for collectible...", 2000);
         }),
+        Helped(Action("Unlock all collectibles", [&s] { Notify(s, collectibles::UnlockAll(), 7000); }),
+               "Unlocks all collectible boards, parts and songs at once in the skate shop and progress."),
         Helped(Action("Reset collectibles and unlocks (press twice)", [&s] {
                    // Two presses within 5 s (design 2026-11-02-collectibles-v2).
                    static ULONGLONG s_armed = 0;
@@ -4619,8 +4619,8 @@ std::vector<menu::Page> MenuPages(Session& s) {
             if (any({"CollisionView", "CollisionViewRange"}) || labelIs({"World collision:", "Compare: plain GTA"})) return "Collision switches";
             if (labelIs({"Mark", "Go to this mark", "Show fixed marks", "Delete this mark"})) return "Test marks";
             if (k == "GpsWhileSkating") return "GPS";
-            if (k == "SkateSpots" || k == "Collectibles" || labelIs({"Collectibles:"})) return "Progress";
-            if (labelIs({"Collectible", "Go to this collectible", "Skate Shop seller", "Reset collectibles"})) return "Collectible tests";
+            if (k == "SkateSpots" || k == "Collectibles" || labelIs({"Collectibles:", "Unlock all collectibles"})) return "Progress";
+            if (labelIs({"Collectible", "Go to this collectible", "Reset collectibles"})) return "Collectible tests";
             if (k == "DevOptions") return "Advanced";
             if (any({"BoardShop", "WheelsFromPaint"})) return "Board";
             return "Developer";
@@ -4895,7 +4895,7 @@ std::vector<menu::Page> MenuPages(Session& s) {
                       {"Missions", {"BoardActionInMissions"}}}},
         {"HUD", {{"On screen", {"SkateHud", "Hud", "TrickAnalyzer", "KeyboardHints"}},
                  {"Hall of Meat", {"HallOfMeat"}}}},
-        {"Progress", {{"Collectibles", {"Collectibles", "Collectibles:"}},
+        {"Progress", {{"Collectibles", {"Collectibles", "Collectibles:", "Unlock all collectibles"}},
                       {"Records board", {"Show records"}},
                       {"On the map", {"SkateSpots"}}}},
         {"World", {{"What the board hits", {"DynamicWorld", "VehiclePush", "ObjectPush", "VehicleDamage", "BoardScratches"}},

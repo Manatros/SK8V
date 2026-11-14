@@ -565,6 +565,40 @@ std::string Reset() {
     return "Collectibles reset: " + Summary() + ". Bought parts stay in your garage. Settings > Audio > Perform Quick Scan to update Self Radio.";
 }
 
+std::string UnlockAll() {
+    if (g_faulty) return "Collectibles: the progress file cannot be read, nothing unlocked";
+    if (g_items.empty()) return "Collectibles: no places file, nothing to unlock";
+    int unlocked = 0;
+    auto unlockItem = [&](const Item& it) {
+        if (!HasReward(it, g_assigned, g_tracksOnDisk) || StateOf(g_progress, it.id) == State::Collected) return;
+        std::string reward;
+        const auto mine = g_assigned.find(it.id);
+        if (it.kind == Kind::Board || it.kind == Kind::Part) {
+            if (g_partsAssigned && mine != g_assigned.end() && !mine->second.key.empty() && boardshop::Unlock(mine->second.key) >= 1) {
+                reward = std::string(it.kind == Kind::Board ? "board:" : "part:") + mine->second.key;
+                g_unlockedKeys.insert(mine->second.key);
+            }
+        } else {
+            const int t = mine != g_assigned.end() ? mine->second.track : 0;
+            if (t) reward = "song:" + std::to_string(t);
+        }
+        if (RecordReward(g_progress, it.id, reward)) {
+            Unblip(it.id);
+            ++unlocked;
+        }
+    };
+    for (const Item& it : g_items) {
+        if (it.kind == Kind::Line) continue;
+        unlockItem(it);
+    }
+    for (const Item& b : g_lineBoards) unlockItem(b);
+    for (const Item& s : g_scoreItems) unlockItem(s);
+    Save();
+    Reconcile(g_wasEnabled);
+    Log("unlock all (Developer): unlocked " + std::to_string(unlocked) + " collectibles");
+    return Summary() + " (" + std::to_string(unlocked) + " newly unlocked)";
+}
+
 void Tick(bool enabled, bool skating, bool popups, const float (&skater)[3], int ped, const char* state) {
     const std::string stateName(state ? state : "");
     const bool inAir = BoardInAir(stateName);

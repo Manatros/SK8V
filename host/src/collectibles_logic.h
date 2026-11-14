@@ -145,7 +145,7 @@ std::string PopupEarned(const std::string& reward, const std::string& name);
 
 // Safe developer collectible travel (design 2026-11-05-safe-collectible-travel).
 inline constexpr int kTravelCandidateCount = 8;
-inline constexpr unsigned kTravelTimeoutMs = 5000;
+inline constexpr unsigned kTravelTimeoutMs = 10000;
 inline constexpr float kTravelSceneRadius = 25.0f;
 inline constexpr float kTravelMoveLimit = 0.30f;
 inline constexpr float kTravelCapsuleRadius = 0.40f;

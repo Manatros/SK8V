@@ -597,20 +597,11 @@ float g_sellerSpot[4] = {shopstall::kSeller[0], shopstall::kSeller[1], shopstall
 constexpr const char* kSellerModels[2] = {"a_m_y_skater_01", "a_m_y_skater_02"};
 
 void ReadSellerSpot() {
-    static ULONGLONG s_readAt = 0;
-    if (g_iniPath.empty() || GetTickCount64() < s_readAt) return;
-    s_readAt = GetTickCount64() + 1000;
-    wchar_t text[96]{};
-    GetPrivateProfileStringW(L"SkateV", L"SkateShopSeller", L"", text, 96, g_iniPath.c_str());
-    char narrow[96]{};
-    for (int i = 0; i < 95 && text[i]; ++i) narrow[i] = static_cast<char>(text[i] < 128 ? text[i] : '?');
-    float spot[4] = {shopstall::kSeller[0], shopstall::kSeller[1], shopstall::kSeller[2], shopstall::kSeller[3]};
-    if (narrow[0]) shopstall::ParseSpot(narrow, spot);
-    if (std::memcmp(spot, g_sellerSpot, sizeof(spot)) != 0) {
-        std::memcpy(g_sellerSpot, spot, sizeof(spot));
+    if (std::memcmp(shopstall::kSeller, g_sellerSpot, sizeof(g_sellerSpot)) != 0) {
+        std::memcpy(g_sellerSpot, shopstall::kSeller, sizeof(g_sellerSpot));
         if (g_seller) {
-            Call<void>(SET_ENTITY_COORDS_NO_OFFSET, g_seller, spot[0], spot[1], spot[2] + 1.0f, 0, 0, 0);
-            Call<void>(SET_ENTITY_HEADING, g_seller, spot[3]);
+            Call<void>(SET_ENTITY_COORDS_NO_OFFSET, g_seller, g_sellerSpot[0], g_sellerSpot[1], g_sellerSpot[2] + 1.0f, 0, 0, 0);
+            Call<void>(SET_ENTITY_HEADING, g_seller, g_sellerSpot[3]);
         }
     }
 }
