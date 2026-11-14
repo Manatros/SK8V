@@ -167,6 +167,37 @@ using SvDeactivateFn = std::uint32_t(__cdecl*)(void*);
 using SvStepFn = std::uint32_t(__cdecl*)(void*, const SvInput*);
 using SvGetOutputFn = std::uint32_t(__cdecl*)(const void*, SvOutput*);
 using SvGetScoreStateFn = std::uint32_t(__cdecl*)(const void*, SvScoreState*);
+// Optional M2 exports; runtime-owned engine, unchanged ABI version 8.
+enum SvTutorialCommand : std::uint32_t {
+    SV_TUTORIAL_START = 1, SV_TUTORIAL_STOP = 2, SV_TUTORIAL_RETRY = 3,
+    SV_TUTORIAL_SKIP = 4, SV_TUTORIAL_PREV = 5, SV_TUTORIAL_RESTART = 6,
+    SV_TUTORIAL_RESTORE = 7 // arg: completed mask (17 bits); restores paused.
+};
+enum SvTutorialFlags : std::uint32_t {
+    SV_TUTORIAL_RIDING = 1, SV_TUTORIAL_WIPEOUT = 2,
+    SV_TUTORIAL_FREE_ROAM = 4, SV_TUTORIAL_CLEAN = 8
+};
+// preset: 0 SK8V, 1 GTAxSkate, 2 RP. Scores are completed results;
+// sequence_active must be zero to credit tricks/lines. dt is elapsed seconds.
+struct SvTutorialInput {
+    std::uint32_t size, preset, flags;
+    float position[3], speed, sequence_score, line_score, multiplier, completed_lines;
+    std::uint32_t sequence_active;
+    char trick_utf8[96];
+    float dt_seconds;
+};
+// state: 0 Idle, 1 Briefing, 2 Active, 3 Passed, 4 CompletedAll.
+// lesson is zero-based; skip never marks a lesson completed.
+struct SvTutorialStatus {
+    std::uint32_t size, state, lesson, completed_mask, completed_count, preset;
+    char banner_utf8[256], lesson_id[24];
+};
+using SvTutorialCommandFn = std::uint32_t(__cdecl*)(void*, std::uint32_t, std::uint32_t);
+using SvTutorialStepFn = std::uint32_t(__cdecl*)(void*, const SvTutorialInput*, SvTutorialStatus*);
+static_assert(sizeof(SvTutorialInput) == 148 && offsetof(SvTutorialInput, position) == 12);
+static_assert(offsetof(SvTutorialInput, trick_utf8) == 48 && offsetof(SvTutorialInput, dt_seconds) == 144);
+static_assert(sizeof(SvTutorialStatus) == 304 && offsetof(SvTutorialStatus, banner_utf8) == 24);
+static_assert(offsetof(SvTutorialStatus, lesson_id) == 280 && SKATEV_ABI_VERSION == 8u);
 using SvGetStatusTextFn = std::uint32_t(__cdecl*)(const void*, char*, std::uint32_t);
 using SvGetDynamicHitsFn = std::uint32_t(__cdecl*)(const void*, SvDynamicHit*, std::uint32_t);
 using SvGetSkaterMeshFn = std::uint32_t(__cdecl*)(const void*, SvColorTri*, std::uint32_t);

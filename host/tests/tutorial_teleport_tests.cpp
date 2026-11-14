@@ -1,8 +1,60 @@
 #include "tutorial_teleport.h"
+#include "tutorial_missions.h"
 #include <cassert>
 #include <chrono>
 #include <iostream>
 #include <limits>
+
+namespace {
+unsigned lessonTestGroups = 0;
+std::uint32_t fakeState = 3, fakeMask = 1;
+std::uint32_t __cdecl FakeCommand(void*, std::uint32_t cmd, std::uint32_t) {
+    if (cmd == SV_TUTORIAL_RESTART) fakeMask = 0;
+    return 1;
+}
+std::uint32_t __cdecl FakeStep(void*, const SvTutorialInput* in, SvTutorialStatus* out) {
+    out->state = fakeState; out->completed_mask = fakeMask; out->preset = in->preset;
+    const char* banners[]{"Coach Frank: Nailed it! Ollie Basics - LESSON PASSED!", "Objective complete: Ollie Basics", "Completed Ollie Basics."};
+    strcpy_s(out->banner_utf8, banners[in->preset]); return 1;
+}
+void TestLessons(const std::filesystem::path& dir) {
+    using namespace tutorial;
+    assert(DetectPreset(true,true)==UiPreset::Sk8v); ++lessonTestGroups;
+    assert(DetectPreset(true,false)==UiPreset::GtaxSkate); ++lessonTestGroups;
+    assert(DetectPreset(false,false)==UiPreset::Rp && DetectPreset(false,true)==UiPreset::Rp); ++lessonTestGroups;
+    assert(UsesCentral(UiPreset::Sk8v) && !UsesCentral(UiPreset::GtaxSkate) && !UsesCentral(UiPreset::Rp)); ++lessonTestGroups;
+    for (unsigned state=0;state<=4;++state) assert(StartPauseCommand(state)==(state>=1 && state<=3 ? SV_TUTORIAL_STOP : SV_TUTORIAL_START));
+    ++lessonTestGroups;
+    assert(ProgressText(0)=="0/17 lessons completed" && ProgressText(kAllLessons)=="17/17 lessons completed");
+    assert(ProgressText(0xFFFFFFFF)=="17/17 lessons completed"); ++lessonTestGroups;
+    const auto path=dir / "progress.txt";
+    assert(LoadProgress(path)==0); assert(SaveProgress(path,7)); assert(LoadProgress(path)==7);
+    assert(SaveProgress(path,3)); assert(LoadProgress(path)==3); assert(!SaveProgress(path,1u<<20));
+    assert(LoadProgress(path)==3); ++lessonTestGroups;
+    for (const char* invalid : {"garbage", "SkateV-Tutorial-1 4294967295", "SkateV-Tutorial-1 2 extra", "SkateV-Tutorial-2 1", "SkateV-Tutorial-1"}) {
+        std::ofstream(path) << invalid; assert(LoadProgress(path)==0);
+    }
+    ++lessonTestGroups;
+    lessonRuntime=reinterpret_cast<void*>(1); lessonCommand=FakeCommand; lessonStep=FakeStep; progressPath=path; savedMask=0;
+    for(unsigned preset=0;preset<3;++preset) {
+        SvTutorialInput in{}; in.preset=preset;
+        unsigned centers=0, notices=0; std::string message; shownBanner.clear();
+        auto center=[&](const char* t) { ++centers; message=t; };
+        auto notice=[&](const char* t) { ++notices; message=t; };
+        TickLessons(in,false,center,notice); assert(centers+notices==0);
+        TickLessons(in,true,center,notice); assert(centers==(preset==0 ? 1u:0u) && notices==(preset==0 ? 0u:1u));
+        assert(message==(preset==0 ? "Coach Frank: Nailed it! Ollie Basics - LESSON PASSED!" : preset==1 ? "Objective complete: Ollie Basics" : "Completed Ollie Basics."));
+        TickLessons(in,true,center,notice); assert(centers+notices==1);
+        if (preset != 0) assert(IsLessonNotice(message));
+    }
+    assert(LoadProgress(path)==1); ++lessonTestGroups;
+    assert(CommandLessons(SV_TUTORIAL_RESTART));
+    TickLessons(SvTutorialInput{},false,[](const char*){},[](const char*){}); assert(LoadProgress(path)==0);
+    lessonStep=nullptr; assert(!CommandLessons(SV_TUTORIAL_START));
+    TickLessons(SvTutorialInput{},true,[](const char*){assert(false);},[](const char*){assert(false);});
+    ++lessonTestGroups;
+}
+}
 
 int main() {
     using namespace tutorial;
@@ -60,6 +112,7 @@ int main() {
     assert(HasTutorialPack(dir));
     std::filesystem::remove(dir / "cache/addons/skate_school/DIST_StartPark.svwc");
     assert(!HasTutorialPack(dir));
+    TestLessons(dir);
     std::filesystem::remove_all(dir);
-    std::cout << "tutorial teleport tests passed\n";
+    std::cout << "11 test groups passed (1 teleport, " << lessonTestGroups << " tutorial lessons)\n";
 }

@@ -54,6 +54,7 @@
 #include "collision_view.h"
 #include "interaction_menu_logic.h"
 #include "tutorial_teleport.h"
+#include "tutorial_missions.h"
 #include "ped_speech.h"
 #include "runtime_bridge.h"
 #include "injuries.h"
@@ -4395,6 +4396,25 @@ std::vector<menu::Page> MenuPages(Session& s) {
         "Returns from the optional Skate School islands back to Vespucci Skatepark.",
         tutorial::kVespucciParkReturn));
 
+    const auto lessonAction = [hasTutorialPack, &s](const char* label, const char* help, std::uint32_t command) {
+        auto item = Helped(Action(label, [hasTutorialPack, &s, command] {
+            if (!hasTutorialPack) return;
+            const auto cmd = command ? command : tutorial::StartPauseCommand(tutorial::lessonStatus.state);
+            if (!tutorial::CommandLessons(cmd)) Notify(s, "Tutorial lessons require the updated SkateV runtime.", 5000);
+            else if (cmd == SV_TUTORIAL_STOP) Notify(s, "Tutorial paused.", 3000);
+        }), help);
+        item.visible = [hasTutorialPack] { return hasTutorialPack; };
+        return item;
+    };
+    pages.back().items.push_back(lessonAction("Start / Pause Coach Frank Tutorial",
+        "Start or pause the current lesson. Progress is saved automatically; travel to the matching tutorial district to earn objectives.", 0));
+    pages.back().items.push_back(lessonAction("Next Tutorial Lesson (Skip)",
+        "Move to the next lesson without earning completion for the skipped objective.", SV_TUTORIAL_SKIP));
+    pages.back().items.push_back(lessonAction("Previous Tutorial Lesson",
+        "Review the previous lesson while keeping completed objectives.", SV_TUTORIAL_PREV));
+    pages.back().items.push_back(lessonAction("Restart Tutorial Progress",
+        "Clear saved tutorial completion and begin Push & Carve again.", SV_TUTORIAL_RESTART));
+
     pages.push_back({"Dev", {
         Choice("Show inputs on screen (keys and pad)", "ShowInputs", {"0", "1"}, {"Off", "On"}, Bound("ShowInputs")),
         Action("Play showcase line", [] { g_lineRequested.store(true); }),
@@ -5091,6 +5111,7 @@ void ScriptMain() {
 
     // Skate audio inside GTA's audio engine (P0-3b); runtime may be absent.
     gtaaudio::Start(g_gameDir + L"SkateVLegacy.ini", GetModuleHandleW(L"SkateVRuntime.dll"), g_runtime.Handle(), Log);
+    tutorial::StartLessons(g_runtime.Handle(), std::filesystem::path(g_logDir) / L"tutorial-progress.txt");
     collisionview::Start(GetModuleHandleW(L"SkateVRuntime.dll"));
     collisionview::Set(cfg.collisionView, cfg.collisionViewRange);
     ApplyWorldOptions(cfg);
@@ -5194,7 +5215,7 @@ void ScriptMain() {
             Notify(s, "runtime unavailable: " + error);
         }
 
-        if (cfg.skateHud && !s.message.empty() && GetTickCount() < s.messageUntil) {
+        if ((cfg.skateHud || tutorial::IsLessonNotice(s.message)) && !s.message.empty() && GetTickCount() < s.messageUntil) {
             Text(s.message.c_str(), 0.5f, 0.88f, 0.4f, 255, 255, 255, true);
         }
         // The cinematic camera and the filmer shoot a clean picture: no GTA HUD,
@@ -5245,6 +5266,34 @@ void ScriptMain() {
             const bool popups = g_config.skateHud && s.state == LifeState::Skating && s.action == 0 && !replay::Active();  // not filming
             if (!replay::Active()) collectibles::Tick(g_config.collectibles, riding, popups, root, Call<int>(gta::PLAYER_PED_ID),
                                                        s.last.state_utf8);
+            SvScoreState lessonScore{};
+            lessonScore.size = sizeof(lessonScore);
+            if (g_runtime.Score(lessonScore)) {
+                SvTutorialInput lessonInput{};
+                lessonInput.preset = static_cast<std::uint32_t>(tutorial::DetectPreset(cfg.skateHud, cfg.hud));
+                const bool live = s.state == LifeState::Skating && !replay::Active();
+                lessonInput.flags = (riding ? SV_TUTORIAL_RIDING : 0u) |
+                    (live && st.rfind("Wipeout", 0) == 0 ? SV_TUTORIAL_WIPEOUT : 0u) |
+                    (live && (lessonScore.flags & (1u << 3)) ? SV_TUTORIAL_CLEAN : 0u);
+                std::copy(std::begin(root), std::end(root), lessonInput.position);
+                const auto& v = s.last.velocity;
+                lessonInput.speed = std::sqrt(v.x*v.x + v.y*v.y + v.z*v.z);
+                lessonInput.sequence_score = lessonScore.sequence_score;
+                lessonInput.line_score = lessonScore.line_score;
+                lessonInput.multiplier = lessonScore.multiplier;
+                lessonInput.completed_lines = lessonScore.completed_lines;
+                lessonInput.sequence_active = lessonScore.sequence_active;
+                std::copy(std::begin(lessonScore.trick_utf8), std::end(lessonScore.trick_utf8), lessonInput.trick_utf8);
+                static auto lessonTime = std::chrono::steady_clock::now();
+                const auto now = std::chrono::steady_clock::now();
+                const bool lessonDisplay = !replay::Active() && !filming && !menu::IsOpen() &&
+                    (lessonInput.preset != static_cast<std::uint32_t>(tutorial::UiPreset::Sk8v) || live);
+                lessonInput.dt_seconds = lessonDisplay ? std::chrono::duration<float>(now - lessonTime).count() : 0.0f;
+                lessonTime = now;
+                tutorial::TickLessons(lessonInput, lessonDisplay,
+                    [](const char* text) { hudoverlay::ShowCentral(1, text); },
+                    [&s](const char* text) { Notify(s, text, 6000); });
+            }
             collectibles::TickTravel(CurrentTravelGuard(s, g_config));
             if (const char* notice = collectibles::TakeNotice()) Notify(s, notice, 6000);
         }
