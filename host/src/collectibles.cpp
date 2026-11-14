@@ -626,10 +626,12 @@ void Tick(bool enabled, bool skating, bool popups, const float (&skater)[3], int
                 if (it.kind == Kind::Line && LineGroup(it.id) == (hitLine.empty() ? g_line.line : hitLine)) steps = std::max(steps, LineStep(it.id));
             const std::string riding = g_line.line;
             const int next = g_line.next;
-            switch (LineUpdate(g_line, hitLine, hitStep, steps, now, !skating || stateName.rfind("Wipeout", 0) == 0)) {
+            const bool wipedOut = stateName.rfind("Wipeout", 0) == 0;
+            const bool offBoard = !skating;
+            switch (LineUpdate(g_line, hitLine, hitStep, steps, now, wipedOut, offBoard)) {
                 case LineEvent::Started: Notice("Trick line started: " + std::to_string(steps) + " waypoints, ride through each within " + std::to_string(kLegMs / 1000) + " s"); break;
                 case LineEvent::Next: Notice("Trick line: " + std::to_string(next) + "/" + std::to_string(steps)); break;
-                case LineEvent::Failed: Notice("Trick line failed: start again at its first waypoint"); break;
+                case LineEvent::Failed: Notice(LineFailNotice(g_line.lastFail)); break;
                 case LineEvent::Done:
                     for (const Item& b : g_lineBoards)
                         if (b.id == riding) Earn(b);

@@ -374,10 +374,24 @@ std::vector<Item> ScoreEarned(const std::vector<Item>& milestones, const Progres
     return out;
 }
 
-LineEvent LineUpdate(LineRun& run, const std::string& hitLine, int hitStep, int steps, unsigned now, bool bailed) {
+const char* LineFailNotice(LineFailReason reason) {
+    switch (reason) {
+        case LineFailReason::TimedOut: return "Trick line failed (time ran out): start again at its first waypoint";
+        case LineFailReason::Bailed: return "Trick line failed (bailed): start again at its first waypoint";
+        case LineFailReason::OffBoard: return "Trick line failed (got off board): start again at its first waypoint";
+        case LineFailReason::None: break;
+    }
+    return "Trick line failed: start again at its first waypoint";
+}
+
+LineEvent LineUpdate(LineRun& run, const std::string& hitLine, int hitStep, int steps, unsigned now, bool bailed,
+                     bool offBoard) {
     if (!run.line.empty()) {
-        if (bailed || now - run.legStart > kLegMs) {
+        if (bailed || offBoard || now - run.legStart > kLegMs) {
+            const LineFailReason reason = bailed ? LineFailReason::Bailed
+                : (offBoard ? LineFailReason::OffBoard : LineFailReason::TimedOut);
             run = LineRun{};
+            run.lastFail = reason;
             return LineEvent::Failed;
         }
         if (hitLine == run.line && hitStep == run.next) {
@@ -391,10 +405,11 @@ LineEvent LineUpdate(LineRun& run, const std::string& hitLine, int hitStep, int 
         }
         return LineEvent::None;
     }
-    if (!bailed && hitStep == 1 && !hitLine.empty() && steps > 1) {
+    if (!bailed && !offBoard && hitStep == 1 && !hitLine.empty() && steps > 1) {
         run.line = hitLine;
         run.next = 2;
         run.legStart = now;
+        run.lastFail = LineFailReason::None;
         return LineEvent::Started;
     }
     return LineEvent::None;

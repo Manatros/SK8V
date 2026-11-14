@@ -187,12 +187,30 @@ int main() {
     assert(LineUpdate(run, "", 0, 3, 5000, false) == LineEvent::None);
     assert(LineUpdate(run, "L01", 2, 3, 5000, false) == LineEvent::Next && run.next == 3);
     assert(LineUpdate(run, "L01", 3, 3, 9000, false) == LineEvent::Done && run.line.empty());
+    LineRun exactOk;
+    LineUpdate(exactOk, "L01", 1, 3, 0, false);
+    assert(LineUpdate(exactOk, "L01", 2, 3, kLegMs, false) == LineEvent::Next);  // boundary: <= kLegMs passes
     LineRun slow;
     LineUpdate(slow, "L01", 1, 3, 0, false);
     assert(LineUpdate(slow, "", 0, 3, kLegMs + 1, false) == LineEvent::Failed);
+    assert(slow.lastFail == LineFailReason::TimedOut && std::string(LineFailNotice(slow.lastFail)).find("time ran out") != std::string::npos);
     LineRun bail;
     LineUpdate(bail, "L01", 1, 3, 0, false);
     assert(LineUpdate(bail, "", 0, 3, 10, true) == LineEvent::Failed);
+    assert(bail.lastFail == LineFailReason::Bailed && std::string(LineFailNotice(bail.lastFail)).find("bailed") != std::string::npos);
+    LineRun dismount;
+    LineUpdate(dismount, "L01", 1, 3, 0, false);
+    assert(LineUpdate(dismount, "", 0, 3, 10, false, true) == LineEvent::Failed);
+    assert(dismount.lastFail == LineFailReason::OffBoard && std::string(LineFailNotice(dismount.lastFail)).find("off board") != std::string::npos);
+    assert(LineUpdate(dismount, "L01", 1, 3, 20, false, false) == LineEvent::Started && dismount.lastFail == LineFailReason::None);
+    LineRun bothBailOff;
+    LineUpdate(bothBailOff, "L01", 1, 3, 0, false);
+    assert(LineUpdate(bothBailOff, "", 0, 3, kLegMs + 50, true, true) == LineEvent::Failed);
+    assert(bothBailOff.lastFail == LineFailReason::Bailed);  // bail takes precedence over offBoard and timeout
+    LineRun offAndSlow;
+    LineUpdate(offAndSlow, "L01", 1, 3, 0, false);
+    assert(LineUpdate(offAndSlow, "", 0, 3, kLegMs + 50, false, true) == LineEvent::Failed);
+    assert(offAndSlow.lastFail == LineFailReason::OffBoard);  // offBoard takes precedence over timeout
     // A board earned unlocks only its deck (rev 4): the reward names the deck.
     assert(PopupEarned("board:deck:a:1", "Deck A") == "Board unlocked: Deck A");
 

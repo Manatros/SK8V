@@ -117,16 +117,20 @@ std::vector<Item> ScoreEarned(const std::vector<Item>& milestones, const Progres
                               unsigned category, unsigned score);
 
 // A line being ridden: which line, the next step (1-based), when the leg began.
+enum class LineFailReason { None, TimedOut, Bailed, OffBoard };
 struct LineRun {
     std::string line;
     int next = 0;
     unsigned legStart = 0;
+    LineFailReason lastFail = LineFailReason::None;
 };
 inline constexpr unsigned kLegMs = 8000;  // each leg within this
 enum class LineEvent { None, Started, Next, Done, Failed };
 // One frame: `hitLine`/`hitStep` the waypoint passed now ("" / 0 for none),
-// `steps` that line's step count, `bailed` a wipeout or off the board.
-LineEvent LineUpdate(LineRun& run, const std::string& hitLine, int hitStep, int steps, unsigned now, bool bailed);
+// `steps` that line's step count, `bailed` a wipeout, `offBoard` stepped off the board.
+LineEvent LineUpdate(LineRun& run, const std::string& hitLine, int hitStep, int steps, unsigned now, bool bailed,
+                     bool offBoard = false);
+const char* LineFailNotice(LineFailReason reason);
 
 // Whether Skate's state (SvOutput::state_utf8) is the board in the air: not
 // grinding, walking or wiping out (an air collectible counts only then).
