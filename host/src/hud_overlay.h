@@ -12,6 +12,8 @@
 // composite, 2 the display-gamma blend: troubleshooting only).
 #include <string>
 
+struct SvReplayHudState;
+
 namespace hudoverlay {
 using LogFn = void (*)(const char*);
 
@@ -33,6 +35,10 @@ bool ShowRadio(const char* top, const char* middle, const char* bottom, const ch
 bool ShowCentral(int style, const char* text);
 // Script thread: Skate 3's Trick Analyzer on or off (viewport flag bit 1).
 void SetTrickAnalyzer(bool on);
+// Script thread: drives Skate 3's ported Clip/Replay Editor HUD (nullptr or
+// state->active == 0 turns it off). Returns true only when the ported movie
+// accepted the update; callers fall back to GTA's HUD otherwise.
+bool SetReplayHud(const SvReplayHudState* state);
 // Time spent in the Present callback (render thread) since the last call.
 struct PresentStats {
     double totalMs = 0.0, maxMs = 0.0;

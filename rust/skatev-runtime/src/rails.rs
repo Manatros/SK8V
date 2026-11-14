@@ -29,23 +29,31 @@ const UPWARD_Z: f32 = 0.65;
 const CELL: f32 = 64.0;
 /// How far past the lip the probes look.
 const PROBE_OUT: f32 = 2.0;
-/// Open space the ground must drop below the lip, just past it.
-const MIN_DROP: f32 = 3.0;
+/// Open space the ground must drop below the lip, just past it (Skate 3 Maloof p5 ~ 5.6 cm).
+const MIN_DROP: f32 = 2.2;
 /// Height above the lip the wall probe runs at.
 const WALL_PROBE_UP: f32 = 3.0;
 /// Shortest rail kept, after merging and chaining.
 const MIN_RAIL: f32 = 24.0;
-/// Steepest rail, as rise over length: stair handrails and ramp edges pass.
-const MAX_SLOPE: f32 = 0.7;
-/// Upward faces folding less than this (45 degrees) are one curved surface.
-const SEAM_COS: f32 = 0.707_107;
+/// Steepest rail, as rise over length: steeper stair handrails and ramp edges pass.
+const MAX_SLOPE: f32 = 0.82;
+/// Upward faces folding less than ~28 degrees are one curved surface seam.
+const SMOOTH_SEAM_COS: f32 = 0.882_948;
+/// Shallow walkable faces (both n.z > 0.76) folding under 50 degrees are one surface seam.
+const WALKABLE_SEAM_COS: f32 = 0.642_788;
+/// Acute double-sided knife-edge fins (over ~112 degrees) are not grindable lips.
+const KNIFE_FOLD_COS: f32 = -0.375;
 /// The volume probe: below an open edge, how far down (just under the lip
 /// for thin slabs and seats, and deeper) and how far in a face must stand
 /// (inches).
 const SUPPORT_DOWN: [f32; 2] = [1.0, 3.0];
 const SUPPORT_IN: f32 = 8.0;
-/// Chains continue through a joint turning less than about 35 degrees.
-const MIN_TURN_COS: f32 = 0.82;
+/// Chains continue horizontally through connected L-corners up to ~110 degrees.
+const MIN_TURN_COS: f32 = -0.342_02;
+/// Straightest continuation threshold at T/X intersections in `chain` (~45 degrees).
+const BRANCH_STRAIGHT_COS: f32 = 0.707_107;
+/// Maximum vertical pitch jump across one chained or corner-joined joint (35 degrees).
+const MAX_PITCH_JUMP: f32 = 35.0 * std::f32::consts::PI / 180.0;
 /// SkateV: a face across the edge rising more than about one degree above
 /// the walkable face's plane makes the edge concave (sin 1 degree).
 const CONCAVE_SIN: f32 = 0.017_452;
@@ -55,8 +63,9 @@ const BURIED_CLEARANCE: f32 = 18.0;
 /// SkateV: spacing of the buried-lip samples along a lip.
 const BURIED_STEP: f32 = 2.0;
 /// SkateV: the buried test also looks this far to either side of the lip (a
-/// truck's half width): a handrail tube's other top edge lies just beside it.
-const BURIED_SIDE: f32 = 4.0;
+/// truck's half-width clearance along the board deck without adjacent poles
+/// on the drop side punching gaps in clean rails).
+const BURIED_SIDE: f32 = 2.2;
 /// SkateV: probes skip faces whose height span misses the probe's by more
 /// than this (inches).
 const HIT_Z_MARGIN: f32 = 1.0;
@@ -282,21 +291,24 @@ fn find_limited(tris: &[[Vec3; 3]], dirty: &crate::reuse::Dirty, metres: f32, ca
                 reject(focus, metres, a, b, "not convex (ground rises across the edge)");
                 break 'probe;
             }
-            // A shallow fold shared by two upward faces lying on opposite sides
-            // of the edge is a curved surface's facet seam: rounded wall tops,
-            // bowl transitions, convex crests (Manatros 2026-10-22 21:42: only
-            // edges steep enough to grind). Real lips meet a steep side.
+            // Skate 3 empirical dihedral gate: smooth upward folds (< 28 deg) or
+            // shallow walkable ground bends (both n.z > 0.76, < 50 deg) are
+            // continuous surfaces, and acute knife-edge fins (> 112 deg) are
+            // ungrindable thin sheets. Steeper ~45 deg bank/bevel lips pass.
             if across(e).any(|(far, t)| {
                 let tri = tris[t as usize];
                 let other = (tri[1] - tri[0]).cross(tri[2] - tri[0]).normalize_or_zero();
                 t != own_t
                     && along.cross(far - a).dot(along.cross(centroid - a)) < 0.
-                    // RIMS reach down to 0.02 (1110-1): the seam test follows, so a
-                    // steep curved wall's facet seam is no rim (peer review 2026-11-10, finding 3).
-                    && normal.z >= limits.upward_z.min(0.35) && other.z >= limits.upward_z.min(0.35)
-                    && normal.dot(other) > SEAM_COS
+                    && (normal.dot(other) < KNIFE_FOLD_COS
+                        || (normal.z >= limits.upward_z.min(0.35)
+                            && other.z >= limits.upward_z.min(0.35)
+                            && (normal.dot(other) > SMOOTH_SEAM_COS
+                                || (normal.z > 0.76
+                                    && other.z > 0.76
+                                    && normal.dot(other) > WALKABLE_SEAM_COS))))
             }) {
-                reject(focus, metres, a, b, "continuous surface facet seam or rounded edge (under 45 degrees)");
+                reject(focus, metres, a, b, "continuous surface facet seam, rounded edge, or knife-edge fin");
                 break 'probe;
             }
             let mid = (a + b) * 0.5;
@@ -364,6 +376,12 @@ fn find_limited(tris: &[[Vec3; 3]], dirty: &crate::reuse::Dirty, metres: f32, ca
     let run_count = runs.len();
     let mut rails = chain(runs);
     rails.retain(|rail| {
+        if is_rubble_zigzag(rail) {
+            if rail.len() >= 2 {
+                reject(focus, metres, rail[0], rail[rail.len() - 1], "irregular short stone/rubble zig-zag");
+            }
+            return false;
+        }
         let long = polyline_len(rail) >= MIN_RAIL;
         if !long && rail.len() >= 2 {
             reject(focus, metres, rail[0], rail[rail.len() - 1], "rail shorter than 24 inches");
@@ -408,8 +426,32 @@ pub fn off_flight_noses_split(rails: Vec<Vec<Vec3>>) -> (Vec<Vec<Vec3>>, Vec<Vec
     /// Rise over run of a flight: about 14 to 51 degrees.
     const PITCH: std::ops::RangeInclusive<f32> = 0.25..=1.25;
     const MIN_FLIGHT: usize = 3;
+    const CORNER_COS: f32 = 0.906_308; // cos(25 deg): split sharp corners without breaking curved arcs
     struct Nose { a: Vec3, dir: Vec3, len: f32, mid: Vec3 }
-    let noses: Vec<Option<Nose>> = rails.iter().map(|r| {
+
+    // Break corner-chained polylines at sharp bends before classifying flights
+    // so a stair nose turning onto a perpendicular plaza ledge drops only the tread.
+    let mut stretches: Vec<(usize, Vec<Vec3>)> = Vec::new();
+    for (orig, r) in rails.iter().enumerate() {
+        if r.len() < 3 {
+            stretches.push((orig, r.clone()));
+            continue;
+        }
+        let mut cur = vec![r[0], r[1]];
+        for w in r.windows(3) {
+            let d0 = (w[1] - w[0]).normalize_or_zero();
+            let d1 = (w[2] - w[1]).normalize_or_zero();
+            if d0 != Vec3::ZERO && d1 != Vec3::ZERO && d0.dot(d1) < CORNER_COS {
+                stretches.push((orig, std::mem::take(&mut cur)));
+                cur = vec![w[1], w[2]];
+            } else {
+                cur.push(w[2]);
+            }
+        }
+        stretches.push((orig, cur));
+    }
+
+    let noses: Vec<Option<Nose>> = stretches.iter().map(|(_, r)| {
         let (mut a, mut b) = (*r.first()?, *r.last()?);
         // One direction for every nose, so "to the left of it" means the
         // same side for all of them.
@@ -418,8 +460,15 @@ pub fn off_flight_noses_split(rails: Vec<Vec<Vec3>>) -> (Vec<Vec<Vec3>>, Vec<Vec
         }
         let flat = Vec3::new(b.x - a.x, b.y - a.y, 0.);
         let len = flat.length();
-        let level = len >= 0.3 && (b.z - a.z).abs() <= 0.1 * len
-            && r.iter().all(|p| (p.z - a.z).abs() <= 0.05 + 0.1 * len);
+        let (mut lo_z, mut hi_z) = (a.z, a.z);
+        for &p in r {
+            lo_z = lo_z.min(p.z);
+            hi_z = hi_z.max(p.z);
+        }
+        // Real stair step noses are nearly horizontal across the whole tread;
+        // scaling z tolerance linearly with length misclassified sloped highway
+        // barriers as level stair steps.
+        let level = len >= 0.3 && (hi_z - lo_z) <= 0.08;
         level.then(|| Nose { a, dir: flat / len, len, mid: (a + b) * 0.5 })
     }).collect();
     // Noses one step apart, with the side the flight climbs towards.
@@ -437,7 +486,12 @@ pub fn off_flight_noses_split(rails: Vec<Vec<Vec3>>) -> (Vec<Vec<Vec3>>, Vec<Vec
             if !RISE.contains(&rise.abs()) || !RUN.contains(&side.abs()) || !PITCH.contains(&(rise.abs() / side.abs())) {
                 continue;
             }
-            // Overlap along the nose by half the shorter one.
+            // Overlap along the nose by half the shorter one, and require
+            // comparable step widths so a short curb never drags a long ledge
+            // into a fake stair flight.
+            if n.len.min(m.len) < 0.35 * n.len.max(m.len) {
+                continue;
+            }
             let (s0, s1) = ((m.a - n.a).dot(n.dir), (m.a - n.a).dot(n.dir) + m.len);
             if s1.min(n.len) - s0.max(0.) < 0.5 * n.len.min(m.len) {
                 continue;
@@ -445,7 +499,7 @@ pub fn off_flight_noses_split(rails: Vec<Vec<Vec3>>) -> (Vec<Vec<Vec3>>, Vec<Vec
             steps.push((i, j, (rise > 0.) == (side > 0.)));
         }
     }
-    let mut parent: Vec<usize> = (0..rails.len()).collect();
+    let mut parent: Vec<usize> = (0..stretches.len()).collect();
     fn root(p: &mut [usize], mut i: usize) -> usize {
         while p[i] != i { p[i] = p[p[i]]; i = p[i]; }
         i
@@ -462,21 +516,60 @@ pub fn off_flight_noses_split(rails: Vec<Vec<Vec3>>) -> (Vec<Vec<Vec3>>, Vec<Vec
         let e = climb.entry(r).or_insert(Some(up));
         if *e != Some(up) { *e = None; }
     }
-    let mut size = vec![0usize; rails.len()];
-    for i in 0..rails.len() {
+    let mut size = vec![0usize; stretches.len()];
+    for i in 0..stretches.len() {
         if noses[i].is_some() {
             let r = root(&mut parent, i);
             size[r] += 1;
         }
     }
-    let flight: Vec<bool> = (0..rails.len())
+    let flight: Vec<bool> = (0..stretches.len())
         .map(|i| {
             let r = root(&mut parent, i);
             noses[i].is_some() && size[r] >= MIN_FLIGHT && climb.get(&r).is_some_and(|c| c.is_some())
         })
         .collect();
-    let (noses, kept): (Vec<_>, Vec<_>) = rails.into_iter().zip(flight).partition(|(_, f)| *f);
-    (kept.into_iter().map(|(r, _)| r).collect(), noses.into_iter().map(|(r, _)| r).collect())
+    let mut orig_has_flight = vec![false; rails.len()];
+    for (&(orig, _), &f) in stretches.iter().zip(&flight) {
+        if f {
+            orig_has_flight[orig] = true;
+        }
+    }
+    let mut kept: Vec<Vec<Vec3>> = rails
+        .iter()
+        .enumerate()
+        .filter(|&(i, _)| !orig_has_flight[i])
+        .map(|(_, r)| r.clone())
+        .collect();
+    let mut dropped = Vec::new();
+    let mut pending: Option<(usize, Vec<Vec3>)> = None;
+    for ((orig, s), is_flight) in stretches.into_iter().zip(flight) {
+        if is_flight {
+            if let Some((_, run)) = pending.take() {
+                kept.push(run);
+            }
+            dropped.push(s);
+            continue;
+        }
+        if !orig_has_flight[orig] {
+            continue;
+        }
+        match &mut pending {
+            Some((prev_orig, run)) if *prev_orig == orig && run.last() == s.first() => {
+                run.extend_from_slice(&s[1..]);
+            }
+            _ => {
+                if let Some((_, run)) = pending.take() {
+                    kept.push(run);
+                }
+                pending = Some((orig, s));
+            }
+        }
+    }
+    if let Some((_, run)) = pending {
+        kept.push(run);
+    }
+    (kept, dropped)
 }
 
 pub fn dedupe_metres(rails: &mut Vec<Vec<Vec3>>) -> usize {
@@ -491,10 +584,10 @@ fn dedupe(rails: &mut Vec<Vec<Vec3>>) -> usize {
 }
 
 fn dedupe_within(rails: &mut Vec<Vec<Vec3>>, span: f32) -> usize {
-    // GTAxSkate: at least 9 cm (3.5 inches). A faceted tube or a narrow top
-    // gave lines 7 cm apart that all survived (2026-10-19 Vespucci drops:
-    // three lines per placed rail); trucks span them all.
-    let radius = (2.0 * skate_core::physics::board::RETAIL_WHEEL_RADIUS / INCH).max(span);
+    // Only true pipe facet duplicates and slim < 5.08 cm (2.0 in) tubes merge
+    // onto one crown; rectangular wall caps and twin curbs >= 5.2 cm apart stay
+    // locked directly on their actual GTA collision edges (Skate 3 DownTown rule).
+    let radius = span;
     let mut order: Vec<usize> = (0..rails.len()).collect();
     order.sort_by(|&a, &b| polyline_len(&rails[b]).total_cmp(&polyline_len(&rails[a])));
     // Kept segments by grid cell (every cell a segment's padded box touches).
@@ -597,12 +690,12 @@ fn dedupe_within(rails: &mut Vec<Vec<Vec3>>, span: f32) -> usize {
 
 /// Shortest uncovered tail (inches, 30 cm) a dropped duplicate leaves behind.
 const TAIL_MIN: f32 = 11.8;
-/// Duplicate lines closer than this (inches) are one rail (`dedupe`).
-const DUPLICATE_SPAN: f32 = 3.5;
-/// Both edges of a narrow wall cap found on `tris` collapse to one crown line: the
-/// 1110-14 planter cap's lips lie 10.09 cm (3.97 in) apart in the finder's input,
-/// so 4.1 in (10.4 cm). Lines 4.0 in apart and more stay apart in `dedupe`.
-const CAP_SPAN: f32 = 4.1;
+/// Duplicate pipe/facet lines closer than this (inches, 5.54 cm) are one rail (`dedupe`).
+const DUPLICATE_SPAN: f32 = 2.18;
+/// Genuine thin rail tubes <= 2.18 in (5.54 cm, including 5 cm tubes with slight endpoint
+/// stagger) collapse onto one crown line, while twin edges >= 6.0 cm apart (including
+/// DownTown 6.7-12.4 cm caps and A49 track heads) remain directly on their collision edges.
+const CAP_SPAN: f32 = 2.18;
 /// Share of a line (percent) on a kept rail that makes it a duplicate.
 const COVERED_PERCENT: usize = 75;
 
@@ -751,6 +844,11 @@ pub fn join_ends(rails: &mut Vec<Vec<Vec3>>) -> usize {
     join_ends_within(rails, 0.22)
 }
 
+/// As [`join_ends`], but rejects non-overlapping straight gaps where `allow_gap(end, start)` is false.
+pub fn join_ends_guarded(rails: &mut Vec<Vec<Vec3>>, allow_gap: &dyn Fn(Vec3, Vec3) -> bool) -> usize {
+    join_ends_inner(rails, 0.22, &|_, _| false, allow_gap)
+}
+
 /// Gap a visible-model rail's bend may leave (metres): the finder takes the
 /// straight tubes but not the curved piece between them (Manatros
 /// 2026-10-25 mark 9: a metro handrail broke 1.1 m between its landing piece
@@ -760,10 +858,10 @@ pub const BEND_GAP: f32 = 1.3;
 const BEND_TURN: f32 = 8.0 * std::f32::consts::PI / 180.0;
 
 /// How far a piece may start behind the previous one's end and still join
-/// (m), and how far to the side (m): track edge lines lie 3 cm or more apart
-/// (A49) and must never fuse.
+/// (m), and how far to the side (m): barrier seams stagger up to ~2.5 cm while
+/// track edge lines lie 3 cm or more apart (A49) and must never fuse.
 const OVERLAP_JOIN: f32 = 0.12;
-const OVERLAP_SIDE: f32 = 0.02;
+const OVERLAP_SIDE: f32 = 0.027;
 
 /// As [`join_ends`], with ends up to `gap` apart (connector and both ends
 /// within 35 degrees of one direction).
@@ -774,8 +872,21 @@ pub fn join_ends_within(rails: &mut Vec<Vec<Vec3>>, gap: f32) -> usize {
 /// As [`join_ends_within`]; a gap wider than the usual one without a bend
 /// also joins when `bridge(end, start)` says the geometry continues along it.
 pub fn join_ends_bridging(rails: &mut Vec<Vec<Vec3>>, gap: f32, bridge: &dyn Fn(Vec3, Vec3) -> bool) -> usize {
+    join_ends_inner(rails, gap, bridge, &|_, _| true)
+}
+
+fn join_ends_inner(rails: &mut Vec<Vec<Vec3>>, gap: f32, bridge: &dyn Fn(Vec3, Vec3) -> bool, allow_gap: &dyn Fn(Vec3, Vec3) -> bool) -> usize {
     let join_gap = gap;
     let min_dot = 35.0f32.to_radians().cos();
+    let tier_dot = 25.0f32.to_radians().cos();
+    let corner_dot = 105.0f32.to_radians().cos();
+    let max_pitch_jump = 35.0f32.to_radians();
+    let pitch_of = |v: Vec3| v.z.atan2(Vec3::new(v.x, v.y, 0.).length());
+    let yaw_dot = |a: Vec3, b: Vec3| {
+        let axy = Vec3::new(a.x, a.y, 0.).normalize_or_zero();
+        let bxy = Vec3::new(b.x, b.y, 0.).normalize_or_zero();
+        if axy != Vec3::ZERO && bxy != Vec3::ZERO { axy.dot(bxy) } else { a.dot(b) }
+    };
     let bucket = gap.max(0.25);
     let reach = (gap / bucket).ceil() as i32;
     let key = |p: Vec3| ((p.x/bucket).floor() as i32, (p.y/bucket).floor() as i32, (p.z/bucket).floor() as i32);
@@ -799,7 +910,18 @@ pub fn join_ends_bridging(rails: &mut Vec<Vec<Vec3>>, gap: f32, bridge: &dyn Fn(
                     let q=tip(&rails[j],other); let distance=p.distance(q);
                     let incoming=-out(&rails[j],other);
                     let alignment=direction.dot(incoming);
-                    if distance>join_gap || alignment<min_dot {continue;}
+                    let h_align = yaw_dot(direction, incoming);
+                    if distance>join_gap {continue;}
+                    if (pitch_of(direction) - pitch_of(incoming)).abs() > max_pitch_jump { continue; }
+                    let is_corner = alignment < min_dot;
+                    if is_corner {
+                        // Touching corners across a tile/slice boundary (<= 3.5 cm) or
+                        // geometry-backed corner vertices (<= 14 cm) continue as one rail,
+                        // leaving unbridged 5 cm test gaps separate.
+                        if h_align < corner_dot || (distance > 0.035 && !(distance <= 0.14 && bridge(p, q))) {
+                            continue;
+                        }
+                    }
                     // Pieces that overlap a little (the next one starts up to
                     // 12 cm behind this end, within 2 cm sideways) are one
                     // rail too (2026-10-26 mark 4: a curved ledge in ten
@@ -810,11 +932,29 @@ pub fn join_ends_bridging(rails: &mut Vec<Vec<Vec3>>, gap: f32, bridge: &dyn Fn(
                     let mean=(direction+incoming).normalize_or_zero();
                     let delta=q-p; let along=delta.dot(mean);
                     if along<0.0 {
+                        if is_corner { continue; }
                         let lateral=(delta-mean*along).length();
                         let lengths=polyline_len(r).min(polyline_len(&rails[j]));
                         if -along<=OVERLAP_JOIN && lateral<=OVERLAP_SIDE && lengths>-2.0*along {
-                            candidates.push((distance,-alignment,i,side,j,other));
+                            let tier: u8 = if alignment >= tier_dot { 0 } else { 1 };
+                            candidates.push((tier,distance,-alignment,i,side,j,other));
                         }
+                        continue;
+                    }
+                    if is_corner {
+                        if !allow_gap(p, q) {
+                            continue;
+                        }
+                        if distance >= 0.035 {
+                            let connector = (q - p) / distance;
+                            if connector.dot(direction) < -0.15 || connector.dot(incoming) < -0.15 {
+                                continue;
+                            }
+                        }
+                        candidates.push((2u8,distance,-alignment,i,side,j,other));
+                        continue;
+                    }
+                    if !allow_gap(p, q) {
                         continue;
                     }
                     // Past the usual gap only a bend: the direction changes
@@ -830,15 +970,16 @@ pub fn join_ends_bridging(rails: &mut Vec<Vec<Vec3>>, gap: f32, bridge: &dyn Fn(
                         let connector=(q-p)/distance;
                         if connector.dot(direction)<min_dot || connector.dot(incoming)<min_dot {continue;}
                     }
-                    candidates.push((distance,-alignment,i,side,j,other));
+                    let tier: u8 = if alignment >= tier_dot { 0 } else { 1 };
+                    candidates.push((tier,distance,-alignment,i,side,j,other));
                 }
             }}}
         }
     }
-    candidates.sort_unstable_by(|a,b| a.0.total_cmp(&b.0).then(a.1.total_cmp(&b.1))
-        .then((a.2,a.3,a.4,a.5).cmp(&(b.2,b.3,b.4,b.5))));
+    candidates.sort_unstable_by(|a,b| a.0.cmp(&b.0).then(a.1.total_cmp(&b.1)).then(a.2.total_cmp(&b.2))
+        .then((a.3,a.4,a.5,a.6).cmp(&(b.3,b.4,b.5,b.6))));
     let mut links=vec![[None;2];rails.len()];
-    for (_,_,i,side,j,other) in candidates {
+    for (_,_,_,i,side,j,other) in candidates {
         if links[i][side].is_none() && links[j][other].is_none() {
             links[i][side]=Some((j,other)); links[j][other]=Some((i,side));
         }
@@ -1079,15 +1220,47 @@ impl Probe<'_> {
     }
 
     fn is_lip(&mut self, p: Vec3, out: Vec3, across: &[u32]) -> bool {
-        let down_from = p + out * PROBE_OUT + Vec3::Z;
-        let tris = self.tris;
-        if across.iter().any(|&i| ray_triangle(down_from, -Vec3::Z, 1. + MIN_DROP, &tris[i as usize]))
-            || self.hit(down_from, -Vec3::Z, 1. + MIN_DROP)
-        {
+        let across_from = p - out + Vec3::Z * WALL_PROBE_UP;
+        if self.hit(across_from, out, 2. + PROBE_OUT) {
             return false;
         }
-        let across_from = p - out + Vec3::Z * WALL_PROBE_UP;
-        !self.hit(across_from, out, 2. + PROBE_OUT)
+        let down_from = p + out * PROBE_OUT + Vec3::Z;
+        let tris = self.tris;
+        let direct_blocked = across.iter().any(|&i| ray_triangle(down_from, -Vec3::Z, 1. + MIN_DROP, &tris[i as usize]))
+            || self.hit(down_from, -Vec3::Z, 1. + MIN_DROP);
+        let flat_out = Vec3::new(out.x, out.y, 0.).normalize_or_zero();
+        if direct_blocked {
+            // Chamfered / 45 deg bank lips (Skate 3 SkateSchool/Maloof, 1110-11):
+            // at 2 in out the bevel slope itself is only ~2 in lower, so verify a
+            // real downward bevel face on `across` AND >= 3 in clear drop at 5 in out.
+            let has_bevel = flat_out != Vec3::ZERO && across.iter().any(|&i| {
+                let t = &tris[i as usize];
+                let n = (t[1] - t[0]).cross(t[2] - t[0]).normalize_or_zero();
+                n.z >= 0.15 && n.z <= 0.76 && n.dot(flat_out) > 0.25
+            });
+            if !has_bevel
+                || self.hit(p + flat_out * 5.0 + Vec3::Z, -Vec3::Z, 1. + 3.0)
+                || self.hit(p - flat_out + Vec3::Z * 1.5, flat_out, 6.0)
+            {
+                return false;
+            }
+        }
+        // Narrow steps sitting right in front of a taller wall (e.g. freeway jersey
+        // barrier lower shoulder < 25 cm in front of a >= 20 cm wall) trap boards
+        // into wall-slams; freestanding rails with open air in front of the wall stay.
+        if flat_out != Vec3::ZERO {
+            if let (Some(t1), Some(t2)) = (
+                self.hit_dist(p + flat_out * 0.5 + Vec3::Z * 4.5, -flat_out, 11.5),
+                self.hit_dist(p + flat_out * 0.5 + Vec3::Z * 8.0, -flat_out, 11.5),
+            ) {
+                let wall_in = (t1.min(t2) - 0.5).clamp(1.0, 11.0);
+                let probe_in = (wall_in * 0.75).max(wall_in - 1.5);
+                if self.hit(p - flat_out * probe_in + Vec3::Z * 1.5, -Vec3::Z, 3.0) {
+                    return false;
+                }
+            }
+        }
+        true
     }
 
     /// SkateV: the triangles any buried-lip ray of lip `a`..`b` could hit:
@@ -1231,6 +1404,11 @@ impl Probe<'_> {
     /// Whether the segment from `origin` along unit `dir` for `len` crosses
     /// any triangle, either side facing.
     fn hit(&mut self, origin: Vec3, dir: Vec3, len: f32) -> bool {
+        self.hit_dist(origin, dir, len).is_some()
+    }
+
+    /// Nearest intersection distance in `(1e-4..=len]` along `origin + dir * t`, if any.
+    fn hit_dist(&mut self, origin: Vec3, dir: Vec3, len: f32) -> Option<f32> {
         let end = origin + dir * len;
         let (min, max) = (origin.min(end), origin.max(end));
         let (zlo, zhi) = (min.z - HIT_Z_MARGIN, max.z + HIT_Z_MARGIN);
@@ -1257,7 +1435,8 @@ impl Probe<'_> {
         }
         self.scratch
             .iter()
-            .any(|&index| ray_triangle(origin, dir, len, &self.tris[index as usize]))
+            .filter_map(|&index| ray_triangle_hit(origin, dir, len, 0.0, &self.tris[index as usize]))
+            .min_by(f32::total_cmp)
     }
 }
 
@@ -1292,27 +1471,33 @@ fn plan_span(from: Vec3, along: Vec3, tri: &[Vec3; 3], pad: f32) -> (f32, f32) {
 }
 
 /// Möller–Trumbore, both faces, hits within `(0, len]`.
-fn ray_triangle(origin: Vec3, dir: Vec3, len: f32, tri: &[Vec3; 3]) -> bool {
+/// Nearest intersection distance in `(1e-4..=len]` of segment `[origin, origin + dir * len]`
+/// against `tri` with optional barycentric margin `pad`, or `None`.
+pub(crate) fn ray_triangle_hit(origin: Vec3, dir: Vec3, len: f32, pad: f32, tri: &[Vec3; 3]) -> Option<f32> {
     let e1 = tri[1] - tri[0];
     let e2 = tri[2] - tri[0];
     let p = dir.cross(e2);
     let det = e1.dot(p);
     if det.abs() < 1e-8 {
-        return false;
+        return None;
     }
     let inv = 1. / det;
     let s = origin - tri[0];
     let u = s.dot(p) * inv;
-    if !(0. ..=1.).contains(&u) {
-        return false;
+    if u < -pad || u > 1. + pad {
+        return None;
     }
     let q = s.cross(e1);
     let v = dir.dot(q) * inv;
-    if v < 0. || u + v > 1. {
-        return false;
+    if v < -pad || u + v > 1. + pad {
+        return None;
     }
     let t = e2.dot(q) * inv;
-    t > 1e-4 && t <= len
+    (t > 1e-4 && t <= len).then_some(t)
+}
+
+fn ray_triangle(origin: Vec3, dir: Vec3, len: f32, tri: &[Vec3; 3]) -> bool {
+    ray_triangle_hit(origin, dir, len, 0.0, tri).is_some()
 }
 
 /// Lips on one line, merged into maximal runs where they overlap or touch.
@@ -1356,8 +1541,44 @@ fn merge_collinear(lips: Vec<(Vec3, Vec3)>) -> Vec<(Vec3, Vec3)> {
     runs
 }
 
-/// Runs joined end to end into polylines through joints where exactly two
-/// runs meet at a gentle turn.
+/// Short chaotic zig-zags emitted on irregular rock/rubble geometry (`1029-M3`)
+/// reverse turn direction repeatedly within 2 m without forming a real edge.
+fn is_rubble_zigzag(rail: &[Vec3]) -> bool {
+    if rail.len() < 5 {
+        return false;
+    }
+    let len = polyline_len(rail);
+    if len >= 2.0 / INCH {
+        return false;
+    }
+    let chord = rail.first().zip(rail.last()).map_or(0.0, |(a, b)| a.distance(*b));
+    if chord >= 0.78 * len {
+        return false;
+    }
+    let sin_tol = 12.0f32.to_radians().sin();
+    let (mut total_turn, mut prev_sign, mut reversals) = (0.0f32, 0i8, 0usize);
+    for w in rail.windows(3) {
+        let d0 = (w[1] - w[0]).normalize_or_zero();
+        let d1 = (w[2] - w[1]).normalize_or_zero();
+        if d0 == Vec3::ZERO || d1 == Vec3::ZERO {
+            continue;
+        }
+        total_turn += d0.dot(d1).clamp(-1.0, 1.0).acos();
+        let cz = d0.x * d1.y - d0.y * d1.x;
+        let sign = if cz > sin_tol { 1 } else if cz < -sin_tol { -1 } else { 0 };
+        if sign != 0 {
+            if prev_sign != 0 && sign != prev_sign {
+                reversals += 1;
+            }
+            prev_sign = sign;
+        }
+    }
+    let deg_per_m = total_turn.to_degrees() / (len * INCH).max(1e-3);
+    reversals >= 2 && deg_per_m > 55.0
+}
+
+/// Runs joined end to end into polylines through connected vertices, including
+/// angled corners up to 110 deg horizontally without diving down steep pitch jumps.
 fn chain(runs: Vec<(Vec3, Vec3)>) -> Vec<Vec<Vec3>> {
     let node = |v: Vec3| v.to_array().map(|x| x.round() as i32);
     let mut at: HashMap<[i32; 3], Vec<(usize, bool)>> = HashMap::default();
@@ -1368,23 +1589,69 @@ fn chain(runs: Vec<(Vec3, Vec3)>) -> Vec<Vec<Vec3>> {
     let mut used = vec![false; runs.len()];
     let far = |i: usize, from_end: bool| if from_end { runs[i].0 } else { runs[i].1 };
     let near = |i: usize, from_end: bool| if from_end { runs[i].1 } else { runs[i].0 };
+    let pitch = |v: Vec3| v.z.atan2(Vec3::new(v.x, v.y, 0.).length());
     // The run continuing a polyline at `joint`, arriving along `heading`.
     let next = |joint: Vec3, heading: Vec3, used: &[bool]| -> Option<(usize, bool)> {
         let there = at.get(&node(joint))?;
-        if there.len() != 2 {
-            return None;
-        }
-        let &(i, at_end) = there.iter().find(|(i, _)| !used[*i])?;
-        let leave = (far(i, at_end) - near(i, at_end)).normalize_or_zero();
-        (heading.dot(leave) >= MIN_TURN_COS).then_some((i, at_end))
+        let min_yaw = if there.len() == 2 { MIN_TURN_COS } else { BRANCH_STRAIGHT_COS };
+        let h_xy = Vec3::new(heading.x, heading.y, 0.).normalize_or_zero();
+        let h_pitch = pitch(heading);
+        there
+            .iter()
+            .filter(|&&(i, _)| !used[i])
+            .filter_map(|&(i, at_end)| {
+                let p_near = near(i, at_end);
+                if p_near.distance(joint) > 1.5 {
+                    return None;
+                }
+                let leave = (far(i, at_end) - p_near).normalize_or_zero();
+                if leave == Vec3::ZERO || (h_pitch - pitch(leave)).abs() > MAX_PITCH_JUMP {
+                    return None;
+                }
+                let l_xy = Vec3::new(leave.x, leave.y, 0.).normalize_or_zero();
+                let yaw = if h_xy != Vec3::ZERO && l_xy != Vec3::ZERO {
+                    h_xy.dot(l_xy)
+                } else {
+                    heading.dot(leave)
+                };
+                if yaw < min_yaw {
+                    return None;
+                }
+                // Do not wrap 180 deg around a short (< 10 in / 25 cm) thin-cap end edge
+                // back onto the opposite parallel side of the same narrow planter/barrier.
+                let to = far(i, at_end);
+                if there.len() == 2 && yaw < 0.5 && to.distance(p_near) < 10.0 {
+                    if let Some(after) = at.get(&node(to)) {
+                        let u_turn = after.iter().filter(|&&(j, _)| j != i).any(|&(j, j_end)| {
+                            let d2 = (far(j, j_end) - near(j, j_end)).normalize_or_zero();
+                            let d2_xy = Vec3::new(d2.x, d2.y, 0.).normalize_or_zero();
+                            h_xy != Vec3::ZERO && d2_xy != Vec3::ZERO && h_xy.dot(d2_xy) < -0.5
+                        });
+                        if u_turn {
+                            return None;
+                        }
+                    }
+                }
+                Some((yaw, i, at_end))
+            })
+            .max_by(|a, b| a.0.total_cmp(&b.0))
+            .map(|(_, i, at_end)| (i, at_end))
     };
     let mut rails = Vec::new();
-    for start in 0..runs.len() {
-        if used[start] {
-            continue;
-        }
-        used[start] = true;
-        let (a, b) = runs[start];
+    let mut order: Vec<usize> = (0..runs.len()).collect();
+    order.sort_by(|&i, &j| (runs[j].1 - runs[j].0).length_squared().total_cmp(&(runs[i].1 - runs[i].0).length_squared()));
+    // Pass 1 starts from main edges (>= 10 in) so short thin-cap ends cannot initiate
+    // a hairpin U-turn; Pass 2 still chains multi-segment curved coping arcs made of short facets.
+    for short_pass in [false, true] {
+        for &start in &order {
+            if used[start] {
+                continue;
+            }
+            let (a, b) = runs[start];
+            if !short_pass && a.distance(b) < 10.0 {
+                continue;
+            }
+            used[start] = true;
         let mut points = std::collections::VecDeque::from([a, b]);
         // Forward from b, then backward from a.
         let mut tip = b;
@@ -1406,6 +1673,7 @@ fn chain(runs: Vec<(Vec3, Vec3)>) -> Vec<Vec<Vec3>> {
             points.push_front(to);
         }
         rails.push(points.into_iter().collect());
+        }
     }
     rails
 }
@@ -1439,6 +1707,27 @@ mod tests {
         let mut rails = vec![vec![v(-617.908, -128.0), v(-640.0, -115.001)], vec![v(-640.0, -114.990), v(-704.0, -86.114)]];
         assert_eq!(join_ends(&mut rails), 1);
         assert_eq!(rails.len(), 1);
+    }
+
+    #[test]
+    fn barrier_seams_under_27_mm_join_while_3_cm_track_heads_stay_separate() {
+        let v = |x: f32, y: f32, z: f32| Vec3::new(x, y, z);
+        // Mark 1111-1: fwy_01_3 top barrier seams stagger by 2.1-2.5 cm
+        // across overlapping segment ends and must fuse into one rail.
+        let mut barrier = vec![
+            vec![v(-229.272, -523.773, 34.660), v(-226.971, -515.239, 34.661)],
+            vec![v(-226.991, -515.235, 34.647), v(-223.800, -503.400, 34.650)],
+        ];
+        assert_eq!(join_ends(&mut barrier), 1);
+        assert_eq!(barrier.len(), 1);
+
+        // A49: parallel train track edges >= 3.0 cm apart stay separate.
+        let mut tracks = vec![
+            vec![v(0.0, 0.0, 1.0), v(5.0, 0.0, 1.0)],
+            vec![v(4.95, 0.03, 1.0), v(10.0, 0.03, 1.0)],
+        ];
+        assert_eq!(join_ends(&mut tracks), 0);
+        assert_eq!(tracks.len(), 2);
     }
 
     #[test]
@@ -2048,7 +2337,8 @@ mod tests {
         assert!(!rim.is_empty(), "steep quarterpipe side rim keeps its rail: {rim:?}");
 
         // A 10 cm (3.94 in) planter wall cap with a 15% longitudinal slope (1110-12, 1110-14):
-        // its rising walkable top must not self-bury on side rays, and its two lips collapse to one.
+        // its rising walkable top must not self-bury on side rays, and per Skate 3 DownTown
+        // rules (>= 5.2 cm caps) both outer edges remain locked directly on collision geometry.
         let mut cap: Vec<[Vec3; 3]> = level(-5., -5., 5., 5., 0.).to_vec();
         let (z0, z1) = (0.35, 0.80);
         let (tl0, tr0, tl1, tr1) = (
@@ -2063,7 +2353,9 @@ mod tests {
         cap.extend([[bl0, tl0, tl1], [bl0, tl1, bl1]]);
         cap.extend([[tr0, br0, br1], [tr0, br1, tr1]]);
         let (rails, _) = find_metres(&cap);
-        assert_eq!(rails.len(), 1, "10 cm sloped wall cap collapses to one unburied crown line: {rails:?}");
+        assert_eq!(rails.len(), 2, "10 cm sloped wall cap keeps both geometry-adherent outer rails: {rails:?}");
+        assert!(rails.iter().any(|r| r.iter().all(|p| p.y.abs() < 1e-3)), "left cap edge on geometry: {rails:?}");
+        assert!(rails.iter().any(|r| r.iter().all(|p| (p.y - 0.10).abs() < 1e-3)), "right cap edge on geometry: {rails:?}");
     }
 
     #[test]
@@ -2085,6 +2377,139 @@ mod tests {
         let (rails, _) = find_metres(&bowed);
         assert!(rails.iter().any(|r| polyline_len(r) > 2.5 && r.iter().all(|p| p.y.abs() < 0.02)),
             "1 cm T-junction bow keeps its curb lip: {rails:?}");
+    }
+
+    #[test]
+    fn forty_five_degree_bevel_lip_is_grindable_but_knife_fin_is_not() {
+        let v = Vec3::new;
+        let mut t = Vec::new();
+        // Flat deck (y = 0..2, z = 0.5) meeting a 45 deg bank (y = 0 -> -0.5, z = 0.5 -> 0.0).
+        t.extend(level(-1.5, 0.0, 1.5, 2.0, 0.5));
+        t.push([v(-1.5, 0.0, 0.5), v(-1.5, -0.5, 0.0), v(1.5, -0.5, 0.0)]);
+        t.push([v(-1.5, 0.0, 0.5), v(1.5, -0.5, 0.0), v(1.5, 0.0, 0.5)]);
+        t.extend(level(-3.0, -3.0, 3.0, -0.5, 0.0));
+        let (rails, _) = find_metres(&t);
+        assert!(rails.iter().any(|r| r.iter().all(|p| p.y.abs() < 0.02 && (p.z - 0.5).abs() < 0.02)),
+            "45 deg bevel/bank lip produces a continuous grind rail: {rails:?}");
+
+        // Acute double-sided ~153 deg knife-edge fin must not generate a rail.
+        let mut fin = Vec::new();
+        fin.push([v(-1.5, 0.0, 1.0), v(1.5, 0.0, 1.0), v(1.5, -0.2, 0.2)]);
+        fin.push([v(-1.5, 0.0, 1.0), v(1.5, -0.2, 0.2), v(-1.5, -0.2, 0.2)]);
+        fin.push([v(-1.5, 0.0, 1.0), v(-1.5, 0.2, 0.2), v(1.5, 0.2, 0.2)]);
+        fin.push([v(-1.5, 0.0, 1.0), v(1.5, 0.2, 0.2), v(1.5, 0.0, 1.0)]);
+        let (fin_rails, _) = find_metres(&fin);
+        assert!(fin_rails.is_empty(), "acute knife-edge fin stays ungrindable: {fin_rails:?}");
+    }
+
+    #[test]
+    fn connected_right_angle_ledge_chains_into_one_rail() {
+        let v = Vec3::new;
+        // L-shaped raised deck on ground: inner walls/outer walls forming a 90 deg vertex at (0, 0, 0.5).
+        let mut t = Vec::new();
+        t.extend(level(-4.0, -4.0, 4.0, 4.0, 0.0));
+        t.extend(level(-2.0, -2.0, 0.0, 0.0, 0.5));
+        t.extend(level(0.0, -2.0, 2.0, 0.0, 0.5));
+        t.extend(level(0.0, 0.0, 2.0, 2.0, 0.5));
+        t.extend(upright(-2.0, 2.0, -2.0, 0.0, 0.5));
+        t.extend(upright(-2.0, 0.0, 0.0, 0.0, 0.5));
+        // Wall along x = 0 from y = 0..2 and y = 2 from x = 0..2.
+        t.push([v(0.0, 0.0, 0.0), v(0.0, 2.0, 0.0), v(0.0, 2.0, 0.5)]);
+        t.push([v(0.0, 0.0, 0.0), v(0.0, 2.0, 0.5), v(0.0, 0.0, 0.5)]);
+        t.extend(upright(0.0, 2.0, 2.0, 0.0, 0.5));
+        t.push([v(2.0, -2.0, 0.0), v(2.0, 2.0, 0.0), v(2.0, 2.0, 0.5)]);
+        t.push([v(2.0, -2.0, 0.0), v(2.0, 2.0, 0.5), v(2.0, -2.0, 0.5)]);
+        t.push([v(-2.0, -2.0, 0.0), v(-2.0, 0.0, 0.0), v(-2.0, 0.0, 0.5)]);
+        t.push([v(-2.0, -2.0, 0.0), v(-2.0, 0.0, 0.5), v(-2.0, -2.0, 0.5)]);
+        let (rails, _) = find_metres(&t);
+        // The entire perimeter of the L-ledge chains around 90 deg corners.
+        assert!(rails.iter().any(|r| polyline_len(r) > 10.0), "L-ledge perimeter chains continuously across 90 deg corners: {rails:?}");
+
+        // Touching corner across a 1 cm tile boundary also joins cleanly, while a >35 deg vertical dive does not.
+        let mut touching = vec![
+            vec![v(0.0, 0.0, 1.0), v(2.0, 0.0, 1.0)],
+            vec![v(2.01, 0.0, 1.0), v(2.01, 2.0, 1.0)],
+        ];
+        assert_eq!(join_ends(&mut touching), 1);
+        let mut cliff = vec![
+            vec![v(0.0, 0.0, 1.0), v(2.0, 0.0, 1.0)],
+            vec![v(2.0, 0.0, 1.0), v(2.5, 0.0, 0.0)],
+        ];
+        assert_eq!(join_ends(&mut cliff), 0);
+    }
+
+    #[test]
+    fn lower_barrier_shoulder_next_to_wall_is_suppressed_while_top_keeps_rails() {
+        let v = Vec3::new;
+        let mut t = Vec::new();
+        t.extend(level(-3.0, -3.0, 3.0, 3.0, 0.0));
+        // Freeway barrier cross section along x = -2..2:
+        // Lower shoulder shelf y = 0.0..0.15 at z = 0.45, then wall up to y = 0.25 at z = 0.80, top y = 0.25..0.40 at z = 0.80.
+        t.extend(upright(-2.0, 2.0, 0.0, 0.0, 0.45));
+        t.extend(level(-2.0, 0.0, 2.0, 0.15, 0.45));
+        t.push([v(-2.0, 0.15, 0.45), v(2.0, 0.15, 0.45), v(2.0, 0.25, 0.80)]);
+        t.push([v(-2.0, 0.15, 0.45), v(2.0, 0.25, 0.80), v(-2.0, 0.25, 0.80)]);
+        t.extend(level(-2.0, 0.25, 2.0, 0.40, 0.80));
+        t.extend(upright(-2.0, 2.0, 0.40, 0.0, 0.80));
+        let (rails, _) = find_metres(&t);
+        let has_low_step = rails.iter().any(|r| r.iter().all(|p| (p.z - 0.45).abs() < 0.03));
+        let top_rails: Vec<_> = rails.iter().filter(|r| r.iter().all(|p| (p.z - 0.80).abs() < 0.03)).collect();
+        assert!(!has_low_step, "wall-slam lower step at z=0.45 must be suppressed: {rails:?}");
+        assert_eq!(top_rails.len(), 2, "both edges of upper barrier top at z=0.80 keep grind rails: {rails:?}");
+    }
+
+    #[test]
+    fn long_sloped_barrier_pair_with_curbs_is_not_flight_noses() {
+        let v = Vec3::new;
+        let top_west = vec![v(0.0, 0.0, 34.66), v(8.2, 45.6, 34.39)];
+        let top_east = vec![v(0.16, 0.0, 34.66), v(8.36, 45.6, 34.39)];
+        let lower_shelf = vec![v(0.40, 0.0, 34.30), v(4.90, 18.8, 34.33)];
+        let nearby_curb = vec![v(0.75, 2.0, 34.08), v(1.60, 7.0, 34.08)];
+        let kept = off_flight_noses(vec![top_west, top_east, lower_shelf, nearby_curb]);
+        assert_eq!(kept.len(), 4, "long barrier and nearby steps must not be dropped as stair noses: {kept:?}");
+    }
+
+    #[test]
+    fn irregular_rubble_zigzag_is_dropped_while_smooth_arc_stays() {
+        let v = Vec3::new;
+        let jagged = vec![
+            v(0.0, 0.0, 0.0), v(8.0, 8.0, 0.0), v(16.0, 0.0, 0.0),
+            v(24.0, 8.0, 0.0), v(32.0, 0.0, 0.0), v(40.0, 8.0, 0.0),
+        ];
+        assert!(is_rubble_zigzag(&jagged), "alternating short jagged rock segments rejected");
+        let arc: Vec<Vec3> = (0..=6).map(|k| {
+            let a = (k as f32 / 6.0) * std::f32::consts::FRAC_PI_2;
+            v(40.0 * a.cos(), 40.0 * a.sin(), 0.0)
+        }).collect();
+        assert!(!is_rubble_zigzag(&arc), "smooth monotonic arc preserved");
+    }
+
+    #[test]
+    fn flight_nose_split_keeps_perpendicular_plaza_ledge_around_corner() {
+        let v = Vec3::new;
+        let rails = vec![
+            vec![v(0., 0., 0.), v(3., 0., 0.), v(3., -0.5, 0.)],
+            vec![v(0., 0.3, 0.17), v(3., 0.3, 0.17)],
+            vec![v(0., 0.6, 0.34), v(3., 0.6, 0.34)],
+        ];
+        let (kept, dropped) = off_flight_noses_split(rails);
+        assert_eq!(dropped.len(), 3, "only the 3 parallel tread noses drop: {dropped:?}");
+        assert_eq!(kept, vec![vec![v(3., 0., 0.), v(3., -0.5, 0.)]], "perpendicular plaza ledge stays: {kept:?}");
+    }
+
+    #[test]
+    fn freestanding_handrail_beside_tall_wall_keeps_both_edges() {
+        let mut t = Vec::new();
+        t.extend(level(-3.0, -3.0, 3.0, 3.0, 0.0));
+        // Freestanding handrail beam (y = 0.00..0.06 at z = 0.90) with open air between it
+        // and a tall building wall at y = 0.24 (18 cm gap behind the outer edge y = 0.00).
+        t.extend(level(-2.0, 0.00, 2.0, 0.06, 0.90));
+        t.extend(upright(-2.0, 2.0, 0.00, 0.80, 0.90));
+        t.extend(upright(-2.0, 2.0, 0.06, 0.80, 0.90));
+        t.extend(upright(-2.0, 2.0, 0.24, 0.0, 1.50));
+        let (rails, _) = find_metres(&t);
+        let at_top: Vec<_> = rails.iter().filter(|r| r.iter().all(|p| (p.z - 0.90).abs() < 0.03)).collect();
+        assert_eq!(at_top.len(), 2, "freestanding handrail keeps its edges despite wall 18 cm behind open air: {rails:?}");
     }
 
 }

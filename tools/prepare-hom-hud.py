@@ -32,6 +32,7 @@ Get member by name (0xA5, hudcentral) becomes `push name` + GetMember.
 from pathlib import Path
 import argparse
 import json
+import re
 import shutil
 import sys
 import tempfile
@@ -42,7 +43,9 @@ ROOT = Path(__file__).resolve().parent.parent
 DONOR_TOOLS = ROOT / 'upstream' / 'skate-3-rust-engine-donor' / 'tools'
 sys.path.insert(0, str(DONOR_TOOLS))
 
+from vendor.skate3_ui.big import BigArchive  # noqa: E402
 from vendor.skate3_ui.project import extract_project  # noqa: E402
+from vendor.skate3_ui.rw4 import decode_rgba, parse_fetch_constant, read_textures  # noqa: E402
 from vendor.skate3_ui.scene_graph import AssetCache, SceneFlattener  # noqa: E402
 from vendor.skate3_ui.actions import Actions  # noqa: E402
 from prepare_hud import font_mapping  # noqa: E402
@@ -56,7 +59,17 @@ MOVIES = {
     'chyron': ('data/fe/source/screens/main/chyron', 'runtime/chyron.json', 'hud-chyron'),
     'trickanalyser': ('data/fe/source/screens/hud2/trickanalyser', 'runtime/trickanalyser.json', 'hud-analyser'),
     'hudcentral': ('data/fe/source/screens/hud2/hudcentral', 'runtime/hudcentral.json', 'hud-central'),
+    'replay_editor2': ('data/fe/source/screens/replay2/replay_editor2', 'runtime/replayeditor.json', 'hud-replay'),
 }
+
+REPLAY_BUNDLE = 'data/fe/source/screens/replay2/replay_editor2'
+BUTTON_MENU_BUNDLE = 'data/fe/source/controls/button_menu'
+BUTTON_ITEM_BUNDLE = 'data/fe/source/controls/button_item2'
+BUTTON_RX2 = 'data/fe/source/images/buttons/xbox360/buttons.rx2'
+BM_SHIFT, BM_TARGET, BM_SRC, BM_ITEM_IMPORT = 2000, 15, 7, 3
+BI_SHIFT, BI_TARGET, BI_SRC, BI_RENDER = 3000, 24, 3, 2
+REPLAY_STOP_ACTION = 33092
+SOLID_WHITE_SHAPE = 3999
 
 # The Trick Analyzer imports `Gesture Item` (its character 6) from this
 # control, whose script attachMovie()s the trick's `g_<gesture>` clip into its
@@ -146,14 +159,169 @@ def rewrite_to_string(code):
     return out
 
 
+def quad_primitive(character_id: int, rgba_rel: str, width: int, height: int,
+                   x0: float, y0: float, x1: float, y1: float) -> list:
+    return [{
+        'draw_order': 0,
+        'path': '/',
+        'bundle': REPLAY_BUNDLE,
+        'character_id': character_id,
+        'unit': 0,
+        'render_type': 'texture_clamped',
+        'matrix': [1.0, 0.0, 0.0, 1.0, 0.0, 0.0],
+        'color': [1.0, 1.0, 1.0, 1.0],
+        'texture': {'rgba': rgba_rel, 'width': width, 'height': height},
+        'triangles': [
+            [{'position': [x0, y1], 'uv': [0.0, 1.0]},
+             {'position': [x0, y0], 'uv': [0.0, 0.0]},
+             {'position': [x1, y0], 'uv': [1.0, 0.0]}],
+            [{'position': [x1, y0], 'uv': [1.0, 0.0]},
+             {'position': [x1, y1], 'uv': [1.0, 1.0]},
+             {'position': [x0, y1], 'uv': [0.0, 1.0]}],
+        ],
+    }]
+
+
+def strip_clip_actions(bundle: dict):
+    for c in bundle['characters'].values():
+        for f in c.get('frames', []):
+            for k in f['controls']:
+                if k['type_name'].startswith('place_object') and k['flags'] & 0x80:
+                    k['flags'] &= ~0x80
+                    k['actions_offset'] = 0
+
+
+def export_buttons(game: Path, work: Path) -> list:
+    big = BigArchive(game / 'data/big/fedynamic.big')
+    entry = next((e for e in big.entries if e.path == BUTTON_RX2), None)
+    if entry is None:
+        raise ValueError(f'{BUTTON_RX2} missing from fedynamic.big')
+    rx2 = work / 'buttons.rx2'
+    rx2.write_bytes(big.read(entry))
+    _, textures = read_textures(rx2)
+    out_dir = work / 'buttons'
+    out_dir.mkdir(parents=True, exist_ok=True)
+    out_dir_resolved = out_dir.resolve()
+    buttons = []
+    for tex in textures:
+        name = tex.name
+        if name.startswith('button_') and name.endswith('.Texture'):
+            name = name[len('button_'):-len('.Texture')]
+        safe = re.sub(r'[^A-Za-z0-9._-]', '_', Path(name).name).strip('.')
+        if not safe or '..' in safe:
+            raise ValueError(f'Unsafe button texture name: {tex.name!r}')
+        fetch = parse_fetch_constant(bytes.fromhex(tex.metadata['fetch_constant_hex']))
+        rgba = decode_rgba(tex.data, fetch)
+        rel = f'buttons/{safe}.rgba'
+        out_path = (work / rel).resolve()
+        if not out_path.is_relative_to(out_dir_resolved):
+            raise ValueError(f'Button texture escaped output directory: {tex.name!r}')
+        out_path.write_bytes(rgba)
+        buttons.append((safe, rel, fetch.width, fetch.height))
+    white_rel = 'buttons/solid_white.rgba'
+    (work / white_rel).write_bytes(b'\xff\xff\xff\xff')
+    return buttons, white_rel
+
+
+def merge_control_bundle(bundle: dict, src: dict, shift: int, root_target: int, root_src: int,
+                         remap: dict, src_actions: Actions, offset_base: int, blocks: dict):
+    """Merge a control's characters and init actions into `bundle`."""
+    origin = {}
+    root_actions = []
+    for c in src['characters'].values():
+        if c['id'] == 0:
+            for f in c.get('frames', []):
+                for k in f['controls']:
+                    off = k.get('actions_offset')
+                    if k['type_name'] == 'do_init_action' and off:
+                        new_off = offset_base + off
+                        blocks[str(new_off)] = rewrite_to_string(src_actions.stream(off))
+                        root_actions.append({'type_name': 'do_init_action', 'actions_offset': new_off})
+            continue
+        m = json.loads(json.dumps(c))
+        cid = root_target if c['id'] == root_src else c['id'] + shift
+        m['id'] = cid
+        if m.get('text'):
+            m['text']['font_id'] += shift
+        for f in m.get('frames', []):
+            kept = []
+            for k in f['controls']:
+                if k['type_name'] in ('do_action', 'do_init_action'):
+                    continue
+                if k['type_name'].startswith('place_object') and k['flags'] & 2:
+                    k['character_id'] = remap.get(k['character_id'], k['character_id'] + shift)
+                    if k['flags'] & 0x80:
+                        k['flags'] &= ~0x80
+                        k['actions_offset'] = 0
+                kept.append(k)
+            f['controls'] = kept
+        bundle['characters'][cid] = m
+        origin[cid] = (c['id'], m)
+    bundle['characters'][0]['frames'][0]['controls'][:0] = root_actions
+    return origin
+
+
+def merge_replay(game: Path, work: Path, cache: AssetCache, bundle: dict, blocks: dict):
+    """Merge button_menu, button_item2, and Xbox 360 button textures into replay_editor2."""
+    strip_clip_actions(bundle)
+    bm = cache.load_bundle(BUTTON_MENU_BUNDLE)
+    bi = cache.load_bundle(BUTTON_ITEM_BUNDLE)
+    bm_apt = work / 'raw' / (BUTTON_MENU_BUNDLE + '.apt')
+    bm_act = Actions(bm_apt.read_bytes(), bm_apt.with_suffix('.const').read_bytes())
+    bi_apt = work / 'raw' / (BUTTON_ITEM_BUNDLE + '.apt')
+    bi_act = Actions(bi_apt.read_bytes(), bi_apt.with_suffix('.const').read_bytes())
+    origin = {}
+    bm_orig = merge_control_bundle(
+        bundle, bm, BM_SHIFT, BM_TARGET, BM_SRC,
+        {BM_ITEM_IMPORT: BI_TARGET}, bm_act, 2_000_000, blocks,
+    )
+    for cid, (orig_id, _) in bm_orig.items():
+        origin[cid] = (BUTTON_MENU_BUNDLE, orig_id)
+    bi_orig = merge_control_bundle(
+        bundle, bi, BI_SHIFT, BI_TARGET, BI_SRC,
+        {}, bi_act, 3_000_000, blocks,
+    )
+    for cid, (orig_id, _) in bi_orig.items():
+        origin[cid] = (BUTTON_ITEM_BUNDLE, orig_id)
+
+    buttons, white_rel = export_buttons(game, work)
+    stop = {'type_name': 'do_action', 'actions_offset': REPLAY_STOP_ACTION}
+    render_frames = [{'controls': [{'type_name': 'frame_label', 'label': 'none'}, stop]}]
+    synthetic_shapes = {str(SOLID_WHITE_SHAPE): quad_primitive(SOLID_WHITE_SHAPE, white_rel, 1, 1, 0.0, 0.0, 1.0, 1.0)}
+    bundle['characters'][SOLID_WHITE_SHAPE] = {'id': SOLID_WHITE_SHAPE, 'type_name': 'shape', 'frames': []}
+    for idx, (btn_name, rel, w, h) in enumerate(buttons):
+        shape_id = 3100 + idx
+        render_frames.append({'controls': [
+            {'type_name': 'frame_label', 'label': btn_name},
+            {'type_name': 'place_object2', 'flags': 6, 'depth': 1, 'character_id': shape_id,
+             'matrix': [1.0, 0.0, 0.0, 1.0, 0.0, 0.0]},
+            stop,
+        ]})
+        bundle['characters'][shape_id] = {'id': shape_id, 'type_name': 'shape', 'frames': []}
+        synthetic_shapes[str(shape_id)] = quad_primitive(shape_id, rel, w, h, -16.5, -16.5, 15.5, 15.5)
+    bundle['characters'][BI_SHIFT + BI_RENDER] = {
+        'id': BI_SHIFT + BI_RENDER, 'type_name': 'sprite', 'frames': render_frames,
+    }
+    return origin, synthetic_shapes
+
+
 def prepare(game: Path, work: Path, collections: Path, bundle: str = BUNDLE, manifest: str = MANIFEST) -> Path:
     BUNDLE, MANIFEST = bundle, manifest
     analyser = BUNDLE == MOVIES['trickanalyser'][0]
-    extract_project(game, work, prefixes=(BUNDLE, GESTURES) if analyser else (BUNDLE,), update=True)
+    replay = BUNDLE == REPLAY_BUNDLE
+    prefixes = (BUNDLE, GESTURES) if analyser else (BUNDLE, BUTTON_MENU_BUNDLE, BUTTON_ITEM_BUNDLE) if replay else (BUNDLE,)
+    extract_project(game, work, prefixes=prefixes, update=True)
     cache = AssetCache(work)
     mappings = font_mapping(collections, cache)
     bundle = cache.load_bundle(BUNDLE)
-    origin = merge_gestures(bundle, cache.load_bundle(GESTURES)) if analyser else {}
+    blocks = {}
+    synthetic_shapes = {}
+    if analyser:
+        origin = merge_gestures(bundle, cache.load_bundle(GESTURES))
+    elif replay:
+        origin, synthetic_shapes = merge_replay(game, work, cache, bundle, blocks)
+    else:
+        origin = {}
     # A character placed but defined in another movie (hudcentral's team logo
     # loader, character 23, an import the HUD VM cannot follow) becomes an
     # empty clip, so placing it is harmless; only online team messages used it.
@@ -165,16 +333,17 @@ def prepare(game: Path, work: Path, collections: Path, bundle: str = BUNDLE, man
     apt_path = work / 'raw' / (BUNDLE + '.apt')
     const_path = apt_path.with_suffix('.const')
     actions = Actions(apt_path.read_bytes(), const_path.read_bytes())
-    blocks = {}
     for c in bundle['characters'].values():
         for f in c.get('frames', []):
             for control in f['controls']:
                 if control['type_name'] in ('do_action', 'do_init_action') and control.get('actions_offset')                         and str(control['actions_offset']) not in blocks:
                     offset = control['actions_offset']
                     blocks[str(offset)] = rewrite_to_string(actions.stream(offset))
-    shapes, fonts = {}, {}
+    shapes, fonts = dict(synthetic_shapes), {}
     for c in bundle['characters'].values():
         if c['type_name'] == 'shape':
+            if str(c['id']) in synthetic_shapes:
+                continue
             scene = SceneFlattener(cache, lambda *_: {}).flatten(*origin.get(c['id'], (BUNDLE, c['id'])))
             if scene['unresolved']:
                 raise ValueError(f"Unresolved HoM HUD shape: {scene['unresolved']}")

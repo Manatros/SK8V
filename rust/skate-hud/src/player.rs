@@ -131,6 +131,16 @@ impl Assets {
         Self::load_movie(root, "hudcentral.json")
     }
 
+    /// `<data_root>/private/hud-replay` (tools/prepare-hom-hud.py --movie replay_editor2).
+    pub fn replay_dir_for(data_root: &Path) -> PathBuf {
+        data_root.join("private").join("hud-replay")
+    }
+
+    /// The ported Clip / Replay Editor movie (`runtime/replayeditor.json`).
+    pub fn load_replay(root: &Path) -> Result<Self, String> {
+        Self::load_movie(root, "replayeditor.json")
+    }
+
     /// The Hall of Meat movie (`runtime/homscoring.json`).
     pub fn load_hom(root: &Path) -> Result<Self, String> {
         Self::load_movie(root, "homscoring.json")

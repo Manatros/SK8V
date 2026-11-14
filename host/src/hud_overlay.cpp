@@ -40,6 +40,7 @@ struct Shared {
     LogFn log = nullptr;
     void* runtime = nullptr;
     SvSetHudViewportFn setViewport = nullptr;
+    SvSetReplayHudFn setReplayHud = nullptr;
     SvGetHudTextureFn getTexture = nullptr;
     SvGetHudFrameFn getFrame = nullptr;
     SvGetXrayFn getXray = nullptr; // optional (HallOfMeatXray=0: unused)
@@ -66,6 +67,7 @@ struct Shared {
     std::atomic<UINT> backbufferWidth{0}, backbufferHeight{0};
     std::atomic<bool> stopping{false};
     std::atomic<bool> visible{false};
+    std::atomic<bool> replayActive{false};
 } g;
 
 template <class... A>
@@ -107,7 +109,8 @@ void Present(void* swapChainPtr) {
         Published& p = g.pub;
         // Stale publication (script thread stalled: loading, pause): hide.
         const bool fresh = GetTickCount64() - p.stamp < 500;
-        frame.visible = g.visible.load() && p.frame.visible && fresh;
+        const bool hudGate = g.visible.load() || g.replayActive.load();
+        frame.visible = hudGate && p.frame.visible && fresh;
         if (frame.visible && p.frame.serial != frame.serial) {
             frame.serial = p.frame.serial;
             frame.width = p.frame.width;
@@ -130,7 +133,7 @@ void Present(void* swapChainPtr) {
     xray.visible = xray.visible && g.visible.load();
     fisheye::Present(sc); // the replay's fisheye lens bends GTA's frame, under everything we draw
     xrayrender::Present(sc, xray); // under the HUD
-    frame.visible = frame.visible && g.visible.load();
+    frame.visible = frame.visible && (g.visible.load() || g.replayActive.load());
     hudrender::Present(sc, frame);
 }
 
@@ -186,6 +189,7 @@ void Start(const std::wstring& iniPath, void* runtime, LogFn log) {
         return;
     }
     g.setViewport = reinterpret_cast<SvSetHudViewportFn>(GetProcAddress(module, "sv_set_hud_viewport"));
+    g.setReplayHud = reinterpret_cast<SvSetReplayHudFn>(GetProcAddress(module, "sv_set_replay_hud"));
     g.getTexture = reinterpret_cast<SvGetHudTextureFn>(GetProcAddress(module, "sv_get_hud_texture"));
     g.getFrame = reinterpret_cast<SvGetHudFrameFn>(GetProcAddress(module, "sv_get_hud_frame"));
     if (!g.setViewport || !g.getTexture || !g.getFrame) {
@@ -204,6 +208,7 @@ void Start(const std::wstring& iniPath, void* runtime, LogFn log) {
     g.maxAspect = IniFloat(iniPath, L"HudMaxAspect", 0.0f);
     g.safeOverride = IniFloat(iniPath, L"HudSafeZone", -1.0f);
     g.stopping.store(false);
+    g.replayActive.store(false);
     if (!g.registered) {
         hudrender::SetLog(log);
         fisheye::SetLog(log);
@@ -224,9 +229,11 @@ void SetVisible(bool visible) {
     // Keep texture/serial data cached, but never re-show it before a fresh Tick.
     g.visible.store(false);
     std::lock_guard<std::mutex> lock(g.mutex);
-    g.pub.frame.visible = false;
     g.pub.xray.visible = false;
-    g.pub.stamp = 0;
+    if (!g.replayActive.load()) {
+        g.pub.frame.visible = false;
+        g.pub.stamp = 0;
+    }
     g.visible.store(visible);
 }
 
@@ -242,8 +249,34 @@ bool ShowCentral(int style, const char* text) {
 
 void SetTrickAnalyzer(bool on) { g.trickAnalyzer = on; }
 
+bool SetReplayHud(const SvReplayHudState* state) {
+    if (!g.enabled || !g.runtime || !g.setReplayHud) {
+        g.replayActive.store(false);
+        return false;
+    }
+    const bool wantActive = state && state->active != 0;
+    const bool accepted = g.setReplayHud(g.runtime, state) != 0;
+    const bool active = wantActive && accepted;
+    if (!active) {
+        const bool was = g.replayActive.exchange(false);
+        if (was) {
+            std::lock_guard<std::mutex> lock(g.mutex);
+            g.pub.frame.visible = false;
+        }
+    } else {
+        const bool was = g.replayActive.load();
+        if (!was) {
+            std::lock_guard<std::mutex> lock(g.mutex);
+            g.pub.frame.visible = false;
+            g.pub.xray.visible = false;
+        }
+        g.replayActive.store(true);
+    }
+    return active;
+}
+
 void Tick(bool skating) {
-    if (!g.enabled || !g.visible.load()) return;
+    if (!g.enabled) return;
     const UINT w = g.backbufferWidth.load(), h = g.backbufferHeight.load();
     float safe = g.safeOverride >= 0.5f ? std::fmin(g.safeOverride, 1.0f) : Call<float>(gta::GET_SAFE_ZONE_SIZE);
     if (!(safe >= 0.5f && safe <= 1.0f)) safe = 1.0f;
@@ -275,8 +308,10 @@ void Tick(bool skating) {
                  v.hud_area[0], v.hud_area[1], v.hud_area[2], v.hud_area[3]);
         }
     }
+    const bool replayActive = g.replayActive.load();
+    if (!g.visible.load() && !replayActive) return;
     const bool paused = gta::FrontendActive();
-    bool show = skating && !paused && w && h;
+    bool show = (skating || replayActive) && !paused && w && h;
     SvHudFrame f{};
     f.size = sizeof(f);
     if (show) {
@@ -300,7 +335,7 @@ void Tick(bool skating) {
     // Hall of Meat x-ray with the camera GTA rendered (same script frame).
     std::uint32_t xrayCount = 0;
     xrayrender::Camera camera{};
-    if (g.getXray && skating && !paused && w && h) {
+    if (g.getXray && g.visible.load() && skating && !paused && w && h) {
         SvXrayFrame xf{};
         xf.size = sizeof(xf);
         xrayCount = g.getXray(g.runtime, &xf, g.xray.data(), static_cast<std::uint32_t>(g.xray.size()));
@@ -334,7 +369,7 @@ void Tick(bool skating) {
         p.xray.vertices.resize(xrayCount);
         std::memcpy(p.xray.vertices.data(), g.xray.data(), xrayCount * sizeof(SvXrayVertex));
     }
-    p.frame.visible = g.visible.load() && show;
+    p.frame.visible = (g.visible.load() || replayActive) && show;
     if (!show || f.serial == p.frame.serial) return;
     hudrender::Frame& out = p.frame;
     out.serial = f.serial;
@@ -360,6 +395,7 @@ void Shutdown(bool processExit) {
     // DllMain can run after other threads stopped while holding the mutex.
     // The atomic gates suffice here; never wait for a publication on detach.
     g.visible.store(false);
+    g.replayActive.store(false);
     if (g.registered) {
         presentCallbackUnregister(OnPresent);
         g.registered = false;

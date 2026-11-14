@@ -3,9 +3,11 @@
 #include "../src/replay_edit.cpp"
 #include "../src/replay_store.cpp"
 #include "../src/modkeys.cpp"
+#include "../src/replay_hud_state.h"
 #include <cassert>
 #include <cmath>
 #include <iostream>
+#include <limits>
 #include <string>
 
 using namespace replay;
@@ -179,6 +181,59 @@ int main() {
     // Other mods' keys: hidden only while blocking, mouse buttons never.
     assert(!modkeys::Hidden('A', false) && modkeys::Hidden('A', true) && modkeys::Hidden(VK_F10, true));
     assert(!modkeys::Hidden(VK_LBUTTON, true) && !modkeys::Hidden(VK_RBUTTON, true) && !modkeys::Hidden(0, true));
+
+    // Skate 3 Clip Editor HUD snapshot mapping + GTA/overlay gating.
+    {
+        Edit hudEdit;
+        hudEdit.Reset(10.0, 20.0);
+        assert(hudEdit.SetIn(11.0) == EditResult::Ok);
+        assert(hudEdit.SetOut(19.0) == EditResult::Ok);
+        assert(hudEdit.PlaceMarker(15.0) == EditResult::Ok);
+        assert(hudEdit.SetCamera(1, CameraKind::AdvFollow, true) == EditResult::Ok);
+        hudEdit.ClipRef(1).speed = 3;
+        hudEdit.ClipRef(1).shake = 2;
+        hudEdit.ClipRef(1).lens = kLens35;
+        CameraParams kp;
+        kp.zoomMm = 50.0f;
+        assert(hudEdit.AddKey(16.0, kp) == EditResult::Ok);
+
+        const SvReplayHudState gtaOff = BuildReplayHudState({false, ReplayHudScreen::Timeline, true, false, 10.0, 10.0, 15.0, 1, 0.0f, "Edit timeline", &hudEdit});
+        assert(gtaOff.active == 0 && gtaOff.size == sizeof(SvReplayHudState));
+
+        const SvReplayHudState helpOff = BuildReplayHudState({true, ReplayHudScreen::HiddenOverlay, false, false, 10.0, 10.0, 15.0, 1, 0.0f, "Help", &hudEdit});
+        assert(helpOff.active == 0);
+
+        const SvReplayHudState instant = BuildReplayHudState({true, ReplayHudScreen::Instant, true, false, 10.0, 10.0, 13.5, 0, 0.0f, "Instant replay", &hudEdit});
+        assert(instant.active == 1 && instant.mode == 0 && (instant.flags & 1u) != 0 && (instant.flags & 16u) != 0);
+        assert(instant.clip_count == 0 && std::fabs(instant.trim_in) < 1e-5f && std::fabs(instant.trim_out - 1.0f) < 1e-5f);
+        assert(std::fabs(instant.playhead - 0.35f) < 1e-5f);
+        assert(std::string(instant.title_utf8) == "Instant replay");
+        assert(std::string(instant.encoded_time_utf8) == "0:03.5 / 0:10.0");
+
+        const SvReplayHudState timeline = BuildReplayHudState({true, ReplayHudScreen::Timeline, true, true, 10.0, 10.0, 15.0, 1, 0.0f, "Edit timeline", &hudEdit});
+        assert(timeline.active == 1 && timeline.mode == 1);
+        assert((timeline.flags & (1u | 2u | 8u | 16u)) == (1u | 2u | 8u | 16u));
+        assert(timeline.clip_count == 2 && timeline.marker_count == 1 && timeline.selected_clip == 1);
+        assert(std::fabs(timeline.trim_in - 0.1f) < 1e-5f && std::fabs(timeline.trim_out - 0.9f) < 1e-5f);
+        assert(timeline.speed_pct == 200 && timeline.shake_type == 2);
+
+        const SvReplayHudState cam = BuildReplayHudState({true, ReplayHudScreen::CameraEdit, false, false, 10.0, 10.0, 16.05, 1, 50.0f, "Follow (Key)", &hudEdit});
+        assert(cam.active == 1 && cam.mode == 2 && (cam.flags & 4u) != 0 && cam.selected_key == 0 && cam.key_count == 1);
+        assert(std::string(cam.zoom_utf8) == "50mm");
+
+        hudEdit.ClipRef(0).camera = CameraKind::Tripod;
+        hudEdit.ClipRef(0).lens = kLensFisheye;
+        const SvReplayHudState fishCam = BuildReplayHudState({true, ReplayHudScreen::CameraEdit, false, false, 10.0, 10.0, 12.0, 0, 50.0f, "Tripod Camera", &hudEdit});
+        assert(fishCam.mode == 3 && std::string(fishCam.zoom_utf8) == "Fish Eye");
+
+        const SvReplayHudState panel = BuildReplayHudState({true, ReplayHudScreen::Panel, false, false, 10.0, 10.0, 12.0, 0, 0.0f, "Finished", &hudEdit});
+        assert(panel.active == 1 && panel.mode == 6 && (panel.flags & 16u) == 0);
+
+        const double nanVal = std::numeric_limits<double>::quiet_NaN();
+        const std::string longUtf8(62, 'A');
+        const SvReplayHudState edge = BuildReplayHudState({true, ReplayHudScreen::Timeline, false, false, nanVal, 10.0, nanVal, 0, 0.0f, longUtf8 + "\xC3\xA4", &hudEdit});
+        assert(edge.playhead == 0.0f && std::string(edge.title_utf8) == longUtf8);
+    }
 
     std::cout << "replay edit tests passed\n";
     return 0;

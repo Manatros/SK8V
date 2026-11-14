@@ -20,7 +20,10 @@ use crate::worker::{Log, Shared};
 use skate_hud::hom::state;
 use skate_hud::layout::{DEFAULT_MAX_ASPECT, Layout};
 use skate_hud::player::Texture;
-use skate_hud::{AnalyserPlayer, Assets, CentralPlayer, ChyronPlayer, Frame, HomPlayer, Player, ScoreInput};
+use skate_hud::{
+    AnalyserPlayer, Assets, CentralPlayer, ChyronPlayer, Frame, HomPlayer, Player, ReplayClipSpan,
+    ReplayHudData, ReplayHudMode, ReplayHudPlayer, ScoreInput,
+};
 use std::ffi::c_void;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
@@ -103,6 +106,76 @@ pub struct SvHudFrame {
     pub region: [f32; 4],
 }
 
+/// One clip span along `[0..1]` (`SvReplayClipSpan`).
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct SvReplayClipSpan {
+    pub start: f32,
+    pub end: f32,
+    pub kind: u32,
+    pub selected: u32,
+}
+
+/// Replay / Clip Editor HUD snapshot (`sv_set_replay_hud`).
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SvReplayHudState {
+    pub size: u32,
+    pub active: u32,
+    pub mode: u32,
+    pub flags: u32,
+    pub playhead: f32,
+    pub trim_in: f32,
+    pub trim_out: f32,
+    pub clip_count: u32,
+    pub key_count: u32,
+    pub marker_count: u32,
+    pub selected_clip: i32,
+    pub shake_type: u32,
+    pub speed_pct: i32,
+    pub clips: [SvReplayClipSpan; 32],
+    pub keys: [f32; 48],
+    pub selected_key: i32,
+    pub markers: [f32; 24],
+    pub encoded_time_utf8: [u8; 32],
+    pub zoom_utf8: [u8; 32],
+    pub title_utf8: [u8; 64],
+}
+
+impl Default for SvReplayHudState {
+    fn default() -> Self {
+        Self {
+            size: size_of::<Self>() as u32,
+            active: 0,
+            mode: 0,
+            flags: 0,
+            playhead: 0.0,
+            trim_in: 0.0,
+            trim_out: 1.0,
+            clip_count: 0,
+            key_count: 0,
+            marker_count: 0,
+            selected_clip: -1,
+            shake_type: 0,
+            speed_pct: 100,
+            clips: [SvReplayClipSpan::default(); 32],
+            keys: [0.0; 48],
+            selected_key: -1,
+            markers: [0.0; 24],
+            encoded_time_utf8: [0; 32],
+            zoom_utf8: [0; 32],
+            title_utf8: [0; 64],
+        }
+    }
+}
+
+pub struct ReplayMovie {
+    assets: Arc<Assets>,
+    texture_base: u32,
+    player: Option<ReplayHudPlayer>,
+    failed: bool,
+}
+
 /// HUD publication inside the worker's `Shared`.
 #[derive(Clone, Default)]
 pub struct HudShared {
@@ -122,6 +195,13 @@ pub struct HudShared {
     /// The centre movie is loaded and has not failed: `sv_show_central`
     /// refuses otherwise, so the host shows its own notice.
     pub central_ready: bool,
+    /// True while the Skate 3 Replay Editor HUD owns `frame`.
+    pub replay_active: bool,
+    /// Dedicated replay movie driver (`Driver` initializes once at load, then
+    /// only `sv_set_replay_hud` locks it after dropping `shared`).
+    pub replay: Option<Arc<Mutex<ReplayMovie>>>,
+    /// Shared logger handle for synchronous `sv_set_replay_hud` failures.
+    pub replay_log: Option<Log>,
 }
 
 /// Skate's scorer -> the movie input (field-for-field; see patch 0010).
@@ -403,11 +483,35 @@ impl Driver {
                 None
             }
         };
-        shared.lock().unwrap().hud.central_ready = central.is_some();
-        if !textures.is_empty() {
+        let replay = {
+            let dir = Assets::replay_dir_for(data_root);
+            match Assets::load_replay(&dir) {
+                Ok(a) => {
+                    let texture_base = textures.len() as u32;
+                    textures.extend(a.textures.iter().cloned());
+                    log(&format!("replay editor HUD loaded from {} ({} textures)", dir.display(), a.textures.len()));
+                    Some(Arc::new(Mutex::new(ReplayMovie {
+                        assets: Arc::new(a),
+                        texture_base,
+                        player: None,
+                        failed: false,
+                    })))
+                }
+                Err(e) => {
+                    log(&format!("replay editor HUD unavailable ({e}); run tools/prepare-hom-hud.py --movie replay_editor2"));
+                    None
+                }
+            }
+        };
+        {
             let mut s = shared.lock().unwrap();
-            s.hud.textures = Arc::new(textures);
-            s.hud.generation = s.hud.generation.wrapping_add(1).max(1);
+            s.hud.central_ready = central.is_some();
+            s.hud.replay = replay;
+            s.hud.replay_log = Some(Arc::clone(log));
+            if !textures.is_empty() {
+                s.hud.textures = Arc::new(textures);
+                s.hud.generation = s.hud.generation.wrapping_add(1).max(1);
+            }
         }
         Self {
             assets,
@@ -653,7 +757,13 @@ impl Driver {
 
     /// Publishes the current scene for the host.
     pub fn publish(&mut self, shared: &Mutex<Shared>, log: &Log) {
-        let viewport = shared.lock().unwrap().hud.viewport;
+        let (viewport, replay_active) = {
+            let s = shared.lock().unwrap();
+            (s.hud.viewport, s.hud.replay_active)
+        };
+        if replay_active {
+            return;
+        }
         let layout = layout_for(&viewport);
         let mut hom_frame = None;
         if let (Some(m), Some(l)) = (self.hom.as_mut(), layout) {
@@ -744,9 +854,11 @@ impl Driver {
             self.layout = layout;
         }
         let mut s = shared.lock().unwrap();
-        s.hud.serial += 1;
-        s.hud.visible = frame.is_some();
-        s.hud.frame = Arc::new(frame.unwrap_or_default());
+        if !s.hud.replay_active {
+            s.hud.serial += 1;
+            s.hud.visible = frame.is_some();
+            s.hud.frame = Arc::new(frame.unwrap_or_default());
+        }
     }
 
     /// Skate suspended: hide; the movie restarts on the next activation.
@@ -859,6 +971,156 @@ pub unsafe extern "C" fn sv_set_hud_viewport(rt: *mut c_void, viewport: *const S
         }
         shared.lock().unwrap().hud.viewport = *v;
         1
+    })
+}
+
+fn cstr_buf(bytes: &[u8]) -> String {
+    let end = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());
+    String::from_utf8_lossy(&bytes[..end]).into_owned()
+}
+
+fn build_replay_data(s: &SvReplayHudState) -> ReplayHudData {
+    let nclips = (s.clip_count as usize).min(s.clips.len());
+    let nkeys = (s.key_count as usize).min(s.keys.len());
+    let nmarkers = (s.marker_count as usize).min(s.markers.len());
+    let sel_key = usize::try_from(s.selected_key).ok();
+    ReplayHudData {
+        mode: ReplayHudMode::from_u32(s.mode),
+        playing: s.flags & 1 != 0,
+        hidden: s.flags & 2 != 0,
+        over_key: s.flags & 4 != 0,
+        over_clip_marker: s.flags & 8 != 0,
+        can_show_hide: s.flags & 16 != 0,
+        selected_clip: s.selected_clip,
+        playhead: s.playhead,
+        trim_in: s.trim_in,
+        trim_out: s.trim_out,
+        encoded_time: cstr_buf(&s.encoded_time_utf8),
+        zoom_text: cstr_buf(&s.zoom_utf8),
+        title_text: cstr_buf(&s.title_utf8),
+        shake_type: s.shake_type,
+        speed_pct: s.speed_pct,
+        clips: s.clips[..nclips]
+            .iter()
+            .map(|c| ReplayClipSpan {
+                start: c.start,
+                end: c.end,
+                camera_kind: c.kind,
+                selected: c.selected != 0,
+            })
+            .collect(),
+        keys: (0..nkeys).map(|i| (s.keys[i], sel_key == Some(i))).collect(),
+        markers: s.markers[..nmarkers].to_vec(),
+    }
+}
+
+/// Skate 3 Replay / Clip Editor HUD publication. Pass `state == null` or
+/// `state->active == 0` to exit replay HUD mode and clear the replay frame.
+/// Returns 1 when `hud-replay` APT assets are active and rendered cleanly, 0
+/// otherwise (so the host falls back to the GTA Replay HUD).
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sv_set_replay_hud(rt: *mut c_void, state: *const SvReplayHudState) -> u32 {
+    crate::guard(0, || {
+        let Some(shared) = runtime_shared(rt) else {
+            return 0;
+        };
+        let state = unsafe { state.as_ref() };
+        let valid = state.is_some_and(|s| (s.size as usize) >= size_of::<SvReplayHudState>() && s.active != 0);
+        if !valid {
+            let (slot, was_active) = {
+                let mut sh = shared.lock().unwrap();
+                let was = sh.hud.replay_active;
+                if was {
+                    sh.hud.replay_active = false;
+                    sh.hud.visible = false;
+                    sh.hud.frame = Arc::default();
+                    sh.hud.serial += 1;
+                }
+                (sh.hud.replay.clone(), was)
+            };
+            if was_active {
+                if let Some(slot) = slot {
+                    if let Ok(mut rm) = slot.lock() {
+                        rm.player = None;
+                    }
+                }
+            }
+            return 0;
+        }
+        let s = state.unwrap();
+        let (slot, viewport, log) = {
+            let sh = shared.lock().unwrap();
+            (sh.hud.replay.clone(), sh.hud.viewport, sh.hud.replay_log.clone())
+        };
+        let Some(slot) = slot else {
+            let mut sh = shared.lock().unwrap();
+            if sh.hud.replay_active {
+                sh.hud.replay_active = false;
+                sh.hud.visible = false;
+                sh.hud.frame = Arc::default();
+                sh.hud.serial += 1;
+            }
+            return 0;
+        };
+        let Some(layout) = layout_for(&viewport) else {
+            return 0;
+        };
+        let data = build_replay_data(s);
+        let built = {
+            let mut rm = slot.lock().unwrap();
+            if rm.failed {
+                None
+            } else {
+                if rm.player.is_none() {
+                    match ReplayHudPlayer::new(&rm.assets) {
+                        Ok(p) => rm.player = Some(p),
+                        Err(e) => {
+                            if let Some(l) = &log {
+                                l(&format!("replay editor HUD init stopped: {e}"));
+                            }
+                            rm.failed = true;
+                        }
+                    }
+                }
+                let base = rm.texture_base;
+                let assets = Arc::clone(&rm.assets);
+                if let Some(p) = rm.player.as_mut() {
+                    match p.update(&data).and_then(|_| p.frame(&assets, &layout)) {
+                        Ok(raw) => {
+                            let mut out = Frame { layout: raw.layout, ..Default::default() };
+                            append_frame(&mut out, &raw, base);
+                            Some(out)
+                        }
+                        Err(e) => {
+                            if let Some(l) = &log {
+                                l(&format!("replay editor HUD stopped: {e}"));
+                            }
+                            rm.failed = true;
+                            rm.player = None;
+                            None
+                        }
+                    }
+                } else {
+                    None
+                }
+            }
+        };
+        let mut sh = shared.lock().unwrap();
+        if let Some(frame) = built {
+            sh.hud.replay_active = true;
+            sh.hud.visible = true;
+            sh.hud.frame = Arc::new(frame);
+            sh.hud.serial += 1;
+            1
+        } else {
+            if sh.hud.replay_active {
+                sh.hud.replay_active = false;
+                sh.hud.visible = false;
+                sh.hud.frame = Arc::default();
+                sh.hud.serial += 1;
+            }
+            0
+        }
     })
 }
 
@@ -995,6 +1257,13 @@ mod tests {
         assert_eq!(offset_of!(SvHudFrame, texture_generation), 36);
         assert_eq!(offset_of!(SvHudFrame, scale), 40);
         assert_eq!(offset_of!(SvHudFrame, region), 48);
+        assert_eq!(size_of::<SvReplayClipSpan>(), 16);
+        assert_eq!(size_of::<SvReplayHudState>(), 984);
+        assert_eq!(offset_of!(SvReplayHudState, clips), 52);
+        assert_eq!(offset_of!(SvReplayHudState, keys), 564);
+        assert_eq!(offset_of!(SvReplayHudState, selected_key), 756);
+        assert_eq!(offset_of!(SvReplayHudState, markers), 760);
+        assert_eq!(offset_of!(SvReplayHudState, encoded_time_utf8), 856);
     }
 
     #[test]
@@ -1070,5 +1339,6 @@ mod tests {
             unsafe { sv_get_hud_texture(std::ptr::null(), 0, std::ptr::null_mut(), std::ptr::null_mut(), 0) },
             0
         );
+        assert_eq!(unsafe { sv_set_replay_hud(std::ptr::null_mut(), std::ptr::null()) }, 0);
     }
 }

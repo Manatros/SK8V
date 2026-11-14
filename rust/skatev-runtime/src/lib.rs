@@ -1802,8 +1802,8 @@ pub mod hom;
 pub mod xray;
 pub mod records;
 pub use hud::{
-    SvHudDraw, SvHudFrame, SvHudTexture, SvHudVertex, SvHudViewport, sv_get_hud_frame, sv_get_hud_texture,
-    sv_set_hud_viewport, sv_show_central, sv_show_radio,
+    SvHudDraw, SvHudFrame, SvHudTexture, SvHudVertex, SvHudViewport, SvReplayClipSpan, SvReplayHudState,
+    sv_get_hud_frame, sv_get_hud_texture, sv_set_hud_viewport, sv_set_replay_hud, sv_show_central, sv_show_radio,
 };
 
 // Dry Skate 3 gameplay voices per emitter; contract in the header's audio

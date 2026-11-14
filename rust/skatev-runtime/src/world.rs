@@ -14,8 +14,8 @@ pub fn options_version() -> u64 { OPTIONS_VERSION.load(std::sync::atomic::Orderi
 
 pub const RADIUS: f32 = 128.0;
 /// A grind line keeps a point only where it leaves the straight path by
-/// more than this (metres): straight rails get straight lines.
-const STRAIGHT: f32 = 0.03;
+/// more than this (metres): 1 cm keeps curves tight on GTA geometry and aligns tile slices.
+const STRAIGHT: f32 = 0.010;
 /// The same for track edge lines: a steel head is 7 cm wide, so a 3 cm
 /// chord on a curve left it (Codex 2026-10-25, mark 11: 25 of 57 samples
 /// of one edge line over the bed, not the steel).
@@ -134,21 +134,46 @@ fn drop_exact_copies(rails: &mut Vec<Vec<Vec3>>, tolerance: f32) {
     rails.retain(|_| { let keep = k.peek() == Some(&i); if keep { k.next(); } i += 1; keep });
 }
 
+#[cfg(test)]
 fn normalize_assembled_rails(rails: &mut Vec<Vec<[f32; 3]>>) {
+    normalize_assembled_rails_with_tris(rails, &[]);
+}
+
+fn normalize_assembled_rails_with_tris(rails: &mut Vec<Vec<[f32; 3]>>, tris: &[[[f32; 3]; 3]]) {
     let mut gta: Vec<Vec<Vec3>> = rails.iter().map(|r| r.iter()
         .map(|&p| coords::from_skate(Vec3::from_array(p))).collect()).collect();
     // Trim before coverage sampling, then join even tiny uncovered tails:
     // otherwise the 9 cm coverage radius can discard their contribution.
     // Tile seams give exact copies (one source, split at a border): only
-    // those go here. The 9 cm rail dedupe fused a track's two edge lines
-    // (4-9 cm apart) and moved lines away from their baked collision
-    // (Codex analysis 2026-10-25).
+    // those go here. The rail dedupe keeps edges >= 5.6 cm apart on geometry.
+    let allow_gap = |p: Vec3, q: Vec3| {
+        tris.is_empty()
+            || p.distance(q) <= 0.05
+            || !crate::visrails::shoulder_blocked_between_skate_tris(p, q, tris)
+    };
     crate::rails::trim_overlaps(&mut gta);
-    crate::rails::join_ends(&mut gta);
+    crate::rails::join_ends_guarded(&mut gta, &allow_gap);
     drop_exact_copies(&mut gta, 0.02);
-    crate::rails::join_ends(&mut gta);
-    // Every line was simplified in its tile; only the joins are new. A
-    // 3 cm chord here undid the track edges' tighter fit (TRACK_STRAIGHT).
+    crate::rails::join_ends_guarded(&mut gta, &allow_gap);
+    // Reconnect chamfered curves and corners across 64 m tile/live slice boundaries
+    // (bounded to <= 0.22 m so assembly never bridges > 22 cm air gaps) using only
+    // triangles near the slice grid planes for low overhead.
+    if !tris.is_empty() {
+        let near_slice = |v: Vec3| {
+            let rx = v.x.rem_euclid(64.0);
+            let ry = v.y.rem_euclid(64.0);
+            rx <= 3.5 || rx >= 60.5 || ry <= 3.5 || ry >= 60.5
+        };
+        let border_gta: Vec<[Vec3; 3]> = tris
+            .iter()
+            .map(|t| t.map(|p| coords::from_skate(Vec3::from_array(p))))
+            .filter(|t| t.iter().any(|&v| near_slice(v)))
+            .collect();
+        if !border_gta.is_empty() {
+            let border_grid = crate::grid::XyGrid::triangles(1.0, &border_gta);
+            join_along_edges_within(&mut gta, &border_gta, &border_grid, 0.22);
+        }
+    }
     crate::rails::straighten(&mut gta, TRACK_STRAIGHT);
     *rails = gta.into_iter().map(|r| r.into_iter()
         .map(|p| coords::to_skate(p).to_array()).collect()).collect();
@@ -296,8 +321,8 @@ impl StaticWorld {
             area.rails.extend(fixed.rails);
         }
         // Baking and live-cell clipping split continuous rails at grid planes.
-        // Reconnect the installed union, including fixed props, exactly once.
-        normalize_assembled_rails(&mut area.rails);
+        // Reconnect the installed union, including fixed props, across slice boundaries.
+        normalize_assembled_rails_with_tris(&mut area.rails, &area.triangles);
         // Auxiliary queries must not retain a previous live area's material or
         // seam geometry. The optional raw map carries original GTA material IDs
         // and face keys; packed Skate tile tags cannot recover either exactly.
@@ -616,7 +641,9 @@ fn build_area_rules(center: Vec3, tris: impl Iterator<Item = ([[f32; 3]; 3], u32
     crate::rails::trim_overlaps(&mut boxed);
     crate::rails::dedupe_metres(&mut boxed);
     boxed.extend(visual.iter().cloned());
-    crate::rails::join_ends(&mut boxed);
+    crate::rails::join_ends_guarded(&mut boxed, &|p, q| {
+        p.distance(q) <= 0.05 || !crate::visrails::shoulder_blocked_between(p, q, &rail_grid, &gta)
+    });
     crate::rails::dedupe_metres(&mut boxed);
     crate::rails::straighten(&mut boxed, STRAIGHT);
     found.extend(visual);
@@ -639,8 +666,8 @@ fn build_area_rules(center: Vec3, tris: impl Iterator<Item = ([[f32; 3]; 3], u32
     crate::rails::straighten(&mut found, STRAIGHT);
     let track_boxes = track_gap_boxes(&tracks, &gta, &rail_grid);
     // No grind line without an edge (track lines have their steel head),
-    // and only a railing's top bar.
-    let found = off_stacked(off_flush(found, &gta, &rail_grid));
+    // no fake rails on asphalt-over-asphalt road overlap seams, and only top bars.
+    let found = off_road_seams(off_stacked(off_flush(found, &gta, &rail_grid)), &gta, &surfaces, &rail_grid);
     // No grinding under a roof: stretches with a surface right above them
     // (stacked rim lines under a bowl's cap, a coping under a deck) go.
     let mut found = off_buried(found, &gta, &rail_grid);
@@ -1224,6 +1251,47 @@ fn off_flush(rails: Vec<Vec<Vec3>>, gta: &[[Vec3; 3]], grid: &crate::grid::XyGri
     cut_where(rails, |p, along| flush_at(gta, grid, p, along))
 }
 
+/// Suppress fake grind rails emitted along overlapping drivable asphalt road slab
+/// seams (e.g. `1029-M4`, `1110-41`, `1110-44`): both the upper edge face and the
+/// lower adjacent face are drivable asphalt within a 1.5..18 cm vertical step,
+/// unlike authentic concrete/mineral sidewalk curbs.
+fn off_road_seams(rails: Vec<Vec<Vec3>>, gta: &[[Vec3; 3]], surfaces: &[u32], grid: &crate::grid::XyGrid) -> Vec<Vec<Vec3>> {
+    let is_asphalt = |tag: u32| matches!(tag & 0x7f, 1 | 2);
+    let asphalt_at = |x: f32, y: f32, lo: f32, hi: f32| {
+        grid.at(x, y)
+            .iter()
+            .filter_map(|&i| {
+                let idx = i as usize;
+                let t = gta[idx];
+                let n = (t[1] - t[0]).cross(t[2] - t[0]).normalize_or_zero();
+                if n.z < 0.75 {
+                    return None;
+                }
+                let tri = svwc::Tri { v: t.map(|q| q.to_array()), material: 0 };
+                svwc::clean::floor_at(&tri, [x, y])
+                    .filter(|&z| z >= lo && z <= hi)
+                    .map(|z| (z, is_asphalt(surfaces[idx])))
+            })
+            .max_by(|a, b| a.0.total_cmp(&b.0))
+    };
+    cut_where(rails, |p, along| {
+        let side = Vec3::new(-along.y, along.x, 0.0).normalize_or_zero();
+        if side == Vec3::ZERO {
+            return false;
+        }
+        [side, -side].into_iter().any(|high_dir| {
+            let (hp, lp, far) = (p + high_dir * 0.15, p - high_dir * 0.15, p - high_dir * 0.45);
+            let Some((hz, h_road)) = asphalt_at(hp.x, hp.y, p.z - 0.04, p.z + 0.04) else {
+                return false;
+            };
+            let Some((lz, l_road)) = asphalt_at(lp.x, lp.y, hz - 0.18, hz - 0.015) else {
+                return false;
+            };
+            h_road && l_road && asphalt_at(far.x, far.y, hz - 0.22, hz + 0.05).is_some_and(|(fz, f_road)| f_road && (fz - lz).abs() <= 0.10)
+        })
+    })
+}
+
 /// Whether the collision runs on at `p`'s height on both sides of a line
 /// running `along` (no lip there; `off_flush`).
 fn flush_at(gta: &[[Vec3; 3]], grid: &crate::grid::XyGrid, p: Vec3, along: Vec3) -> bool {
@@ -1590,6 +1658,10 @@ const EDGE_JOIN: f32 = 1.3;
 /// same way (25 deg) and the gap is no flush seam. A real opening (a gap
 /// in a railing) has no edge across it and stays open.
 fn join_along_edges(rails: &mut Vec<Vec<Vec3>>, gta: &[[Vec3; 3]], grid: &crate::grid::XyGrid) {
+    join_along_edges_within(rails, gta, grid, EDGE_JOIN);
+}
+
+fn join_along_edges_within(rails: &mut Vec<Vec<Vec3>>, gta: &[[Vec3; 3]], grid: &crate::grid::XyGrid, gap: f32) {
     let on_edge = |s: Vec3, dir: Vec3| grid.at(s.x, s.y).iter().any(|&i| {
         let t = &gta[i as usize];
         (0..3).any(|k| {
@@ -1602,12 +1674,28 @@ fn join_along_edges(rails: &mut Vec<Vec<Vec3>>, gta: &[[Vec3; 3]], grid: &crate:
         })
     });
     let bridge = |p: Vec3, q: Vec3| {
+        let dist = p.distance(q);
         let dir = (q - p).normalize_or_zero();
-        let steps = ((p.distance(q) / 0.05).ceil() as usize).max(2);
-        (1..steps).all(|k| on_edge(p.lerp(q, k as f32 / steps as f32), dir))
-            && [0.25, 0.5, 0.75].iter().all(|&f| !flush_at(gta, grid, p.lerp(q, f), dir))
+        let steps = ((dist / 0.05).ceil() as usize).max(2);
+        let corner_bridge = dist <= 0.14;
+        let on_any_edge = |s: Vec3| grid.at(s.x, s.y).iter().any(|&i| {
+            let t = &gta[i as usize];
+            (0..3).any(|k| {
+                let (a, b) = (t[k], t[(k + 1) % 3]);
+                let ab = b - a;
+                let len2 = ab.length_squared();
+                if len2 < 1e-6 { return false; }
+                let u = ((s - a).dot(ab) / len2).clamp(0.0, 1.0);
+                (a + ab * u).distance(s) <= 0.025
+            })
+        });
+        let supported = (1..steps).all(|k| {
+            let s = p.lerp(q, k as f32 / steps as f32);
+            on_edge(s, dir) || (corner_bridge && on_any_edge(s))
+        });
+        supported && [0.25, 0.5, 0.75].iter().all(|&f| !flush_at(gta, grid, p.lerp(q, f), dir))
     };
-    crate::rails::join_ends_bridging(rails, EDGE_JOIN, &bridge);
+    crate::rails::join_ends_bridging(rails, gap, &bridge);
 }
 
 /// How far under another rail a lower bar of the same railing lies
@@ -3908,6 +3996,82 @@ mod baked_tile_tests {
         assert_eq!(rails.len(),2,"a real gap must not be bridged");
         assert!(rails.iter().any(|r| r.len()==3 && r[1]==coords::to_skate(v(2.,0.,2.)).to_array()),
             "a real bend must remain in the continuous rail: {rails:?}");
+    }
+
+    #[test]
+    fn assembled_rails_reconnect_90_deg_corner_across_tile_border() {
+        let v = Vec3::new;
+        let s = |p: Vec3| coords::to_skate(p).to_array();
+        // Ledge corner split right across x = 64.0 m tile border with an 8 cm chamfer gap.
+        let tris = vec![
+            [s(v(62., 10., 1.)), s(v(63.96, 10., 1.)), s(v(64., 12., 1.))],
+            [s(v(63.96, 10., 1.)), s(v(64., 10.04, 1.)), s(v(64., 12., 1.))],
+            [s(v(62., 10., 0.)), s(v(63.96, 10., 0.)), s(v(63.96, 10., 1.))],
+            [s(v(64., 10.04, 0.)), s(v(64., 12., 0.)), s(v(64., 12., 1.))],
+        ];
+        let mut rails = vec![
+            vec![s(v(62., 10., 1.)), s(v(63.96, 10., 1.))],
+            vec![s(v(64., 10.04, 1.)), s(v(64., 12., 1.))],
+        ];
+        normalize_assembled_rails_with_tris(&mut rails, &tris);
+        assert_eq!(rails.len(), 1, "90 deg corner across 64 m slice border joins into one rail: {rails:?}");
+    }
+
+    #[test]
+    fn assembled_rails_do_not_bridge_one_metre_angled_air_gap_near_border() {
+        let v = Vec3::new;
+        let s = |p: Vec3| coords::to_skate(p).to_array();
+        // Two unrelated rails near x = 64.0 m separated by a 1.0 m open-air gap with a 10 deg bend.
+        let tris = vec![
+            [s(v(60., 10., 1.)), s(v(63., 10., 1.)), s(v(63., 12., 1.))],
+            [s(v(64., 10.17, 1.)), s(v(67., 10.70, 1.)), s(v(67., 12., 1.))],
+        ];
+        let mut rails = vec![
+            vec![s(v(60., 10., 1.)), s(v(63., 10., 1.))],
+            vec![s(v(64., 10.17, 1.)), s(v(67., 10.70, 1.))],
+        ];
+        normalize_assembled_rails_with_tris(&mut rails, &tris);
+        assert_eq!(rails.len(), 2, "unsupported 1 m air gap near border stays split: {rails:?}");
+    }
+
+    #[test]
+    fn road_overlap_seam_is_not_a_rail_while_sidewalk_curb_stays() {
+        let v = |x: f32, y: f32, z: f32| [x, y, z];
+        let quad_mat = |x0: f32, y0: f32, x1: f32, y1: f32, z: f32, mat: u8, out: &mut Vec<([[f32; 3]; 3], u8)>| {
+            out.push(([v(x0, y0, z), v(x1, y0, z), v(x1, y1, z)], mat));
+            out.push(([v(x0, y0, z), v(x1, y1, z), v(x0, y1, z)], mat));
+        };
+        let wall_mat = |y: f32, x0: f32, x1: f32, z0: f32, z1: f32, mat: u8, out: &mut Vec<([[f32; 3]; 3], u8)>| {
+            out.push(([v(x0, y, z0), v(x1, y, z0), v(x1, y, z1)], mat));
+            out.push(([v(x0, y, z0), v(x1, y, z1), v(x0, y, z1)], mat));
+        };
+        // Two overlapping drivable asphalt road slabs (material 4) with a 12 cm step.
+        let mut road_seam = Vec::new();
+        quad_mat(-4., -4., 4., 4., 0.0, 4, &mut road_seam);
+        quad_mat(-3., 0., 3., 3., 0.12, 4, &mut road_seam);
+        wall_mat(0.0, -3., 3., 0.0, 0.12, 4, &mut road_seam);
+        let seam_area = build_area_materials(Vec3::ZERO, road_seam.into_iter());
+        let front_seam = seam_area.rails.iter().any(|r| {
+            r.iter().all(|p| {
+                let g = coords::from_skate(Vec3::from_array(*p));
+                g.y.abs() < 0.05 && (g.z - 0.12).abs() < 0.03
+            })
+        });
+        assert!(!front_seam, "asphalt-over-asphalt road overlap seam must not emit a rail: {:?}", seam_area.rails);
+
+        // Authentic concrete sidewalk (material 15) 14 cm above asphalt road (material 4).
+        let mut curb = Vec::new();
+        quad_mat(-4., -4., 4., 0.0, 0.0, 4, &mut curb);
+        quad_mat(-3., 0., 3., 3., 0.14, 15, &mut curb);
+        wall_mat(0.0, -3., 3., 0.0, 0.14, 15, &mut curb);
+        let curb_area = build_area_materials(Vec3::ZERO, curb.into_iter());
+        let front_curb = curb_area.rails.iter().any(|r| {
+            r.iter().all(|p| {
+                let g = coords::from_skate(Vec3::from_array(*p));
+                g.y.abs() < 0.05 && (g.z - 0.14).abs() < 0.03
+            })
+        });
+        assert!(front_curb, "sidewalk curb over road stays grindable: {:?}", curb_area.rails);
     }
 
     #[test]

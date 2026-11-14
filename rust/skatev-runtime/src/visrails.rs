@@ -240,6 +240,161 @@ pub fn rails_in_reusing(centre: [f32; 2], half: f32, tris: &[[Vec3; 3]], grid: &
 /// How close (metres) a visible rail must run to a visible railing's
 /// collision to stand on it.
 const ON_BAR: f32 = 0.10;
+const WALL_SLAM_REACH: f32 = 0.29;
+const WALL_SLAM_HEIGHTS: [f32; 2] = [0.114, 0.203];
+
+/// True when `p` sits flush (`|z_floor - p.z| <= 4 cm`) on a solid shoulder slab
+/// right in front of a vertical wall (`>= 20 cm` high) within `11.5 in` (`0.29 m`),
+/// distinguishing barrier seams from freestanding handrails beside open air.
+fn on_wall_slam_shoulder_with(
+    p: Vec3,
+    dir_xy: Vec3,
+    visit_box: &dyn Fn([f32; 2], [f32; 2], &mut dyn FnMut([Vec3; 3]) -> bool) -> bool,
+) -> bool {
+    let sides = [Vec3::new(-dir_xy.y, dir_xy.x, 0.0), Vec3::new(dir_xy.y, -dir_xy.x, 0.0)];
+    sides.into_iter().any(|side| {
+        let end = p + side * WALL_SLAM_REACH;
+        let lo = [p.x.min(end.x) - 0.02, p.y.min(end.y) - 0.02];
+        let hi = [p.x.max(end.x) + 0.02, p.y.max(end.y) + 0.02];
+        let mut wall_dists = [None::<f32>; 2];
+        for (slot, &h) in wall_dists.iter_mut().zip(&WALL_SLAM_HEIGHTS) {
+            let orig = p + Vec3::Z * h;
+            let mut best: Option<f32> = None;
+            visit_box(lo, hi, &mut |tri| {
+                if let Some(t) = crate::rails::ray_triangle_hit(orig, side, WALL_SLAM_REACH, 1e-4, &tri) {
+                    best = Some(best.map_or(t, |cur| cur.min(t)));
+                }
+                false
+            });
+            *slot = best;
+        }
+        let (Some(t1), Some(t2)) = (wall_dists[0], wall_dists[1]) else {
+            return false;
+        };
+        let wall_dist = t1.min(t2).clamp(0.03, WALL_SLAM_REACH);
+        let probe_dist = (wall_dist * 0.75).max(wall_dist - 0.04);
+        let probe = p + side * probe_dist;
+        visit_box([probe.x - 0.02, probe.y - 0.02], [probe.x + 0.02, probe.y + 0.02], &mut |t| {
+            let n = (t[1] - t[0]).cross(t[2] - t[0]);
+            n.z >= 0.65 * n.length().max(1e-9)
+                && svwc::clean::floor_at(&svwc::Tri { v: t.map(|v| v.to_array()), material: 0 }, [probe.x, probe.y])
+                    .is_some_and(|z| (z - p.z).abs() <= 0.04)
+        })
+    })
+}
+
+fn visit_grid_box(grid: &crate::grid::XyGrid, tris: &[[Vec3; 3]], lo: [f32; 2], hi: [f32; 2], f: &mut dyn FnMut([Vec3; 3]) -> bool) -> bool {
+    for cx in grid.cell_of(lo[0])..=grid.cell_of(hi[0]) {
+        for cy in grid.cell_of(lo[1])..=grid.cell_of(hi[1]) {
+            if grid.cell(cx, cy).iter().any(|&i| f(tris[i as usize])) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+fn on_wall_slam_shoulder(p: Vec3, dir_xy: Vec3, grid: &crate::grid::XyGrid, tris: &[[Vec3; 3]]) -> bool {
+    on_wall_slam_shoulder_with(p, dir_xy, &|lo, hi, f| visit_grid_box(grid, tris, lo, hi, f))
+}
+
+fn gap_hits_wall_slam_shoulder(a: Vec3, b: Vec3, visit_box: &dyn Fn([f32; 2], [f32; 2], &mut dyn FnMut([Vec3; 3]) -> bool) -> bool) -> bool {
+    let h = Vec3::new(b.x - a.x, b.y - a.y, 0.0);
+    let hlen = h.length();
+    if hlen < 1e-4 {
+        return false;
+    }
+    let dir_xy = h / hlen;
+    [0.25, 0.5, 0.75]
+        .into_iter()
+        .any(|t| on_wall_slam_shoulder_with(a.lerp(b, t), dir_xy, visit_box))
+}
+
+pub(crate) fn shoulder_blocked_between(a: Vec3, b: Vec3, grid: &crate::grid::XyGrid, tris: &[[Vec3; 3]]) -> bool {
+    gap_hits_wall_slam_shoulder(a, b, &|lo, hi, f| visit_grid_box(grid, tris, lo, hi, f))
+}
+
+pub(crate) fn shoulder_blocked_between_skate_tris(a: Vec3, b: Vec3, tris: &[[[f32; 3]; 3]]) -> bool {
+    let sa = crate::coords::to_skate(a);
+    let sb = crate::coords::to_skate(b);
+    let pad = WALL_SLAM_REACH + 0.05;
+    let smin_x = sa.x.min(sb.x) - pad;
+    let smax_x = sa.x.max(sb.x) + pad;
+    let smin_z = sa.z.min(sb.z) - pad;
+    let smax_z = sa.z.max(sb.z) + pad;
+    let near: Vec<[Vec3; 3]> = tris
+        .iter()
+        .filter(|t| {
+            let max_x = t[0][0].max(t[1][0]).max(t[2][0]);
+            let min_x = t[0][0].min(t[1][0]).min(t[2][0]);
+            let max_z = t[0][2].max(t[1][2]).max(t[2][2]);
+            let min_z = t[0][2].min(t[1][2]).min(t[2][2]);
+            max_x >= smin_x && min_x <= smax_x && max_z >= smin_z && min_z <= smax_z
+        })
+        .map(|t| t.map(|p| crate::coords::from_skate(Vec3::from_array(p))))
+        .collect();
+    if near.is_empty() {
+        return false;
+    }
+    gap_hits_wall_slam_shoulder(a, b, &|lo, hi, f| {
+        near.iter().any(|&t| {
+            let max_x = t[0].x.max(t[1].x).max(t[2].x);
+            let min_x = t[0].x.min(t[1].x).min(t[2].x);
+            let max_y = t[0].y.max(t[1].y).max(t[2].y);
+            let min_y = t[0].y.min(t[1].y).min(t[2].y);
+            max_x >= lo[0] && min_x <= hi[0] && max_y >= lo[1] && min_y <= hi[1] && f(t)
+        })
+    })
+}
+
+fn flush_visrail_run(runs: &mut Vec<Vec<Vec3>>, cur: &mut Vec<Vec3>) {
+    if cur.len() >= 2 {
+        runs.push(std::mem::take(cur));
+    } else {
+        cur.clear();
+    }
+}
+
+fn push_visrail_seg(runs: &mut Vec<Vec<Vec3>>, cur: &mut Vec<Vec3>, a: Vec3, b: Vec3) {
+    if cur.last().is_some_and(|last| last.distance_squared(a) < 1e-6) {
+        cur.push(b);
+    } else {
+        flush_visrail_run(runs, cur);
+        *cur = vec![a, b];
+    }
+}
+
+fn trim_wall_slam_shoulders(rail: &[Vec3], grid: &crate::grid::XyGrid, tris: &[[Vec3; 3]]) -> Vec<Vec<Vec3>> {
+    let mut runs: Vec<Vec<Vec3>> = Vec::new();
+    let mut cur: Vec<Vec3> = Vec::new();
+    for w in rail.windows(2) {
+        let (a, b) = (w[0], w[1]);
+        let h = Vec3::new(b.x - a.x, b.y - a.y, 0.0);
+        let hlen = h.length();
+        if hlen < 1e-4 {
+            continue;
+        }
+        let dir_xy = h / hlen;
+        let steps = (hlen / 0.10).ceil().max(1.0) as usize;
+        let flags: Vec<bool> = (0..steps)
+            .map(|k| !on_wall_slam_shoulder(a.lerp(b, (k as f32 + 0.5) / steps as f32), dir_xy, grid, tris))
+            .collect();
+        if flags.iter().all(|&ok| ok) {
+            push_visrail_seg(&mut runs, &mut cur, a, b);
+        } else {
+            for (k, &ok) in flags.iter().enumerate() {
+                if ok {
+                    push_visrail_seg(&mut runs, &mut cur, a.lerp(b, k as f32 / steps as f32), a.lerp(b, (k + 1) as f32 / steps as f32));
+                } else {
+                    flush_visrail_run(&mut runs, &mut cur);
+                }
+            }
+        }
+    }
+    flush_visrail_run(&mut runs, &mut cur);
+    runs.retain(|r| r.windows(2).map(|w| (w[1] - w[0]).length()).sum::<f32>() >= SHORTEST);
+    runs
+}
 
 fn in_cells_reusing(size: f32, cell: impl Fn(Cell) -> Rails, centre: [f32; 2], half: f32, tris: &[[Vec3; 3]], grid: &crate::grid::XyGrid, bars: &[[Vec3; 3]], dirty: &crate::reuse::Dirty, cache: &mut crate::reuse::LineCache) -> Vec<Vec<Vec3>> {
     // A rail is filed under its middle point's cell: one cell more round.
@@ -294,10 +449,14 @@ fn in_cells_reusing(size: f32, cell: impl Fn(Cell) -> Rails, centre: [f32; 2], h
         .filter(|r| r.iter().any(|p| (p.x - centre[0]).abs() <= half && (p.y - centre[1]).abs() <= half))
         .cloned().collect();
     cache.apply(&raw, dirty, 1.0, |r| {
-        gentle_pieces(r).into_iter().filter(|r| {
-            let mid = r[r.len() / 2];
-            stands(r[0]) || stands(mid) || stands(r[r.len() - 1])
-        }).collect()
+        gentle_pieces(r)
+            .into_iter()
+            .filter(|r| {
+                let mid = r[r.len() / 2];
+                stands(r[0]) || stands(mid) || stands(r[r.len() - 1])
+            })
+            .flat_map(|r| trim_wall_slam_shoulders(&r, &grid, tris))
+            .collect()
     })
 }
 
@@ -459,5 +618,50 @@ mod tests {
         // A bottom bar over a drop with its top bar 0.9 m above: no rail; the top bar is one.
         let two = vec![[v(0., 2.95, 8.95), v(5., 2.95, 8.95), v(5., 3.05, 8.95)], [v(0., 2.95, 9.85), v(5., 2.95, 9.85), v(5., 3.05, 9.85)]];
         assert_eq!(in_cells(size, rail, [0.0, 0.0], 20.0, &floor, &two).len(), 1, "only the 1 m handrail on the floor");
+    }
+
+    #[test]
+    fn a_visrail_on_a_lower_barrier_shoulder_next_to_upper_wall_is_trimmed_while_stair_handrail_stays() {
+        let v = Vec3::new;
+        let quad = |a: Vec3, b: Vec3, c: Vec3, d: Vec3| vec![[a, b, c], [a, c, d]];
+        // Road slab at z = 0.0, jersey-barrier lower shoulder at z = 0.65 (y = 0.0..0.20),
+        // and vertical upper barrier wall at y = 0.20 rising from z = 0.65 to z = 1.00.
+        let mut tris = Vec::new();
+        tris.extend(quad(v(-5., -5., 0.), v(5., -5., 0.), v(5., 5., 0.), v(-5., 5., 0.)));
+        tris.extend(quad(v(-4., 0., 0.65), v(4., 0., 0.65), v(4., 0.20, 0.65), v(-4., 0.20, 0.65)));
+        tris.extend(quad(v(-4., 0.20, 0.65), v(4., 0.20, 0.65), v(4., 0.20, 1.00), v(-4., 0.20, 1.00)));
+
+        // Mark 1111-3: visible trim at outer edge of lower shoulder (z = 0.651, y = 0.015),
+        // plus a freestanding handrail 1.5 m away at z = 0.90 (0.90 m above road) beside a wall.
+        tris.extend(quad(v(-4., -1.70, 0.), v(4., -1.70, 0.), v(4., -1.70, 1.50), v(-4., -1.70, 1.50)));
+        let rails: Rails = std::sync::Arc::new(vec![
+            vec![v(-3., 0.015, 0.651), v(3., 0.015, 0.651)],
+            vec![v(-3., -1.52, 0.90), v(3., -1.52, 0.90)],
+        ]);
+        let kept = in_cells(32.0, |c| if c == (0, 0) { rails.clone() } else { Default::default() }, [0.0, 0.0], 10.0, &tris, &[]);
+        assert_eq!(kept.len(), 1, "lower barrier shoulder visrail dropped, stair handrail kept: {kept:?}");
+        assert!((kept[0][0].y - -1.52).abs() < 1e-4);
+
+        // A freestanding rail 18 cm in front of a wall (with open air between them)
+        // must remain un-trimmed.
+        let mut free_tris = Vec::new();
+        free_tris.extend(quad(v(-5., -5., 0.), v(5., -5., 0.), v(5., 5., 0.), v(-5., 5., 0.)));
+        free_tris.extend(quad(v(-4., 0., 0.90), v(4., 0., 0.90), v(4., 0.06, 0.90), v(-4., 0.06, 0.90)));
+        free_tris.extend(quad(v(-4., 0.24, 0.), v(4., 0.24, 0.), v(4., 0.24, 1.50), v(-4., 0.24, 1.50)));
+        let free_rails: Rails = std::sync::Arc::new(vec![vec![v(-3., 0.005, 0.901), v(3., 0.005, 0.901)]]);
+        let kept_free = in_cells(32.0, |c| if c == (0, 0) { free_rails.clone() } else { Default::default() }, [0.0, 0.0], 10.0, &free_tris, &[]);
+        assert_eq!(kept_free.len(), 1, "freestanding visrail beside open air 18 cm from wall stays: {kept_free:?}");
+
+        // Trimmed 20 cm pillar shoulder gap between two >= 30 cm pieces must NOT rejoin in guarded join.
+        let mut pillar_tris = Vec::new();
+        pillar_tris.extend(quad(v(-5., -5., 0.), v(5., -5., 0.), v(5., 5., 0.), v(-5., 5., 0.)));
+        pillar_tris.extend(quad(v(-2., 0., 0.65), v(2., 0., 0.65), v(2., 0.20, 0.65), v(-2., 0.20, 0.65)));
+        pillar_tris.extend(quad(v(-0.10, 0.16, 0.65), v(0.10, 0.16, 0.65), v(0.10, 0.16, 1.00), v(-0.10, 0.16, 1.00)));
+        let pillar_grid = crate::grid::XyGrid::triangles(1.0, &pillar_tris);
+        let pillar_rail: Rails = std::sync::Arc::new(vec![vec![v(-1.5, 0.015, 0.651), v(1.5, 0.015, 0.651)]]);
+        let mut split = in_cells(32.0, |c| if c == (0, 0) { pillar_rail.clone() } else { Default::default() }, [0.0, 0.0], 10.0, &pillar_tris, &[]);
+        assert_eq!(split.len(), 2, "20 cm blocked pillar trims middle without dropping halves: {split:?}");
+        assert_eq!(crate::rails::join_ends_guarded(&mut split, &|p, q| p.distance(q) <= 0.05 || !shoulder_blocked_between(p, q, &pillar_grid, &pillar_tris)), 0);
+        assert_eq!(split.len(), 2, "guarded join refuses to bridge back across trimmed 20 cm shoulder: {split:?}");
     }
 }

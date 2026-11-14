@@ -21,10 +21,12 @@
 #include "board_parts.h"
 #include "fisheye.h"
 #include "gta_audio.h"
+#include "hud_overlay.h"
 #include "natives.h"
 #include "pose_hook.h"
 #include "pose_math.h"
 #include "replay_edit.h"
+#include "replay_hud_state.h"
 #include "replay_logic.h"
 #include "replay_store.h"
 
@@ -1702,11 +1704,13 @@ bool EditorTick(int ped, const PadIn& pad, const KeysIn& keys, float dt) {
 
     // HUD
     if (g_mode == Mode::Loading) {
+        hudoverlay::SetReplayHud(nullptr);
         Txt("Loading...", 0.5f, 0.48f, 0.5f, true);
         FlushHud();
         return true;
     }
     if (g_photoTaking) {  // the picture without the editor on it
+        hudoverlay::SetReplayHud(nullptr);
         g_rects.clear(), g_texts.clear();
         const bool hidden = g_hudHidden;
         g_hudHidden = true;
@@ -1714,23 +1718,97 @@ bool EditorTick(int ped, const PadIn& pad, const KeysIn& keys, float dt) {
         g_hudHidden = hidden;
         return true;
     }
-    Strip(preview ? -1 : clipIndex, preview);
-    EditorInfo(preview ? "Instant Replay" : g_mode == Mode::CameraEdit ? CameraKindName(clip.camera) : "Main Timeline", preview);
-    DrawSkateFooter();
+    ReplayHudScreen hudScreen = ReplayHudScreen::Panel;
+    std::string hudTitle = "Edit timeline";
+    switch (g_mode) {
+    case Mode::Instant:
+        hudScreen = ReplayHudScreen::Instant;
+        hudTitle = "Instant replay";
+        break;
+    case Mode::Timeline:
+        hudScreen = ReplayHudScreen::Timeline;
+        hudTitle = "Edit timeline";
+        break;
+    case Mode::CameraEdit:
+        hudScreen = ReplayHudScreen::CameraEdit;
+        hudTitle = CameraKindName(clip.camera);
+        break;
+    case Mode::EditMenu:
+        hudTitle = "Edit clip " + std::to_string(g_editClip + 1);
+        break;
+    case Mode::Effects:
+        hudTitle = "Effects";
+        break;
+    case Mode::Look:
+        hudTitle = "Look";
+        break;
+    case Mode::CameraMenu:
+        hudTitle = "Camera";
+        break;
+    case Mode::Finished:
+        hudTitle = "Finished";
+        break;
+    case Mode::Reel:
+        hudTitle = "Saved replays";
+        break;
+    case Mode::Help:
+    case Mode::Prompt:
+    default:
+        hudScreen = ReplayHudScreen::HiddenOverlay;
+        break;
+    }
+    const float shownZoomMm = cameraEdit ? Shown().zoomMm : clip.base.zoomMm;
+    const SvReplayHudState hudState = BuildReplayHudState({
+        g_hudStyle == HudStyle::Skate,
+        hudScreen,
+        g_head.playing,
+        g_hudHidden,
+        g_rec.Start(),
+        g_rec.Length(),
+        g_head.time,
+        clipIndex,
+        shownZoomMm,
+        hudTitle,
+        &g_edit,
+    });
+    const bool aptHudDrawn = hudoverlay::SetReplayHud(&hudState);
+    if (!aptHudDrawn && !(g_hudStyle == HudStyle::Skate && hudScreen == ReplayHudScreen::HiddenOverlay)) {
+        Strip(preview ? -1 : clipIndex, preview);
+        EditorInfo(preview ? "Instant Replay" : g_mode == Mode::CameraEdit ? CameraKindName(clip.camera) : "Main Timeline", preview);
+        DrawSkateFooter();
+    } else if (aptHudDrawn) {
+        if (g_clock < g_noticeUntil) Txt(g_notice, 0.5f, 0.165f, 0.36f, true);
+        if (hudScreen == ReplayHudScreen::Panel) DrawSkateFooter();
+    }
+    auto CompactKeyboardHint = [&](const char* keyboardText) {
+        if (!g_keyboard || g_hudHidden) return;
+        Rect(0.02f, 0.952f, 0.98f, 0.988f, 0.04f, 0.04f, 0.05f, 0.72f);
+        Txt(keyboardText, 0.5f, 0.958f, 0.27f, true);
+    };
     if (g_mode == Mode::Instant) {
-        Keys("RB Play/Pause   LT/RT Scrub   D-pad Left/Right Start/End   A Edit Timeline",
-             "Space/LClick Play   A/D or Wheel Scrub   Home/End Jump   Enter Timeline", 0.91f);
-        Keys("X Photo   Y Help   R3 Hide   B Exit", "1..4 Speed   L Look   P Photo   F1/U Help   F4 HUD   H Hide   Esc/RClick Exit");
+        if (!aptHudDrawn) {
+            Keys("RB Play/Pause   LT/RT Scrub   D-pad Left/Right Start/End   A Edit Timeline",
+                 "Space/LClick Play   A/D or Wheel Scrub   Home/End Jump   Enter Timeline", 0.91f);
+            Keys("X Photo   Y Help   R3 Hide   B Exit", "1..4 Speed   L Look   P Photo   F1/U Help   F4 HUD   H Hide   Esc/RClick Exit");
+        } else {
+            CompactKeyboardHint("Space/LClick Play   A/D or Wheel Scrub   Enter Timeline   1..4 Speed   L Look   P Photo   F1 Help   F4 HUD   H Hide   Esc Exit");
+        }
     } else if (g_mode == Mode::Timeline) {
-        Keys("A Play/Pause   Left Stick Scrub   LT/RT In/Out   LB/RB Jump to Marker",
-             "Space/LClick Play   A/D Scrub   Wheel/,/. Step   I/O In/Out   Shift+,/. Jump Marker   Home/End Jump", 0.91f);
-        Keys("D-pad Down/Up Add/Delete Marker   X Edit Clip   Back Actions   R3 Hide   B Back",
-             "E Edit Cam   C Preset   1..4 Speed   F Filter   V Shake   N/Del Marker   Tab Actions   F4 HUD   Ctrl+S Save");
+        if (!aptHudDrawn) {
+            Keys("A Play/Pause   Left Stick Scrub   LT/RT In/Out   LB/RB Jump to Marker",
+                 "Space/LClick Play   A/D Scrub   Wheel/,/. Step   I/O In/Out   Shift+,/. Jump Marker   Home/End Jump", 0.91f);
+            Keys("D-pad Down/Up Add/Delete Marker   X Edit Clip   Back Actions   R3 Hide   B Back",
+                 "E Edit Cam   C Preset   1..4 Speed   F Filter   V Shake   N/Del Marker   Tab Actions   F4 HUD   Ctrl+S Save");
+        } else {
+            CompactKeyboardHint("Space Play   A/D Scrub   I/O Trim   N/Del Marker   E Cam   C Preset   1..4 Speed   F Filter   Tab Actions   F4 HUD   Ctrl+S Save");
+        }
     } else if (g_mode == Mode::CameraEdit) {
         const CameraParams& camera = Shown();
         const bool fish = clip.lens == kLensFisheye;
-        if (fish || camera.zoomMm <= 0.0f) Txt(LensName(clip.lens), 0.5f, 0.15f, 0.3f, true);
-        else Txt("Zoom " + std::to_string(static_cast<int>(std::lround(camera.zoomMm))) + " mm", 0.5f, 0.15f, 0.3f, true);
+        if (!aptHudDrawn) {
+            if (fish || camera.zoomMm <= 0.0f) Txt(LensName(clip.lens), 0.5f, 0.15f, 0.3f, true);
+            else Txt("Zoom " + std::to_string(static_cast<int>(std::lround(camera.zoomMm))) + " mm", 0.5f, 0.15f, 0.3f, true);
+        }
         std::string padKeys = "LB/RB Step Frame";
         std::string keyboardKeys = ",/. or Wheel Step";
         if (!fish) {
@@ -1751,9 +1829,14 @@ bool EditorTick(int ped, const PadIn& pad, const KeysIn& keys, float dt) {
                 if (clip.camera == CameraKind::Follow || clip.camera == CameraKind::AdvFollow) keyboardKeys += "   Left/Right Orbit";
             }
         }
-        Keys(padKeys.c_str(), keyboardKeys.c_str(), 0.87f);
-        Keys("A Play/Pause   Back Commit   B Cancel   R3 Hide", "Space/LClick Play   Tab/Enter Commit   Esc/RClick Cancel   L Look   P Photo   F1/U Help", 0.91f);
-        if (IsAdvanced(clip.camera)) Keys("X Set Key   Y Delete Key   L3 Next Key", "K Set Key   Delete Remove Key   J Next Key   Shift+J Previous Key");
+        if (!aptHudDrawn) {
+            Keys(padKeys.c_str(), keyboardKeys.c_str(), 0.87f);
+            Keys("A Play/Pause   Back Commit   B Cancel   R3 Hide", "Space/LClick Play   Tab/Enter Commit   Esc/RClick Cancel   L Look   P Photo   F1/U Help", 0.91f);
+            if (IsAdvanced(clip.camera)) Keys("X Set Key   Y Delete Key   L3 Next Key", "K Set Key   Delete Remove Key   J Next Key   Shift+J Previous Key");
+        } else {
+            if (IsAdvanced(clip.camera)) keyboardKeys += "   K/Del Key   J Next Key";
+            CompactKeyboardHint((keyboardKeys + "   Tab Commit   Esc Cancel   F4 HUD").c_str());
+        }
     } else if (g_mode == Mode::EditMenu) {
         const char* descriptions[] = {"Choose a camera and position it for this clip.",
                                       "Change playback speed and camera shake.",
@@ -2266,6 +2349,7 @@ void Exit() {
     gtaaudio::SetReplayPaused(false);
     fisheye::SetEnabled(false);
     fisheye::SetHudItems({}, {}, false);
+    hudoverlay::SetReplayHud(nullptr);
     char text[160];
     std::snprintf(text, sizeof(text), "replay: left (pose writes during the replay: %u)", g_applyCalls);
     Log(text);

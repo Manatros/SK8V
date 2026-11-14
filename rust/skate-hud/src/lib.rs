@@ -51,6 +51,7 @@ mod movie;
 pub mod player;
 mod presentation;
 pub mod raster;
+pub mod replay;
 
 pub use analyser::AnalyserPlayer;
 pub use central::{CentralPlayer, Style};
@@ -58,3 +59,4 @@ pub use chyron::ChyronPlayer;
 pub use hom::{HomData, HomPlayer};
 pub use layout::Layout;
 pub use player::{Assets, DrawCmd, Frame, Player, ScoreInput, Vertex};
+pub use replay::{ReplayClipSpan, ReplayHudData, ReplayHudMode, ReplayHudPlayer};

@@ -453,10 +453,46 @@ struct SvHudFrame {
     float edge_offset; // Screen_EdgeOffset, movie units
     float region[4];   // HUD region, pixels
 };
+struct SvReplayClipSpan {
+    float start;        // normalized [0..1]
+    float end;          // normalized [0..1]
+    std::uint32_t kind; // CameraKind
+    std::uint32_t selected;
+};
+struct SvReplayHudState {
+    std::uint32_t size;
+    std::uint32_t active;   // 1 = Skate 3 ported replay HUD active, 0 = off
+    std::uint32_t mode;     // 0 Instant, 1 Main, 2 FollowCam, 3 TripodCam, 4 FreeCam, 5 GameCam, 6 Effects
+    std::uint32_t flags;    // bit0 playing, bit1 hidden, bit2 overKey, bit3 overClipMarker, bit4 canShowHide
+    float playhead;         // normalized [0..1]
+    float trim_in;          // normalized [0..1]
+    float trim_out;         // normalized [0..1]
+    std::uint32_t clip_count;
+    std::uint32_t key_count;
+    std::uint32_t marker_count;
+    std::int32_t selected_clip;
+    std::uint32_t shake_type;
+    std::int32_t speed_pct;
+    SvReplayClipSpan clips[32];
+    float keys[48];
+    std::int32_t selected_key;
+    float markers[24];
+    char encoded_time_utf8[32];
+    char zoom_utf8[32];
+    char title_utf8[64];
+};
 using SvSetHudViewportFn = std::uint32_t(__cdecl*)(void*, const SvHudViewport*);
+using SvSetReplayHudFn = std::uint32_t(__cdecl*)(void*, const SvReplayHudState*);
 using SvGetHudTextureFn = std::uint32_t(__cdecl*)(const void*, std::uint32_t, SvHudTexture*, void*, std::uint32_t);
 using SvGetHudFrameFn = std::uint32_t(__cdecl*)(const void*, SvHudFrame*, SvHudDraw*, std::uint32_t, SvHudVertex*,
                                                 std::uint32_t);
+static_assert(sizeof(SvReplayClipSpan) == 16);
+static_assert(sizeof(SvReplayHudState) == 984);
+static_assert(offsetof(SvReplayHudState, clips) == 52);
+static_assert(offsetof(SvReplayHudState, keys) == 564);
+static_assert(offsetof(SvReplayHudState, selected_key) == 756);
+static_assert(offsetof(SvReplayHudState, markers) == 760);
+static_assert(offsetof(SvReplayHudState, encoded_time_utf8) == 856);
 static_assert(sizeof(SvHudViewport) == 40);
 static_assert(offsetof(SvHudViewport, hud_area) == 24);
 static_assert(offsetof(SvHudViewport, safe_zone) == 12);
