@@ -39,6 +39,8 @@ const MIN_RAIL: f32 = 24.0;
 const MAX_SLOPE: f32 = 0.82;
 /// Upward faces folding less than ~28 degrees are one curved surface seam.
 const SMOOTH_SEAM_COS: f32 = 0.882_948;
+/// Two non-flat curved facets (neither a flat deck, min n.z < 0.95) folding less than 32 degrees are one spine/transition seam.
+const CURVED_SEAM_COS: f32 = 0.848_048;
 /// Shallow walkable faces (both n.z > 0.76) folding under 50 degrees are one surface seam.
 const WALKABLE_SEAM_COS: f32 = 0.642_788;
 /// Acute double-sided knife-edge fins (over ~112 degrees) are not grindable lips.
@@ -304,6 +306,8 @@ fn find_limited(tris: &[[Vec3; 3]], dirty: &crate::reuse::Dirty, metres: f32, ca
                         || (normal.z >= limits.upward_z.min(0.35)
                             && other.z >= limits.upward_z.min(0.35)
                             && (normal.dot(other) > SMOOTH_SEAM_COS
+                                || (normal.z.min(other.z) < 0.95
+                                    && normal.dot(other) > CURVED_SEAM_COS)
                                 || (normal.z > 0.76
                                     && other.z > 0.76
                                     && normal.dot(other) > WALKABLE_SEAM_COS))))
@@ -2547,5 +2551,33 @@ mod tests {
         ];
         join_ends(&mut r_step);
         assert_eq!(r_step.len(), 1, "12 cm vertical transition over 12 cm run joins cleanly: {r_step:?}");
+    }
+
+    #[test]
+    fn curved_spine_seam_below_32_deg_is_no_rail_while_30_deg_flat_deck_stays() {
+        let v = Vec3::new;
+        // Two non-flat bowl spine facets (nz ~ 0.55 and nz ~ 0.89, ~29.5 deg fold) with a drop below.
+        let spine = vec![
+            [v(0.0, 0.0, 0.0), v(4.0, 0.0, 0.0), v(4.0, 1.0, 1.51)],
+            [v(0.0, 0.0, 0.0), v(4.0, 1.0, 1.51), v(0.0, 1.0, 1.51)],
+            [v(0.0, 1.0, 1.51), v(4.0, 1.0, 1.51), v(4.0, 2.0, 2.02)],
+            [v(0.0, 1.0, 1.51), v(4.0, 2.0, 2.02), v(0.0, 2.0, 2.02)],
+        ];
+        assert!(
+            find_metres(&spine).0.iter().all(|r| r.iter().all(|p| (p.z - 1.51).abs() > 0.05)),
+            "29.5 deg curved spine seam at z=1.51 must not emit a rail"
+        );
+
+        // A 30 deg bank meeting a flat deck (nz = 1.0) stays a rail.
+        let dz = 1.0 * 30.0f32.to_radians().tan();
+        let bank_deck = vec![
+            [v(0.0, 0.0, 0.0), v(4.0, 0.0, 0.0), v(4.0, 1.0, dz)],
+            [v(0.0, 0.0, 0.0), v(4.0, 1.0, dz), v(0.0, 1.0, dz)],
+            [v(0.0, 1.0, dz), v(4.0, 1.0, dz), v(4.0, 2.0, dz)],
+            [v(0.0, 1.0, dz), v(4.0, 2.0, dz), v(0.0, 2.0, dz)],
+            [v(0.0, 0.0, 0.0), v(0.0, 1.0, dz), v(0.0, 2.0, dz)],
+            [v(4.0, 0.0, 0.0), v(4.0, 2.0, dz), v(4.0, 1.0, dz)],
+        ];
+        assert!(!find_metres(&bank_deck).0.is_empty(), "30 deg bank meeting flat deck must stay a rail");
     }
 }

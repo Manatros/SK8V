@@ -106,6 +106,7 @@ inline void __fastcall OnFinish(void* mgr) {
     if (g_listed) {
         util::Logf(g_log, "pack loader: %s is already in dlclist.xml", kItem);
     } else if (GetFileAttributesW(g_pack.c_str()) != INVALID_FILE_ATTRIBUTES) {
+        g_listed = true;
         char item[sizeof(kItem)];
         std::memcpy(item, kItem, sizeof(kItem));
         reinterpret_cast<void(__fastcall*)(void*, const char*)>(g_base + kMount)(mgr, item);
@@ -116,10 +117,10 @@ inline void __fastcall OnFinish(void* mgr) {
     }
     // B151: the tutorial island is an optional, separately installed pack.
     if (!g_schoolPack.empty() && GetFileAttributesW(g_schoolPack.c_str()) != INVALID_FILE_ATTRIBUTES && !g_schoolListed) {
+        g_schoolListed = true;
         char item[sizeof(kSchoolItem)];
         std::memcpy(item, kSchoolItem, sizeof(kSchoolItem));
         reinterpret_cast<void(__fastcall*)(void*, const char*)>(g_base + kMount)(mgr, item);
-        g_schoolListed = true;
         util::Logf(g_log, "pack loader: mounted %s", kSchoolItem);
     }
     reinterpret_cast<void(__fastcall*)(void*)>(g_base + kFinish)(mgr);

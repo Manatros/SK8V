@@ -631,6 +631,7 @@ fn build_area_rules(center: Vec3, tris: impl Iterator<Item = ([[f32; 3]; 3], u32
         all = off_lines(all, &visual, VISUAL_SIDE, VISUAL_UP);
     }
     if !all.is_empty() {
+        found = off_lines(found, &all, TUBE_SIDE, TUBE_UP);
         all.extend(found);
         crate::rails::trim_overlaps(&mut all);
         crate::rails::join_ends(&mut all);
@@ -2315,6 +2316,8 @@ fn uncovered_kept(rails: &[Vec<Vec3>], gta: &[[Vec3; 3]], grid: &crate::grid::Xy
 /// (stair edges under a handrail, a wall's top beside it; metres).
 const VISUAL_SIDE: f32 = 0.25;
 const VISUAL_UP: f32 = 0.35;
+const TUBE_SIDE: f32 = 0.20;
+const TUBE_UP: f32 = 0.25;
 /// GTA material id the visible rails' boxes sound as (metal).
 const METAL_MATERIAL: u8 = 61;
 const TRACK_SIDE: f32 = 0.3;
@@ -2757,6 +2760,19 @@ mod tests {
             .filter(|r| r.iter().any(|p| p.distance(at) < 3.0)) {
             println!("final {:.2} m from {:?} to {:?}", r.windows(2).map(|w| w[0].distance(w[1])).sum::<f32>(), r[0], r[r.len() - 1]);
         }
+    }
+
+    #[test]
+    fn tube_suppresses_nearby_coping_lip_but_keeps_distant_ledge() {
+        let tube = vec![vec![Vec3::new(0.0, 0.0, 1.0), Vec3::new(5.0, 0.0, 1.0)]];
+        let found = vec![
+            vec![Vec3::new(0.0, 0.06, 1.0), Vec3::new(5.0, 0.06, 1.0)],
+            vec![Vec3::new(0.0, 0.15, 0.9), Vec3::new(5.0, 0.15, 0.9)],
+            vec![Vec3::new(0.0, 0.30, 1.0), Vec3::new(5.0, 0.30, 1.0)],
+        ];
+        let kept = off_lines(found, &tube, TUBE_SIDE, TUBE_UP);
+        assert_eq!(kept.len(), 1, "only the 0.30 m distant ledge stays");
+        assert!((kept[0][0].y - 0.30).abs() < 1e-4);
     }
 
     /// A quarter pipe 3 m wide along y: curved facets from the floor to 1.5 m, a flat deck

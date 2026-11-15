@@ -169,20 +169,25 @@ def menyoo_xml(placements):
 
 def dlc_metadata(staging):
     device = 'dlc_skate_school'
-    archive = f'{device}:/x64/levels/gta5/skateschool.rpf'
-    typ = archive + '/skateschool.ytyp'
+    archive = f'{device}:/%PLATFORM%/levels/gta5/skateschool.rpf'
+    typ = f'{device}:/%PLATFORM%/levels/gta5/skateschool.ityp'
     root = ET.Element('CDataFileMgr__ContentsOfDataFileXml')
     sub(root, 'disabledFiles')
     sub(root, 'includedXmlFiles')
     sub(root, 'includedDataFiles')
     files = sub(root, 'dataFiles')
-    for path, kind, disabled in [(archive, 'RPF_FILE', 'true'), (typ, 'DLC_ITYP_REQUEST', 'true')]:
+    for path, kind, disabled, persistent in [
+        (archive, 'RPF_FILE', 'true', 'false'),
+        (typ, 'DLC_ITYP_REQUEST', 'true', 'true'),
+    ]:
         item = sub(files, 'Item')
         sub(item, 'filename', path)
         sub(item, 'fileType', kind)
+        if kind == 'RPF_FILE':
+            sub(item, 'contents', 'CONTENTS_DLC_MAP_DATA')
         sub(item, 'overlay', value='false')
         sub(item, 'disabled', value=disabled)
-        sub(item, 'persistent', value='true')
+        sub(item, 'persistent', value=persistent)
     change = sub(sub(root, 'contentChangeSets'), 'Item')
     sub(change, 'changeSetName', 'skate_school_AUTOGEN')
     sub(change, 'mapChangeSetData')
