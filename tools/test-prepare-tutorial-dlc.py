@@ -85,11 +85,17 @@ class TutorialDlcTests(unittest.TestCase):
             self.assertEqual(setup.findtext('deviceName'), 'dlc_skate_school')
             self.assertEqual(setup.findtext('datFile'), 'content.xml')
             self.assertEqual(setup.findtext('nameHash'), 'skate_school')
+            self.assertEqual(setup.findtext('type'), 'EXTRACONTENT_LEVEL_PACK')
+            self.assertEqual(setup.find('isLevelPack').attrib.get('value'), 'true')
             self.assertEqual([n.text for n in content.findall('./dataFiles/Item/fileType')],
                              ['RPF_FILE', 'DLC_ITYP_REQUEST'])
-            self.assertEqual(content.findtext('./contentChangeSets/Item/changeSetName'),
-                             setup.findtext('./contentChangeSetGroups/Item/ContentChangeSets/Item'))
-            self.assertEqual(len(content.findall('./contentChangeSets/Item/filesToEnable/Item')), 2)
+            self.assertEqual([n.text for n in content.findall('./contentChangeSets/Item/changeSetName')],
+                             [n.text for n in setup.findall('./contentChangeSetGroups/Item/ContentChangeSets/Item')])
+            self.assertEqual([n.text for n in setup.findall('./contentChangeSetGroups/Item/NameHash')],
+                             ['GROUP_EARLY_ON', 'GROUP_UPDATE_STREAMING'])
+            self.assertEqual(content.findtext('./contentChangeSets/Item[2]/executionConditions/genericConditions'),
+                             '$level=MO_JIM_L11')
+            self.assertEqual(len(content.findall('./contentChangeSets/Item[2]/filesToEnable/Item')), 2)
 
     def test_direct_dds_header_and_pixels(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -188,28 +188,38 @@ def dlc_metadata(staging):
         sub(item, 'overlay', value='false')
         sub(item, 'disabled', value=disabled)
         sub(item, 'persistent', value=persistent)
-    change = sub(sub(root, 'contentChangeSets'), 'Item')
-    sub(change, 'changeSetName', 'skate_school_AUTOGEN')
-    sub(change, 'mapChangeSetData')
-    enable = sub(change, 'filesToEnable')
+    changesets = sub(root, 'contentChangeSets')
+    init_cs = sub(changesets, 'Item')
+    sub(init_cs, 'changeSetName', 'CCS_SKATE_SCHOOL_INIT')
+    for tag in ('mapChangeSetData', 'filesToEnable', 'filesToDisable', 'txdToLoad',
+                'txdToUnload', 'residentResources', 'unregisterResources'):
+        sub(init_cs, tag)
+    stream_cs = sub(changesets, 'Item')
+    sub(stream_cs, 'changeSetName', 'CCS_SKATE_SCHOOL_STREAMING_MAP')
+    sub(stream_cs, 'mapChangeSetData')
+    enable = sub(stream_cs, 'filesToEnable')
     for path in (archive, typ):
         sub(enable, 'Item', path)
-    sub(change, 'filesToDisable')
-    sub(change, 'txdToLoad')
-    sub(change, 'txdToUnload')
-    sub(change, 'residentResources')
-    sub(change, 'unregisterResources')
+    for tag in ('filesToDisable', 'txdToLoad', 'txdToUnload', 'residentResources', 'unregisterResources'):
+        sub(stream_cs, tag)
+    conds = sub(stream_cs, 'executionConditions')
+    sub(conds, 'activeChangesetConditions')
+    sub(conds, 'genericConditions', '$level=MO_JIM_L11')
     write_xml(staging / 'content.xml', root)
     root = ET.Element('SSetupData')
     for tag, value in [('deviceName', device), ('datFile', 'content.xml'), ('nameHash', 'skate_school')]:
         sub(root, tag, value)
-    for tag, value in [('type', 'EXTRACONTENT_COMPAT_PACK'), ('order', 40), ('minorOrder', 0)]:
+    for tag, value in [('type', 'EXTRACONTENT_LEVEL_PACK'), ('order', 40), ('minorOrder', 0)]:
         sub(root, tag, value=value) if tag != 'type' else sub(root, tag, value)
     groups = sub(root, 'contentChangeSetGroups')
-    group = sub(groups, 'Item')
-    sub(group, 'NameHash', 'GROUP_STARTUP')
-    sub(sub(group, 'ContentChangeSets'), 'Item', 'skate_school_AUTOGEN')
-    sub(root, 'isLevelPack', value='false')
+    for group_name, cs_name in [
+        ('GROUP_EARLY_ON', 'CCS_SKATE_SCHOOL_INIT'),
+        ('GROUP_UPDATE_STREAMING', 'CCS_SKATE_SCHOOL_STREAMING_MAP'),
+    ]:
+        group = sub(groups, 'Item')
+        sub(group, 'NameHash', group_name)
+        sub(sub(group, 'ContentChangeSets'), 'Item', cs_name)
+    sub(root, 'isLevelPack', value='true')
     sub(root, 'dependencyPackHash')
     sub(root, 'requiredVersion')
     write_xml(staging / 'setup2.xml', root)
