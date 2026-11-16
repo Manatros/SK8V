@@ -87,7 +87,11 @@ if ($Mode -eq 'Install') {
         $keys = @("TutorialRoot=$targetDir", 'SkateTutorialPack=1')
         $at = [Array]::IndexOf($lines, '[SkateV]')
         $lines = if ($at -ge 0) { @($lines[0..$at]) + $keys + @($lines | Select-Object -Skip ($at + 1)) } else { @('[SkateV]') + $keys + $lines }
-        [IO.File]::WriteAllLines($iniPath, $lines)
+        # Keep the file UTF-16 when it was: the host's fast menu save needs UTF-16 (menu.cpp text::Stage);
+        # a UTF-8 rewrite made every F10 save fall back to the profile API (~1.8 s instead of ~14 ms).
+        $head = [IO.File]::ReadAllBytes($iniPath) | Select-Object -First 2
+        $enc = if ($head.Count -eq 2 -and $head[0] -eq 0xFF -and $head[1] -eq 0xFE) { [Text.UnicodeEncoding]::new($false, $true) } else { [Text.UTF8Encoding]::new($false) }
+        [IO.File]::WriteAllLines($iniPath, $lines, $enc)
     }
     Write-Host "Installed optional Tutorial Island add-on cleanly into: $targetDir"
     return
