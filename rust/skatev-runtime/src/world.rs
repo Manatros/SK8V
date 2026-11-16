@@ -422,6 +422,7 @@ impl StaticWorld {
         let witnesses = park_rules::kept_tracks();
         extend_ridge_lines(&mut area);
         prune_park_creases(&mut area, &witnesses, None);
+        prune_park_duplicates(&mut area, &witnesses);
         park_rules::end();
         hide_switched_off(&mut area);
         area.live_required = true;
@@ -1538,17 +1539,19 @@ pub fn prune_park_creases(area: &mut Area, tracks: &[Vec<Vec3>], origin_of: Opti
     // auxiliary build, rather than node polylines or unrelated main-pass rails.
     let mut lines:Vec<Vec<Vec3>>=area.rails.iter().map(|r|r.iter().map(|p|coords::from_skate(Vec3::from_array(*p))).collect()).collect();
     let removed=park_rules::drop_creases(&mut lines,&visible,tracks,&bars);
-    // R5 (rev 5): the last duplicate sweep, on the lines R3b left.
-    let duplicates=park_rules::drop_duplicates(&mut lines,tracks);
-    if removed.is_empty() && duplicates.is_empty() { return; }
+    if removed.is_empty() { return; }
     if !removed.is_empty() {
         let notes=removed.iter().map(|r|crease_note(area,r,&bars,origin_of)).collect();
         park_rules::record_noted("R3b",removed,Vec::new(),0,false,notes);
     }
-    if !duplicates.is_empty() {
-        park_rules::record("R5",duplicates,Vec::new(),0,false);
-    }
-    // R5 may keep a line's unique tails only: the list is rebuilt, never moved.
+    area.rails=lines.into_iter().map(|r|r.into_iter().map(|p|coords::to_skate(p).to_array()).collect()).collect();
+}
+
+/// Live areas have no tile serialization; baked areas sweep the final tile
+/// pieces instead, in tile_bake::finish_park_lines.
+pub fn prune_park_duplicates(area: &mut Area, tracks: &[Vec<Vec3>]) {
+    let mut lines:Vec<Vec<Vec3>>=area.rails.iter().map(|r|r.iter().map(|p|coords::from_skate(Vec3::from_array(*p))).collect()).collect();
+    if !park_rules::sweep_duplicates(&mut lines,tracks) {return;}
     area.rails=lines.into_iter().map(|r|r.into_iter().map(|p|coords::to_skate(p).to_array()).collect()).collect();
 }
 
@@ -1557,7 +1560,7 @@ pub fn prune_park_creases(area: &mut Area, tracks: &[Vec<Vec3>], origin_of: Opti
 /// above the plateau side and the low side drops >= `RIDGE_LOW` within 0.5 m
 /// (tan 8 deg * 0.5 m). It never starts a line: the finder's 3 in rule
 /// (`rails::Probe::is_lip`) still decides where a line begins. Parks only;
-/// crest gaps up to `RIDGE_GAP` are bridged; at most `RIDGE_MAX` per end;
+/// crest gaps up to `RIDGE_GAP` are bridged; at most `RIDGE_MAX` per line;
 /// new points follow the crest with at most `RIDGE_SIDE_STEP` sideways per
 /// 10 cm step, so an offset line end gets no jog. Returns how many ends grew.
 const RIDGE_PLATEAU: f32 = 0.02;
@@ -1572,7 +1575,7 @@ pub fn extend_ridge_lines(area: &mut Area) -> usize {
     let g = |p: [f32; 3]| coords::from_skate(Vec3::from_array(p));
     let never = skate_host::bridge::NO_GRIND_TAG | crate::live::VISBAR_TAG;
     // The riding surface as a height field: walkable faces in or near a park.
-    let tris: Vec<[Vec3; 3]> = area.triangles.iter().zip(&area.tags).filter(|(_, tag)| *tag & never == 0)
+    let tris: Vec<[Vec3; 3]> = area.triangles.iter().zip(&area.tags).filter(|(_, tag)| *tag & never == 0 && crate::live::shown(**tag))
         .map(|(t, _)| t.map(g))
         .filter(|t| {
             let n = (t[1] - t[0]).cross(t[2] - t[0]).normalize_or_zero();
@@ -1619,9 +1622,15 @@ pub fn extend_ridge_lines(area: &mut Area) -> usize {
     for (index, line) in lines.iter().enumerate() {
         if line.len() < 2 { continue; }
         let mut r: Vec<Vec3> = line.clone();
+        let mut budget = RIDGE_MAX;
         for reverse in [false, true] {
             if reverse { r.reverse(); }
-            if let Some(piece) = grow_end(&r, index, &profile, &height, &line_near) {
+            let blocked = |p: Vec3, own| line_near(p, own) || added.iter().flat_map(|r| r.windows(2)).any(|w| {
+                let ab=w[1]-w[0];
+                p.distance(w[0]+ab*((p-w[0]).dot(ab)/ab.length_squared().max(1e-12)).clamp(0.,1.))<=0.15
+            });
+            if let Some(piece) = grow_end(&r, index, budget, &profile, &height, &blocked) {
+                budget -= park_rules::length(&piece);
                 r.extend(piece.iter().skip(1).copied());
                 added.push(piece);
                 grown += 1;
@@ -1641,6 +1650,7 @@ pub fn extend_ridge_lines(area: &mut Area) -> usize {
 fn grow_end(
     r: &[Vec3],
     own: usize,
+    max_length: f32,
     profile: &dyn Fn(Vec3, Vec3) -> Option<(Vec3, f32)>,
     height: &dyn Fn(f32, f32, f32) -> Option<f32>,
     line_near: &dyn Fn(Vec3, usize) -> bool,
@@ -1661,9 +1671,12 @@ fn grow_end(
     let mut pending: Vec<Vec3> = Vec::new();
     let mut last = end;
     let mut travelled = 0.0;
-    while travelled + RIDGE_STEP <= RIDGE_MAX + 1e-4 {
+    let mut gap_length = 0.0;
+    while travelled + RIDGE_STEP <= max_length + 1e-4 {
         let c = Vec3::new(last.x + dir.x * RIDGE_STEP, last.y + dir.y * RIDGE_STEP, last.z);
-        travelled += RIDGE_STEP;
+        // Missing crest samples may be bridged; park bounds and other lines
+        // are hard stops, never gaps that an extension may cross.
+        if !crate::parks::in_park(c.truncate()) || line_near(c,own) { break; }
         let step = profile(c, dir).and_then(|(crest, co)| {
             // Follow the crest, at most RIDGE_SIDE_STEP sideways per step.
             let n = Vec3::new(-dir.y, dir.x, 0.0);
@@ -1671,10 +1684,16 @@ fn grow_end(
             let p = Vec3::new(c.x + n.x * o, c.y + n.y * o, 0.0);
             let z = if o == co { crest.z } else { height(p.x, p.y, crest.z)? };
             let p = p.with_z(z);
-            (crate::parks::in_park(p.truncate()) && !line_near(p, own)).then_some(p)
+            Some(p)
         });
         match step {
             Some(p) => {
+                if !crate::parks::in_park(p.truncate()) || line_near(p,own) { break; }
+                let step_length=last.distance(p);
+                if !pending.is_empty() && gap_length + step_length > RIDGE_GAP + 1e-4 { break; }
+                if travelled+step_length>max_length { break; }
+                travelled+=step_length;
+                gap_length = 0.0;
                 ext.append(&mut pending);
                 ext.push(p);
                 last = p;
@@ -1684,7 +1703,11 @@ fn grow_end(
             }
             None => {
                 if pending.len() as f32 * RIDGE_STEP >= RIDGE_GAP - 1e-4 { break; }
-                pending.push(c.with_z(height(c.x, c.y, last.z).unwrap_or(last.z)));
+                let step_length=last.distance(c);
+                if travelled+step_length>max_length { break; }
+                travelled+=step_length;
+                gap_length += step_length;
+                pending.push(c);
                 last = *pending.last().unwrap();
             }
         }
@@ -3126,8 +3149,8 @@ mod tests {
         // finder starts no line on it, and R4 only ever extends existing lines.
         let plateau = |_: f32| 0.06;
         let base = ridge_area(-2.0, 16.0, &plateau);
-        let tris: Vec<[Vec3; 3]> = base.triangles.iter().map(|t| t.map(|p| Vec3::from_array(p))).collect();
-        let mut area = build_area(Vec3::ZERO, tris.iter().map(|t| t.map(|p| p.to_array())));
+        let tris: Vec<[Vec3; 3]> = base.triangles.iter().map(|t| t.map(|p| coords::from_skate(Vec3::from_array(p)))).collect();
+        let mut area = build_area(Vec3::new(-1364.,-1396.,1.), tris.iter().map(|t| t.map(|p| p.to_array())));
         let near_ridge = |r: &Vec<[f32; 3]>| r.iter().any(|p| { let q = coords::from_skate(Vec3::from_array(*p)); (q.x + 1364.0).abs() < 0.5 && q.y + 1396.0 > -1.0 && q.y + 1396.0 < 15.0 });
         assert!(!area.rails.iter().any(near_ridge), "no line on a soft ridge: {:?}", area.rails.iter().filter(|r| near_ridge(r)).count());
         assert_eq!(extend_ridge_lines(&mut area), 0);
@@ -3148,6 +3171,59 @@ mod tests {
         extend_ridge_lines(&mut area);
         let (_, hi, _) = ridge_span(&area);
         assert!(hi <= 4.2, "a crest gap over 0.5 m ends it: {hi}");
+    }
+    #[test]
+    fn r4_five_missing_samples_do_not_bridge_a_60cm_gap() {
+        let gap=|y:f32| if y>4.0 && y<=4.55 {0.0} else {0.10};
+        let mut area=ridge_area(-2.,12.,&gap);
+        area.rails.push(ridge_line(0.,4.));
+        extend_ridge_lines(&mut area);
+        assert!(ridge_span(&area).1<=4.2);
+    }
+    #[test]
+    fn r4_offset_seed_follows_the_crest_without_turning_across_it() {
+        let mut area=ridge_area(-2.,16.,&|_|0.10);
+        let mut line=ridge_line(0.,4.);
+        for p in &mut line {let q=coords::from_skate(Vec3::from_array(*p)); *p=coords::to_skate(q+Vec3::new(0.25,0.,-0.05)).to_array();}
+        area.rails.push(line);
+        extend_ridge_lines(&mut area);
+        assert!(ridge_span(&area).1>=14.,"stays along the continuous ridge");
+    }
+    #[test]
+    fn r4_hidden_alternative_surfaces_cannot_supply_a_crest() {
+        let mut area=ridge_area(-2.,16.,&|_|0.10);
+        area.tags.fill(crate::live::FALLBACK_TAG);
+        area.rails.push(ridge_line(0.,4.));
+        assert_eq!(extend_ridge_lines(&mut area),0);
+    }
+    #[test]
+    fn r5_live_returning_path_matches_the_baked_piece_sweep() {
+        let mut area=ridge_area(0.,1.,&|_|0.10);
+        let path=vec![Vec3::new(-1380.,-1409.,1.),Vec3::new(-1380.,-1407.,1.),Vec3::new(-1370.,-1407.,1.),Vec3::new(-1370.,-1409.,1.),
+            Vec3::new(-1380.,-1409.,1.),Vec3::new(-1380.,-1406.991,1.),Vec3::new(-1370.,-1406.991,1.),Vec3::new(-1370.,-1409.,1.)];
+        let before=park_rules::length(&path);
+        area.rails.push(path.into_iter().map(|p|coords::to_skate(p).to_array()).collect());
+        prune_park_duplicates(&mut area,&[]);
+        let after:f32=area.rails.iter().map(|r|park_rules::length(&r.iter().map(|p|coords::from_skate(Vec3::from_array(*p))).collect::<Vec<_>>())).sum();
+        assert!(before-after>10.,"live fallback removes the returning duplicate too: {before} -> {after}");
+    }
+    #[test]
+    fn r4_total_extension_per_line_is_at_most_15m() {
+        let mut area = ridge_area(-25.0, 25.0, &|_| 0.10);
+        area.rails.push(ridge_line(0.0, 4.0));
+        let before = park_rules::length(&area.rails[0].iter().map(|p| coords::from_skate(Vec3::from_array(*p))).collect::<Vec<_>>());
+        extend_ridge_lines(&mut area);
+        let after = park_rules::length(&area.rails[0].iter().map(|p| coords::from_skate(Vec3::from_array(*p))).collect::<Vec<_>>());
+        assert!(after - before <= 15.001, "total added length: {}", after - before);
+    }
+    #[test]
+    fn r4_never_bridges_through_another_line() {
+        let mut area = ridge_area(-2.0, 16.0, &|_| 0.10);
+        area.rails.push(ridge_line(0.0, 4.0));
+        area.rails.push(ridge_line(6.0, 6.1));
+        extend_ridge_lines(&mut area);
+        let end = area.rails[0].iter().map(|p| coords::from_skate(Vec3::from_array(*p)).y + 1396.0).fold(f32::MIN, f32::max);
+        assert!(end < 6.0, "must stop before the existing line, got {end}");
     }
     #[test]
     fn r4_extension_capped_at_15m_and_stops_at_another_line() {

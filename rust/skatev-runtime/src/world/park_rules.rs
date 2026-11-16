@@ -160,6 +160,8 @@ pub const RULES: [&str; 7] = ["R1", "R2", "R3a", "R3b", "R1b", "R4", "R5"];
 pub const RING: f32 = 20.0;
 static TRIALS: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
 pub(crate) fn enabled(rule: &str) -> bool {
+    #[cfg(test)]
+    if let Some(mask) = TEST_TRIALS.with(|v| v.get()) { return enabled_with(mask, rule); }
     enabled_with(TRIALS.load(std::sync::atomic::Ordering::Relaxed), rule)
 }
 fn enabled_with(off: u8, rule: &str) -> bool {
@@ -180,12 +182,17 @@ pub fn apply_trials_from_env() -> Vec<&'static str> {
     TRIALS.store(mask, std::sync::atomic::Ordering::Relaxed);
     off
 }
-/// Tests only: run `f` with the given off-mask, then restore a normal build.
+#[cfg(test)]
+thread_local! { static TEST_TRIALS: std::cell::Cell<Option<u8>> = const { std::cell::Cell::new(None) }; }
+/// Isolated, panic-safe override: parallel tests must not switch each other's rules.
 #[cfg(test)]
 pub(crate) fn with_trials_for_test(mask: u8, f: impl FnOnce()) {
-    let before = TRIALS.swap(mask, std::sync::atomic::Ordering::SeqCst);
+    struct Restore(Option<u8>);
+    impl Drop for Restore {
+        fn drop(&mut self) { TEST_TRIALS.with(|v| v.set(self.0)); }
+    }
+    let _restore = Restore(TEST_TRIALS.with(|v| v.replace(Some(mask))));
     f();
-    TRIALS.store(before, std::sync::atomic::Ordering::SeqCst);
 }
 /// The `rules.txt` text of a bake: the plain hash, or a trial label the
 /// runtime (`rules_compatible`) and `build-world-collision.ps1` both refuse.
@@ -381,6 +388,13 @@ pub(crate) fn prefer_visible(gta: &mut Vec<Vec<Vec3>>, visual: &[Vec<Vec3>]) -> 
 /// same-source twin rule of `dedupe_within`, so twin curbs and wall caps
 /// stay two lines. Train lines (A49) are neither dropped nor used as cover.
 pub(crate) const DUP_DISTANCE: f32 = 0.03;
+/// Shared final-stage hook for live areas and serialized baker tile pieces.
+pub fn sweep_duplicates(lines: &mut Vec<Vec<Vec3>>, tracks: &[Vec<Vec3>]) -> bool {
+    let removed=drop_duplicates(lines,tracks);
+    if removed.is_empty() {return false;}
+    record("R5",removed,Vec::new(),0,false);
+    true
+}
 pub(crate) fn drop_duplicates(lines: &mut Vec<Vec<Vec3>>, tracks: &[Vec<Vec3>]) -> Vec<Vec<Vec3>> {
     let mut removed = Vec::new();
     if !enabled("R5") || lines.len() < 2 {
@@ -395,14 +409,17 @@ pub(crate) fn drop_duplicates(lines: &mut Vec<Vec<Vec3>>, tracks: &[Vec<Vec3>]) 
         length(&lines[b])
             .total_cmp(&length(&lines[a]))
             .then_with(|| bits(&lines[a]).cmp(&bits(&lines[b])))
+            .then_with(|| lines[a].iter().map(|p| p.to_array().map(f32::to_bits))
+                .cmp(lines[b].iter().map(|p| p.to_array().map(f32::to_bits))))
     });
     let cos = 5f32.to_radians().cos();
     let mut kept_cover: Vec<Vec<Vec3>> = Vec::new();
-    let mut result: Vec<Vec<Vec3>> = Vec::new();
+    let mut result: Vec<(usize, Vec<Vec3>)> = lines.iter().enumerate()
+        .filter(|(_, r)| r.len() < 2).map(|(i, r)| (i, r.clone())).collect();
     for i in order {
         let r = lines[i].clone();
         if is_train(&r) || !inside(&r) {
-            result.push(r);
+            result.push((i, r));
             continue;
         }
         let cover = Segments::new(&kept_cover, DUP_DISTANCE);
@@ -415,17 +432,19 @@ pub(crate) fn drop_duplicates(lines: &mut Vec<Vec<Vec3>>, tracks: &[Vec<Vec3>]) 
             .sum();
         if total <= 0. || hit < 0.8 * total {
             kept_cover.push(r.clone());
-            result.push(r);
+            result.push((i, r));
             continue;
         }
         let (tails, gone) = split_covered(&r, &cover, DUP_DISTANCE, cos);
         removed.extend(gone);
         for t in tails {
             kept_cover.push(t.clone());
-            result.push(t);
+            result.push((i, t));
         }
     }
-    *lines = result;
+    // Selection is canonical; untouched lines retain their original output order.
+    result.sort_by_key(|(i, _)| *i);
+    *lines = result.into_iter().map(|(_, r)| r).collect();
     removed
 }
 /// Splits `r` into its uncovered tails (>= 0.35 m, kept) and the covered
@@ -676,6 +695,21 @@ mod tests {
         assert!(!crate::tiles::rules_compatible(&rules_label(&crate::tiles::rules_hash(), &["R1"])));
     }
     #[test]
+    fn trial_test_masks_are_thread_local_and_restored_after_panic() {
+        let result=std::panic::catch_unwind(|| with_trials_for_test(1<<5,|| {
+            assert!(!enabled("R4"));
+            assert!(std::thread::spawn(|| enabled("R4")).join().unwrap());
+            panic!("exercise restoration");
+        }));
+        assert!(result.is_err());
+        assert!(enabled("R4"));
+        with_trials_for_test(1<<6,|| {
+            let mut lines=vec![line(0.,1.,5.),line(0.009,1.,5.)];
+            assert!(drop_duplicates(&mut lines,&[]).is_empty());
+            assert_eq!(lines.len(),2);
+        });
+    }
+    #[test]
     fn r2_tube_on_deck_stays() {
         assert!(!floating(&line(0., 0.1, 5.), &deck(), &[], false));
     }
@@ -870,11 +904,11 @@ mod tests {
     }
     #[test]
     fn r5_drops_the_shorter_line_and_keeps_its_unique_tail() {
-        let mut lines = vec![line(0.008, 1., 6.), line(0., 1., 5.)];
+        let mut lines = vec![line(0.008, 1., 6.), vec![at(-1., 0., 1.), at(4., 0., 1.)]];
         drop_duplicates(&mut lines, &[]);
         assert_eq!(lines.len(), 2);
         assert!(lines.iter().any(|r| (length(r) - 6.).abs() < 1e-3), "the longer line stays whole");
-        assert!(lines.iter().any(|r| (length(r) - 1.).abs() < 0.02), "the 1 m unique tail of the shorter one");
+        assert!(lines.iter().any(|r| (length(r) - 1.).abs() < 0.04), "the 1 m unique tail, less the 3 cm overlap tolerance");
     }
     #[test]
     fn r5_does_nothing_outside_park_areas() {

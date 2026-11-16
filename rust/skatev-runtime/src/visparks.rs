@@ -58,6 +58,10 @@ const CURVE_NEIGHBOUR_TURN: f32 = 0.99756;
 
 /// The parks' visible meshes, world space, by park id.
 static FILE: OnceLock<Option<Vec<(String, Vec<[[f32; 3]; 3]>)>>> = OnceLock::new();
+// Unclipped faces are veto evidence only; they never own collision surfaces.
+static REACH: OnceLock<Option<Vec<(String, Vec<[[f32; 3]; 3]>)>>> = OnceLock::new();
+pub type ReachBounds = Vec<(String, Vec<[[f32; 3]; 2]>)>;
+static UNCERTAIN: OnceLock<ReachBounds> = OnceLock::new();
 
 fn policy_path(path: &Path) -> std::path::PathBuf {
     let mut name = path.as_os_str().to_os_string();
@@ -83,6 +87,11 @@ pub fn verified_policy(path: &Path) -> bool {
 /// SVVP v1: magic, u32 version, u32 park count; per park: u8 id length, id
 /// bytes, u32 triangle count, triangles (9 f32 world).
 pub fn write(path: &Path, parks: &[(String, Vec<[[f32; 3]; 3]>)]) -> std::io::Result<()> {
+    std::fs::write(path, encode(parks))?;
+    write_policy(path)
+}
+
+fn encode(parks: &[(String, Vec<[[f32; 3]; 3]>)]) -> Vec<u8> {
     let mut b = b"SVVP".to_vec();
     b.extend(1u32.to_le_bytes());
     b.extend((parks.len() as u32).to_le_bytes());
@@ -94,8 +103,65 @@ pub fn write(path: &Path, parks: &[(String, Vec<[[f32; 3]; 3]>)]) -> std::io::Re
             b.extend(v.to_le_bytes());
         }
     }
+    b
+}
+
+/// SVVP v2 carries two independent v1 sections: ownership and wall evidence.
+/// One receipt and one installed file keep baker and live-cell inputs identical.
+pub fn write_with_reach(path: &Path, parks: &[(String, Vec<[[f32; 3]; 3]>)], reach: &[(String, Vec<[[f32; 3]; 3]>)], uncertain: &ReachBounds) -> std::io::Result<()> {
+    let owned = encode(parks);
+    let mut b = b"SVVP".to_vec();
+    b.extend(2u32.to_le_bytes());
+    b.extend((owned.len() as u32).to_le_bytes());
+    b.extend(owned);
+    let walls=encode(reach);
+    b.extend((walls.len() as u32).to_le_bytes());
+    b.extend(walls);
+    b.extend((uncertain.len() as u32).to_le_bytes());
+    for (id,bounds) in uncertain {
+        b.push(id.len() as u8); b.extend(id.as_bytes());
+        b.extend((bounds.len() as u32).to_le_bytes());
+        for v in bounds.iter().flatten().flatten() {b.extend(v.to_le_bytes());}
+    }
     std::fs::write(path, b)?;
     write_policy(path)
+}
+
+fn decode_file(bytes: &[u8]) -> Option<(Vec<(String, Vec<[[f32; 3]; 3]>)>, Option<Vec<(String, Vec<[[f32; 3]; 3]>)>>, ReachBounds)> {
+    if bytes.get(..8)? == [b'S', b'V', b'V', b'P', 2, 0, 0, 0] {
+        let len = u32::from_le_bytes(bytes.get(8..12)?.try_into().ok()?) as usize;
+        let end = 12usize.checked_add(len)?;
+        let len=u32::from_le_bytes(bytes.get(end..end.checked_add(4)?)?.try_into().ok()?) as usize;
+        let start=end.checked_add(4)?;
+        let finish=start.checked_add(len)?;
+        let uncertain=decode_bounds(bytes.get(finish..)?)?;
+        Some((decode(bytes.get(12..end)?)?, Some(decode(bytes.get(start..finish)?)?), uncertain))
+    } else {
+        Some((decode(bytes)?, None,Vec::new()))
+    }
+}
+
+fn decode_bounds(bytes: &[u8]) -> Option<ReachBounds> {
+    let mut at=0usize;
+    let mut take=|n:usize| {let end=at.checked_add(n)?;let s=bytes.get(at..end)?;at=end;Some(s)};
+    let n=u32::from_le_bytes(take(4)?.try_into().ok()?) as usize;
+    if n>64 {return None;}
+    let mut out=Vec::new();
+    for _ in 0..n {
+        let len=take(1)?[0] as usize;
+        let id=String::from_utf8(take(len)?.to_vec()).ok()?;
+        let count=u32::from_le_bytes(take(4)?.try_into().ok()?) as usize;
+        if count>2_000_000 {return None;}
+        let mut bounds=Vec::new();
+        for raw in take(count.checked_mul(24)?)?.chunks_exact(24) {
+            let f=|k:usize|f32::from_le_bytes(raw[k*4..k*4+4].try_into().unwrap());
+            let b=[[f(0),f(1),f(2)],[f(3),f(4),f(5)]];
+            if !b.iter().flatten().all(|v|v.is_finite()) || (0..3).any(|k|b[0][k]>b[1][k]) {return None;}
+            bounds.push(b);
+        }
+        out.push((id,bounds));
+    }
+    (at==bytes.len()).then_some(out)
 }
 
 fn decode(bytes: &[u8]) -> Option<Vec<(String, Vec<[[f32; 3]; 3]>)>> {
@@ -129,7 +195,10 @@ fn decode(bytes: &[u8]) -> Option<Vec<(String, Vec<[[f32; 3]; 3]>)>> {
 pub fn load(path: &Path) -> Result<usize, String> {
     let file = FILE.get_or_init(|| {
         if !verified_policy(path) { return None; }
-        decode(&std::fs::read(path).ok()?)
+        let (owned, reach, uncertain) = decode_file(&std::fs::read(path).ok()?)?;
+        let _ = REACH.set(reach);
+        let _ = UNCERTAIN.set(uncertain);
+        Some(owned)
     });
     file.as_ref().map(|p| p.iter().map(|(_, t)| t.len()).sum())
         .ok_or_else(|| format!("high-res parks off: no verified park mesh file {}", path.display()))
@@ -254,7 +323,10 @@ pub fn replace_with_sources(tris: &mut Vec<Tri>, stairs: &[Tri], sources: &std::
         // R1b (rev 5): bars of the reach ring too (rev 4 loaded radius + 2 m only,
         // so La Mesa's east panel 33 m out had no bar evidence: 1115-7).
         let bars=crate::visrails::raw_in(park.centre.to_array(),park.radius+ring()+2.0).unwrap_or_default();
-        let rest = see_through_boxes_with_bars(tris, stairs, visible, park.centre, park.radius, park.id, &mut out, &bars, sources);
+        let reach = REACH.get().and_then(Option::as_ref).and_then(|p| p.iter().find(|(id, _)| id == park.id)).map(|(_, t)| t.as_slice())
+            .filter(|_|UNCERTAIN.get().is_some_and(|p|p.iter().any(|(id,_)|id==park.id)));
+        let uncertain=UNCERTAIN.get().and_then(|p|p.iter().find(|(id,_)|id==park.id)).map_or(&[][..],|(_,b)|b.as_slice());
+        let rest = see_through_boxes_with_reach(tris, stairs, visible, park.centre, park.radius, park.id, &mut out, &bars, sources, reach,uncertain);
         replace_park(tris, stairs, rest.as_deref().unwrap_or(visible), park.centre, park.radius, park.id, &mut out);
     }
     out
@@ -283,6 +355,7 @@ const BOX_SPAN: f32 = 0.80;
 /// but additionally a box collision, and the box collision must be removed"). Cutting
 /// the box around the bars left hundreds of shards (Strawberry -287/-1574, 1107-2).
 /// Returns the park's visible faces without the bars taken here.
+#[cfg(test)]
 fn see_through_boxes(tris: &mut Vec<Tri>, stairs: &[Tri], visible: &[[[f32; 3]; 3]], centre: Vec2, radius: f32, id: &'static str, out: &mut Replacement) -> Option<Vec<[[f32; 3]; 3]>> {
     see_through_boxes_with_bars(tris, stairs, visible, centre, radius, id, out, &[], &Default::default())
 }
@@ -333,7 +406,11 @@ fn spanning_bars(bars:&[Vec<Vec3>], origin:Vec3, u:Vec3, n:Vec3, ul:(f32,f32), w
     });
     if levels.len()<2 {Vec::new()} else {levels.into_iter().flat_map(|(_,r)|r).collect()}
 }
+#[cfg(test)]
 fn see_through_boxes_with_bars(tris: &mut Vec<Tri>, stairs: &[Tri], visible: &[[[f32; 3]; 3]], centre: Vec2, radius: f32, id: &'static str, out: &mut Replacement, bars:&[Vec<Vec3>], sources:&std::collections::HashMap<u64,String>) -> Option<Vec<[[f32;3];3]>> {
+    see_through_boxes_with_reach(tris, stairs, visible, centre, radius, id, out, bars, sources, Some(visible),&[])
+}
+fn see_through_boxes_with_reach(tris: &mut Vec<Tri>, stairs: &[Tri], visible: &[[[f32; 3]; 3]], centre: Vec2, radius: f32, id: &'static str, out: &mut Replacement, bars:&[Vec<Vec3>], sources:&std::collections::HashMap<u64,String>, reach: Option<&[[[f32; 3]; 3]]>, uncertain:&[[[f32;3];2]]) -> Option<Vec<[[f32;3];3]>> {
     let ring = ring();
     let mut park: Vec<usize> = (0..tris.len()).filter(|&i| centroid(&tris[i].v).truncate().distance(centre) <= radius + ring || (id=="lamesa" && spot_panel(&tris[i],sources).is_some())).collect();
     if park.is_empty() { return None; }
@@ -466,14 +543,24 @@ fn see_through_boxes_with_bars(tris: &mut Vec<Tri>, stairs: &[Tri], visible: &[[
                 if a.distance(v3(lo))>0.01 || b.distance(v3(hi))>0.01 {continue;}
             }
             if faces.len() < 8 { continue; }
+            // Preserve rev4's centroid admission at the circle boundary, even
+            // when R1b is off. New universal ring removals also bound every corner.
+            let in_ring = !spot && faces.iter().any(|&i| centroid(&tris[i].v).truncate().distance(centre) > radius);
+            if in_ring && reach.is_none() { continue; }
+            if in_ring {
+                let lo=faces.iter().flat_map(|&i|tris[i].v.map(v3)).fold(Vec3::splat(f32::INFINITY),Vec3::min);
+                let hi=faces.iter().flat_map(|&i|tris[i].v.map(v3)).fold(Vec3::splat(f32::NEG_INFINITY),Vec3::max);
+                if uncertain.iter().any(|b|(0..3).all(|k|lo[k]<=b[1][k]+RING_WALL && hi[k]>=b[0][k]-RING_WALL)) {continue;}
+            }
+            let box_visible = if in_ring { reach.unwrap() } else { visible };
             // The visible faces inside, and how they fill the broad side (4 cm grid).
             const CELL: f32 = 0.04;
             let (nu, nz) = (((len / CELL).ceil() as usize).max(1), ((height / CELL).ceil() as usize).max(1));
             let mut fill = vec![false; nu * nz];
             let mut inside: Vec<usize> = Vec::new();
             let mut solid = false;
-            for (k, t) in visible.iter().enumerate() {
-                if taken[k] { continue; }
+            for (k, t) in box_visible.iter().enumerate() {
+                if !in_ring && taken[k] { continue; }
                 let lt = t.map(|p| local(p));
                 let c = (lt[0] + lt[1] + lt[2]) / 3.0;
                 let (cu, cw) = (c.dot(u), c.dot(s.n));
@@ -503,17 +590,24 @@ fn see_through_boxes_with_bars(tris: &mut Vec<Tri>, stairs: &[Tri], visible: &[[
             let new_rule=rail_only && !bar_lines.is_empty();
             // A ring box (R1b): any face past the circle. Only the railing-only
             // path may take it, and no visible face may stand on its broad sides.
-            let in_ring=!spot && faces.iter().any(|&i|centroid(&tris[i].v).truncate().distance(centre)>radius);
-            if in_ring && (!new_rule || faces.iter().any(|&i|centroid(&tris[i].v).truncate().distance(centre)>radius+ring)) {continue;}
-            if in_ring && visible.iter().any(|t| {
+            if in_ring && (!new_rule || faces.iter().any(|&i|tris[i].v.iter().any(|p|v3(*p).truncate().distance(centre)>radius+ring))) {continue;}
+            if in_ring && box_visible.iter().any(|t| {
+                if normal(t).dot(s.n).abs()<=0.9 { return false; }
                 let lt=t.map(|p|local(p));
-                let c=(lt[0]+lt[1]+lt[2])/3.0;
-                let (cu,cw)=(c.dot(u),c.dot(s.n));
-                cu>=ul.0-RING_WALL && cu<=ul.1+RING_WALL && c.z>=zl.0-RING_WALL && c.z<=zl.1+RING_WALL
-                    && ((cw-wl.0).abs()<=RING_WALL || (cw-wl.1).abs()<=RING_WALL) && normal(t).dot(s.n).abs()>0.9
+                // Intersect the triangle itself with each broad-side slab. A
+                // large wall may overlap it while its centroid lies far away.
+                [wl.0,wl.1].into_iter().any(|side| {
+                    let mid=Vec3::new((ul.0+ul.1)*0.5,side,(zl.0+zl.1)*0.5);
+                    let half=Vec3::new((ul.1-ul.0)*0.5+RING_WALL,RING_WALL,(zl.1-zl.0)*0.5+RING_WALL);
+                    let unit=lt.map(|p|(Vec3::new(p.dot(u),p.dot(s.n),p.z)-mid)/half);
+                    clipped_support_polygon(unit,1.0).1>=3
+                })
             }) {continue;}
             if solid || (spot && !new_rule) || (!new_rule && (!(BOX_FILL.0..=BOX_FILL.1).contains(&filled) || span<BOX_SPAN)) {continue;}
-            if faces.iter().any(|&i| samples(&tris[i].v).into_iter().any(|p| stair_grid.at(p).iter().any(|&k| distance(p, &stairs[k as usize].v) <= MATCH))) { continue; }
+            if faces.iter().any(|&i| samples(&tris[i].v).into_iter().any(|p| stair_grid.at(p).iter().any(|&k| distance(p, &stairs[k as usize].v) <= MATCH))) {
+                if probe && spot {eprintln!("BOX {id} panel {panel:?} retained: stair within {MATCH} m");}
+                continue;
+            }
             if probe {
                 let m = (u * (ul.0 + ul.1) * 0.5 + s.n * (wl.0 + wl.1) * 0.5 + origin).with_z((zl.0 + zl.1) * 0.5);
                 eprintln!("BOX {id} at {:.2} {:.2} {:.2} len {len:.2} thick {:.2} height {height:.2} faces {} material {} visible {} filled {filled:.2} span {span:.2}", m.x, m.y, m.z, gap.1, faces.len(), tris[s.faces[0]].material, inside.len());
@@ -525,6 +619,7 @@ fn see_through_boxes_with_bars(tris: &mut Vec<Tri>, stairs: &[Tri], visible: &[[
                 crate::world::park_rules::record(if spot {"R1-spot"} else if in_ring {"R1b"} else {"R1"},Vec::new(),faces.iter().map(|&i|tris[i].v).collect(),1,spot);
             }
             for k in inside {
+                if in_ring { continue; }
                 taken[k] = true;
                 out.added.push(Tri { v: visible[k], material });
                 out.surface_from.push(key);
@@ -2847,6 +2942,42 @@ mod tests {
         assert_eq!(out.bar_bodies.len(), 36, "three thin bar bodies");
     }
     #[test]
+    fn r1b_missing_reach_or_unknown_overlapping_model_keeps_the_ring_box() {
+        for missing in [true,false] {
+            let (mut gta,bars)=ring_box(10.,69);
+            let unknown=[[[AT.x-4.,AT.y+69.,0.],[AT.x+4.,AT.y+71.,3.]]];
+            let mut out=Replacement::default();
+            see_through_boxes_with_reach(&mut gta,&[],&[],AT,60.,"vespucci",&mut out,&bars,&Default::default(),if missing {None}else{Some(&[])},if missing {&[]}else{&unknown});
+            assert_eq!(gta.len(),12);
+        }
+    }
+    #[test]
+    fn r1b_off_preserves_rev4_filled_box_at_circle_boundary() {
+        let (x,y)=(AT.x-3.,AT.y+59.75);
+        let mut gta=closed_box(x,x+6.,y,y+0.18,1.,2.2,69);
+        assert!(gta.iter().all(|t|centroid(&t.v).truncate().distance(AT)<=60.));
+        assert!(gta.iter().any(|t|t.v.iter().any(|p|v3(*p).truncate().distance(AT)>60.)));
+        let visible=fence_bars(x,y+0.09,1.,2.2);
+        crate::world::park_rules::with_trials_for_test(1<<4,|| {
+            see_through_boxes_with_bars(&mut gta,&[],&visible,AT,60.,"vespucci",&mut Replacement::default(),&[],&Default::default());
+        });
+        assert!(gta.is_empty(),"ordinary fill-band replacement retains rev4 admission");
+    }
+    #[test]
+    fn r1b_v2_roundtrip_keeps_ownership_separate_from_wall_evidence() {
+        let path=std::env::temp_dir().join(format!("skatev-r1b-v2-{}.visparks",std::process::id()));
+        let owned=vec![("vespucci".into(),wall().1)];
+        let reach=vec![("vespucci".into(),vec![[[1.,2.,3.],[4.,5.,6.],[7.,8.,9.]]])];
+        let unknown=vec![("vespucci".into(),vec![[[0.,0.,0.],[1.,1.,1.]]])];
+        write_with_reach(&path,&owned,&reach,&unknown).unwrap();
+        assert!(verified_policy(&path));
+        let b=std::fs::read(&path).unwrap();
+        assert_eq!(decode_file(&b).unwrap(),(owned,Some(reach),unknown));
+        assert!(decode_file(&b[..b.len()-1]).is_none());
+        std::fs::remove_file(policy_path(&path)).unwrap();
+        std::fs::remove_file(path).unwrap();
+    }
+    #[test]
     fn r1b_ring_box_at_r_plus_25_stays() {
         let (mut gta, bars) = ring_box(25., 69);
         let mut out = Replacement::default();
@@ -2868,6 +2999,15 @@ mod tests {
         see_through_boxes_with_bars(&mut gta, &[], &[], AT, 60., "vespucci", &mut out, &bars, &Default::default());
         assert_eq!(gta.len(), 12);
         assert!(out.removed.is_empty());
+    }
+    #[test]
+    fn r1b_wall_overlapping_side_with_centroid_outside_box_stays() {
+        let (mut gta, bars) = ring_box(10., 69);
+        let (x, y) = (AT.x - 3., AT.y + 70.);
+        let wall = [[[x - 20., y - 0.04, 0.], [x + 20., y - 0.04, 0.], [x + 20., y - 0.04, 10.]]];
+        let mut out = Replacement::default();
+        see_through_boxes_with_bars(&mut gta, &[], &wall, AT, 60., "vespucci", &mut out, &bars, &Default::default());
+        assert_eq!(gta.len(), 12, "triangle overlaps broad side despite its distant centroid");
     }
     #[test]
     fn r1b_ring_box_with_a_solid_visible_wall_stays() {

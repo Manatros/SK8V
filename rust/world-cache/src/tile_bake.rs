@@ -1478,7 +1478,6 @@ fn bake(
         let origin_of = |t: &[[f32; 3]; 3]| input_origin.get(&svwc::surfaces::key(t)).map(|n| spool.names[*n as usize].clone());
         world::prune_park_creases(&mut area, &kept_tracks, Some(&origin_of));
         world::park_rules::recording(false);
-        world::park_rules::report(c,size,&input_origin,&spool.names);
         let mut tile = Tile {
             cell: c,
             size,
@@ -1562,6 +1561,8 @@ fn bake(
                 );
             }
         }
+        finish_park_lines(&mut tile,&kept_tracks);
+        world::park_rules::report(c,size,&input_origin,&spool.names);
         for i in (0..data.tris.len()).filter(|i| {
             is_step(&data.tris[*i]) && !tiles::clip_triangle(data.tris[*i].v, c, size).is_empty()
         }) {
@@ -1752,6 +1753,15 @@ fn bake(
     fs::write(out.join("report.txt"), &report)?;
     print!("{report}");
     Ok(())
+}
+
+fn finish_park_lines(tile: &mut Tile, tracks: &[Vec<Vec3>]) {
+    let mut lines:Vec<Vec<Vec3>>=tile.rails.iter().map(|r|r.iter().copied().map(Vec3::from_array).collect()).collect();
+    world::park_rules::recording(true);
+    let changed=world::park_rules::sweep_duplicates(&mut lines,tracks);
+    world::park_rules::recording(false);
+    if !changed {return;}
+    tile.rails=lines.into_iter().map(|r|r.into_iter().map(|p|p.to_array()).collect()).collect();
 }
 
 /// Counts a tile into the report and, when asked, appends it to the OBJ.
@@ -2015,6 +2025,16 @@ fn visible_park(v: &[[f32; 3]; 3]) -> Option<&'static str> {
 
 #[cfg(test)]
 mod batch_tests {
+    #[test]
+    fn r5_sweeps_serialized_pieces_of_one_returning_path() {
+        use super::*;
+        let r=vec![[-1380.,-1409.,1.],[-1380.,-1407.,1.],[-1370.,-1407.,1.],[-1370.,-1409.,1.],
+            [-1380.,-1409.,1.],[-1380.,-1406.991,1.],[-1370.,-1406.991,1.],[-1370.,-1409.,1.]];
+        let mut tile=Tile {cell:(-22,-22),size:64.,source:String::new(),triangles:vec![],rails:tiles::split_rail(&r,64.).into_iter().filter(|(c,_)|*c==(-22,-22)).map(|(_,r)|r).collect(),noses:vec![],origins:vec![],origin_names:vec![]};
+        assert_eq!(tile.rails.len(),2);
+        finish_park_lines(&mut tile,&[]);
+        assert_eq!(tile.rails.len(),1,"the final pieces, rather than the raw path, are compared");
+    }
     #[test]
     fn visible_park_labels_boundary_faces_independent_of_first_vertex() {
         let v = [[749., -1231., 25.], [747., -1232., 25.], [747., -1230., 25.]];
