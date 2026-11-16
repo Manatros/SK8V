@@ -640,7 +640,17 @@ fn build_area_rules(center: Vec3, tris: impl Iterator<Item = ([[f32; 3]; 3], u32
         all = off_lines(all, &visual, VISUAL_SIDE, VISUAL_UP);
     }
     let visible_park = crate::visparks::faces_in([center.x, center.y], RADIUS + 3.0);
-    let raw_bars = crate::visrails::raw_in([center.x, center.y], RADIUS + 3.0);
+    // Bar evidence per park, not per area: two neighbouring tiles must agree on
+    // whether a park has bar data, or one keeps half a tube the other drops
+    // (Gemini re-check 2026-11-16 of a03eb29). R2 only acts inside parks.
+    let raw_bars: Option<Vec<Vec<Vec3>>> = {
+        let near: Vec<&crate::parks::Park> = crate::parks::PARKS.iter()
+            .filter(|k| k.centre.distance(center.truncate()) <= k.radius + RADIUS + 3.0).collect();
+        if near.is_empty() { None } else {
+            near.iter().map(|k| crate::visrails::raw_in(k.centre.to_array(), k.radius + 3.0))
+                .collect::<Option<Vec<_>>>().map(|v| v.into_iter().flatten().collect())
+        }
+    };
     let removed_tubes = park_rules::drop_floating(&mut all, &visible_park, raw_bars.as_deref(), &tracks);
     let mut removed_capsules = vec![false; gta.len()];
     if !removed_tubes.is_empty() {
