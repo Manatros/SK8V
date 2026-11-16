@@ -251,7 +251,9 @@ pub fn replace_with_sources(tris: &mut Vec<Tri>, stairs: &[Tri], sources: &std::
         // See-through boxes first: their bars are taken, the rest of the park
         // never sees them (design 2026-11-09-see-through).
         // No bar data: R1 has no evidence and keeps every box (unwrap to empty).
-        let bars=crate::visrails::raw_in(park.centre.to_array(),park.radius+2.0).unwrap_or_default();
+        // R1b (rev 5): bars of the reach ring too (rev 4 loaded radius + 2 m only,
+        // so La Mesa's east panel 33 m out had no bar evidence: 1115-7).
+        let bars=crate::visrails::raw_in(park.centre.to_array(),park.radius+ring()+2.0).unwrap_or_default();
         let rest = see_through_boxes_with_bars(tris, stairs, visible, park.centre, park.radius, park.id, &mut out, &bars, sources);
         replace_park(tris, stairs, rest.as_deref().unwrap_or(visible), park.centre, park.radius, park.id, &mut out);
     }
@@ -285,6 +287,15 @@ fn see_through_boxes(tris: &mut Vec<Tri>, stairs: &[Tri], visible: &[[[f32; 3]; 
     see_through_boxes_with_bars(tris, stairs, visible, centre, radius, id, out, &[], &Default::default())
 }
 
+/// R1b (rev 5): the reach ring round the circle in which the railing-only
+/// box rule also acts; 0 when the rule is switched off (baker trials).
+fn ring() -> f32 {
+    if crate::world::park_rules::enabled("R1b") { crate::world::park_rules::RING } else { 0.0 }
+}
+/// R1b: no visible face may stand within this of a ring box's broad sides
+/// (the solid-wall test; `sk8v.visparks` is clipped to the circle, so the
+/// ordinary fill measure sees nothing there).
+const RING_WALL: f32 = 0.05;
 // One manually authorized wall, two authored panels separated by its opening.
 // Source + exact AABBs prevent this exception from admitting any other glass box.
 const LAMESA_WALL: [([f32;3],[f32;3]);2] = [
@@ -323,7 +334,8 @@ fn spanning_bars(bars:&[Vec<Vec3>], origin:Vec3, u:Vec3, n:Vec3, ul:(f32,f32), w
     if levels.len()<2 {Vec::new()} else {levels.into_iter().flat_map(|(_,r)|r).collect()}
 }
 fn see_through_boxes_with_bars(tris: &mut Vec<Tri>, stairs: &[Tri], visible: &[[[f32; 3]; 3]], centre: Vec2, radius: f32, id: &'static str, out: &mut Replacement, bars:&[Vec<Vec3>], sources:&std::collections::HashMap<u64,String>) -> Option<Vec<[[f32;3];3]>> {
-    let mut park: Vec<usize> = (0..tris.len()).filter(|&i| centroid(&tris[i].v).truncate().distance(centre) <= radius || (id=="lamesa" && spot_panel(&tris[i],sources).is_some())).collect();
+    let ring = ring();
+    let mut park: Vec<usize> = (0..tris.len()).filter(|&i| centroid(&tris[i].v).truncate().distance(centre) <= radius + ring || (id=="lamesa" && spot_panel(&tris[i],sources).is_some())).collect();
     if park.is_empty() { return None; }
     // A tile lists faces in its own order: the decision must not depend on it, or one tile
     // keeps the box and the next removes it (peer review 2026-11-09).
@@ -489,9 +501,18 @@ fn see_through_boxes_with_bars(tris: &mut Vec<Tri>, stairs: &[Tri], visible: &[[
             let rail_only=filled<BOX_FILL.0 && crate::world::park_rules::enabled("R1");
             let bar_lines=if rail_only {spanning_bars(bars,origin,u,s.n,ul,wl,zl)} else {Vec::new()};
             let new_rule=rail_only && !bar_lines.is_empty();
+            // A ring box (R1b): any face past the circle. Only the railing-only
+            // path may take it, and no visible face may stand on its broad sides.
+            let in_ring=!spot && faces.iter().any(|&i|centroid(&tris[i].v).truncate().distance(centre)>radius);
+            if in_ring && (!new_rule || faces.iter().any(|&i|centroid(&tris[i].v).truncate().distance(centre)>radius+ring)) {continue;}
+            if in_ring && visible.iter().any(|t| {
+                let lt=t.map(|p|local(p));
+                let c=(lt[0]+lt[1]+lt[2])/3.0;
+                let (cu,cw)=(c.dot(u),c.dot(s.n));
+                cu>=ul.0-RING_WALL && cu<=ul.1+RING_WALL && c.z>=zl.0-RING_WALL && c.z<=zl.1+RING_WALL
+                    && ((cw-wl.0).abs()<=RING_WALL || (cw-wl.1).abs()<=RING_WALL) && normal(t).dot(s.n).abs()>0.9
+            }) {continue;}
             if solid || (spot && !new_rule) || (!new_rule && (!(BOX_FILL.0..=BOX_FILL.1).contains(&filled) || span<BOX_SPAN)) {continue;}
-            // Universal R1 keeps every removed face's centroid inside the park.
-            if new_rule && !spot && faces.iter().any(|&i|centroid(&tris[i].v).truncate().distance(centre)>radius) {continue;}
             if faces.iter().any(|&i| samples(&tris[i].v).into_iter().any(|p| stair_grid.at(p).iter().any(|&k| distance(p, &stairs[k as usize].v) <= MATCH))) { continue; }
             if probe {
                 let m = (u * (ul.0 + ul.1) * 0.5 + s.n * (wl.0 + wl.1) * 0.5 + origin).with_z((zl.0 + zl.1) * 0.5);
@@ -501,7 +522,7 @@ fn see_through_boxes_with_bars(tris: &mut Vec<Tri>, stairs: &[Tri], visible: &[[
             if new_rule {
                 let bodies=crate::visrails::boxes(&bar_lines);
                 for v in bodies {let v=v.map(|p|p.to_array());out.bar_bodies.insert(svwc::surfaces::key(&v));out.added.push(Tri{v,material});out.surface_from.push(key);out.cut.push(false);out.park.push(id);}
-                crate::world::park_rules::record(if spot {"R1-spot"} else {"R1"},Vec::new(),faces.iter().map(|&i|tris[i].v).collect(),1,spot);
+                crate::world::park_rules::record(if spot {"R1-spot"} else if in_ring {"R1b"} else {"R1"},Vec::new(),faces.iter().map(|&i|tris[i].v).collect(),1,spot);
             }
             for k in inside {
                 taken[k] = true;
@@ -2808,6 +2829,57 @@ mod tests {
         let mut gta=make();run(&mut gta,&[],&bars[..1],&sources);assert_eq!(gta.len(),12,"one bar only");
         let pane=[[[lo[0],-1200.55,26.7],[hi[0],-1200.55,26.7],[hi[0],-1200.55,27.7]]];
         let mut gta=make();run(&mut gta,&pane,&bars,&sources);assert_eq!(gta.len(),12,"visible glass pane");
+    }
+    /// A fence box 6 m long whose centre stands `out` m past Vespucci's circle, north of it.
+    fn ring_box(out: f32, material: u8) -> (Vec<Tri>, Vec<Vec<Vec3>>) {
+        let (x, y) = (AT.x - 3., AT.y + 60. + out);
+        let gta = closed_box(x, x + 6., y, y + 0.18, 1., 2.2, material);
+        let bars = [1.3, 1.7, 2.2].into_iter().map(|z| vec![Vec3::new(x, y + 0.09, z), Vec3::new(x + 6., y + 0.09, z)]).collect();
+        (gta, bars)
+    }
+    #[test]
+    fn r1b_ring_box_at_r_plus_10_with_three_bars_is_replaced() {
+        let (mut gta, bars) = ring_box(10., 69);
+        let mut out = Replacement::default();
+        see_through_boxes_with_bars(&mut gta, &[], &[], AT, 60., "vespucci", &mut out, &bars, &Default::default());
+        assert!(gta.is_empty(), "the ring box goes");
+        assert_eq!(out.removed.len(), 12);
+        assert_eq!(out.bar_bodies.len(), 36, "three thin bar bodies");
+    }
+    #[test]
+    fn r1b_ring_box_at_r_plus_25_stays() {
+        let (mut gta, bars) = ring_box(25., 69);
+        let mut out = Replacement::default();
+        see_through_boxes_with_bars(&mut gta, &[], &[], AT, 60., "vespucci", &mut out, &bars, &Default::default());
+        assert_eq!(gta.len(), 12);
+        assert!(out.removed.is_empty());
+        // Switched off (baker trial): the r + 10 m box stays too.
+        let (mut gta, bars) = ring_box(10., 69);
+        crate::world::park_rules::with_trials_for_test(1 << 4, || {
+            let mut out = Replacement::default();
+            see_through_boxes_with_bars(&mut gta, &[], &[], AT, 60., "vespucci", &mut out, &bars, &Default::default());
+        });
+        assert_eq!(gta.len(), 12);
+    }
+    #[test]
+    fn r1b_glass_ring_box_stays() {
+        let (mut gta, bars) = ring_box(10., 55);
+        let mut out = Replacement::default();
+        see_through_boxes_with_bars(&mut gta, &[], &[], AT, 60., "vespucci", &mut out, &bars, &Default::default());
+        assert_eq!(gta.len(), 12);
+        assert!(out.removed.is_empty());
+    }
+    #[test]
+    fn r1b_ring_box_with_a_solid_visible_wall_stays() {
+        // The clipped park mesh shows no fill in the ring; a visible wall face on
+        // the box's broad side is the evidence that this is a wall, not a fence.
+        let (mut gta, bars) = ring_box(10., 69);
+        let (x, y) = (AT.x - 3., AT.y + 70.);
+        let wall = [[[x, y, 1.], [x + 6., y, 1.], [x + 6., y, 2.2]], [[x, y, 1.], [x + 6., y, 2.2], [x, y, 2.2]]];
+        let mut out = Replacement::default();
+        see_through_boxes_with_bars(&mut gta, &[], &wall, AT, 60., "vespucci", &mut out, &bars, &Default::default());
+        assert_eq!(gta.len(), 12);
+        assert!(out.removed.is_empty());
     }
     #[test]
     fn r1_another_glass_box_stays_even_with_three_bar_levels_and_same_source() {

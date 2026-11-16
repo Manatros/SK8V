@@ -1472,6 +1472,9 @@ fn bake(
             validation.bar_top_lines += world::bar_top_lines(&mut area, &boxed_area.rails, &slabs);
         }
         world::park_rules::recording(true);
+        // R4 (rev 5): crest hysteresis on the final lines, before the last
+        // crease and duplicate sweeps (R3b, R5) judge the final topology.
+        validation.ridge_extensions += world::extend_ridge_lines(&mut area);
         let origin_of = |t: &[[f32; 3]; 3]| input_origin.get(&svwc::surfaces::key(t)).map(|n| spool.names[*n as usize].clone());
         world::prune_park_creases(&mut area, &kept_tracks, Some(&origin_of));
         world::park_rules::recording(false);
@@ -1834,6 +1837,8 @@ struct Validation {
     park_edge_lines: usize,
     /// Ramp side rims added in parks (world::ramp_rim_lines).
     ramp_rim_lines: usize,
+    /// Line ends grown along a ridge in parks (world::extend_ridge_lines, R4).
+    ridge_extensions: usize,
     /// Replaced railing boxes' top lines put on the visible bars (world::bar_top_lines).
     bar_top_lines: usize,
 }
@@ -1881,6 +1886,7 @@ impl Validation {
         self.risers += other.risers;
         self.park_edge_lines += other.park_edge_lines;
         self.ramp_rim_lines += other.ramp_rim_lines;
+        self.ridge_extensions += other.ridge_extensions;
         self.bar_top_lines += other.bar_top_lines;
         for p in other.track_examples {
             example(&mut self.track_examples, p);
@@ -1992,8 +1998,9 @@ impl Validation {
             self.step_examples
         ) + &format!("Park edge lines from GTA's own park collision (visible folds of 30 deg or more): {}
 Ramp side rim lines in parks: {}
+Line ends grown along a ridge in parks (R4): {}
 Railing top lines from replaced boxes, on the visible bars: {}
-", self.park_edge_lines, self.ramp_rim_lines, self.bar_top_lines)
+", self.park_edge_lines, self.ramp_rim_lines, self.ridge_extensions, self.bar_top_lines)
     }
 }
 

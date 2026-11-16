@@ -83,7 +83,9 @@ pub fn report(
     source_names: &[String],
 ) {
     let events = AUDIT.with(|a| std::mem::take(&mut a.borrow_mut().events));
-    for rule in ["R1", "R1-spot", "R2", "R3a", "R3b"] {
+    for rule in ["R1", "R1-spot", "R1b", "R2", "R3a", "R3b", "R4", "R5"] {
+        // R1b acts in the reach ring (rev 5): "outside" there means past it.
+        let margin = if rule == "R1b" { RING } else { 0.0 };
         let (mut lines, mut metres, mut boxes, mut faces, mut outside) = (0, 0.0f32, 0, 0, 0);
         let mut names = std::collections::BTreeSet::new();
         for e in events.iter().filter(|e| e.rule == rule) {
@@ -111,8 +113,9 @@ pub fn report(
                     .flat_map(|r| r.windows(2))
                     .map(|w| Vec3::from_array(w[0]).distance(Vec3::from_array(w[1])))
                     .sum::<f32>();
-                outside +=
-                    usize::from(!e.spot && r.iter().any(|p| !crate::parks::in_park(p.truncate())));
+                outside += usize::from(
+                    !e.spot && r.iter().any(|p| !crate::parks::near_park(p.truncate(), margin)),
+                );
             }
             if let Some(t) = e.faces.first() {
                 let mid = e
@@ -136,7 +139,7 @@ pub fn report(
                     names.insert(source_names[*n as usize].as_str());
                 }
                 let mid = t.iter().map(|p| Vec3::from_array(*p)).sum::<Vec3>() / 3.;
-                outside += usize::from(!e.spot && !crate::parks::in_park(mid.truncate()));
+                outside += usize::from(!e.spot && !crate::parks::near_park(mid.truncate(), margin));
             }
         }
         eprintln!(
@@ -146,11 +149,15 @@ pub fn report(
     }
 }
 /// The rules an A/B trial switches off: `SKATEV_R1_OFF`, `SKATEV_R2_OFF`,
-/// `SKATEV_R3a_OFF`, `SKATEV_R3b_OFF`. Only the baker reads the environment
+/// `SKATEV_R3a_OFF`, `SKATEV_R3b_OFF`, and (rev 5) `SKATEV_R1b_OFF`,
+/// `SKATEV_R4_OFF`, `SKATEV_R5_OFF`. Only the baker reads the environment
 /// (`apply_trials_from_env`), and it then marks its output as a trial that
 /// is never installable; the runtime DLL and every live-built cell apply
 /// all rules (peer review 2026-11-16, finding 4).
-pub const RULES: [&str; 4] = ["R1", "R2", "R3a", "R3b"];
+pub const RULES: [&str; 7] = ["R1", "R2", "R3a", "R3b", "R1b", "R4", "R5"];
+/// R1b (rev 5): the reach ring round a park circle in which the railing-only
+/// box rule also acts (La Mesa's model reaches 75 m from a 30 m circle).
+pub const RING: f32 = 20.0;
 static TRIALS: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
 pub(crate) fn enabled(rule: &str) -> bool {
     enabled_with(TRIALS.load(std::sync::atomic::Ordering::Relaxed), rule)
@@ -172,6 +179,13 @@ pub fn apply_trials_from_env() -> Vec<&'static str> {
     let mask = off.iter().fold(0u8, |m, r| m | 1 << RULES.iter().position(|x| x == r).unwrap());
     TRIALS.store(mask, std::sync::atomic::Ordering::Relaxed);
     off
+}
+/// Tests only: run `f` with the given off-mask, then restore a normal build.
+#[cfg(test)]
+pub(crate) fn with_trials_for_test(mask: u8, f: impl FnOnce()) {
+    let before = TRIALS.swap(mask, std::sync::atomic::Ordering::SeqCst);
+    f();
+    TRIALS.store(before, std::sync::atomic::Ordering::SeqCst);
 }
 /// The `rules.txt` text of a bake: the plain hash, or a trial label the
 /// runtime (`rules_compatible`) and `build-world-collision.ps1` both refuse.
@@ -351,60 +365,119 @@ pub(crate) fn prefer_visible(gta: &mut Vec<Vec<Vec3>>, visual: &[Vec<Vec3>]) -> 
             return true;
         }
         // Same uncovered-tail policy as dedupe_within, in metres (>=35 cm).
-        let first_tail = tails.len();
-        let mut run = Vec::new();
-        let flush = |run: &mut Vec<Vec3>, tails: &mut Vec<Vec<Vec3>>| {
-            if length(run) >= 0.35 {
-                tails.push(std::mem::take(run));
-            } else {
-                run.clear();
-            }
-        };
-        for w in r.windows(2) {
-            let n = (w[0].distance(w[1]) / 0.01).ceil().max(1.) as usize;
-            for k in 0..=n {
-                let p = w[0].lerp(w[1], k as f32 / n as f32);
-                if visual.near(
-                    p,
-                    (w[1] - w[0]).normalize_or_zero(),
-                    0.06,
-                    5f32.to_radians().cos(),
-                ) {
-                    flush(&mut run, &mut tails);
-                } else if run.last() != Some(&p) {
-                    run.push(p);
-                }
-            }
-        }
-        flush(&mut run, &mut tails);
-        let kept = Segments::new(&tails[first_tail..], 0.002);
-        let mut gone = Vec::new();
-        for w in r.windows(2) {
-            let n = (w[0].distance(w[1]) / 0.01).ceil().max(1.) as usize;
-            for k in 0..n {
-                let a = w[0].lerp(w[1], k as f32 / n as f32);
-                let b = w[0].lerp(w[1], (k + 1) as f32 / n as f32);
-                if kept.near((a + b) * 0.5, (b - a).normalize_or_zero(), 0.002, 0.) {
-                    if gone.len() > 1 {
-                        removed.push(std::mem::take(&mut gone));
-                    } else {
-                        gone.clear();
-                    }
-                } else {
-                    if gone.last() != Some(&a) {
-                        gone.push(a);
-                    }
-                    gone.push(b);
-                }
-            }
-        }
-        if gone.len() > 1 {
-            removed.push(gone);
-        }
+        let (mine, gone) = split_covered(r, &visual, 0.06, 5f32.to_radians().cos());
+        tails.extend(mine);
+        removed.extend(gone);
         false
     });
     gta.extend(tails);
     removed
+}
+/// R5 (rev 5): the final duplicate sweep, whatever the sources. Lines are
+/// visited longest first (ties by the first point's coordinate bits); one is
+/// dropped when at least 80 % of it lies within `DUP_DISTANCE` (3D, per
+/// sample: the covered part's maximum distance) and 5 deg of lines already
+/// kept. Uncovered tails of 0.35 m or more stay. 3 cm is under the 5.2 cm
+/// same-source twin rule of `dedupe_within`, so twin curbs and wall caps
+/// stay two lines. Train lines (A49) are neither dropped nor used as cover.
+pub(crate) const DUP_DISTANCE: f32 = 0.03;
+pub(crate) fn drop_duplicates(lines: &mut Vec<Vec<Vec3>>, tracks: &[Vec<Vec3>]) -> Vec<Vec<Vec3>> {
+    let mut removed = Vec::new();
+    if !enabled("R5") || lines.len() < 2 {
+        return removed;
+    }
+    let bits = |r: &[Vec3]| r[0].to_array().map(f32::to_bits);
+    let is_train = |r: &[Vec3]| {
+        samples(r, 0.1).iter().any(|(p, d, _)| on_lines(*p, *d, tracks, 0.30, 0.0))
+    };
+    let mut order: Vec<usize> = (0..lines.len()).filter(|&i| lines[i].len() >= 2).collect();
+    order.sort_by(|&a, &b| {
+        length(&lines[b])
+            .total_cmp(&length(&lines[a]))
+            .then_with(|| bits(&lines[a]).cmp(&bits(&lines[b])))
+    });
+    let cos = 5f32.to_radians().cos();
+    let mut kept_cover: Vec<Vec<Vec3>> = Vec::new();
+    let mut result: Vec<Vec<Vec3>> = Vec::new();
+    for i in order {
+        let r = lines[i].clone();
+        if is_train(&r) || !inside(&r) {
+            result.push(r);
+            continue;
+        }
+        let cover = Segments::new(&kept_cover, DUP_DISTANCE);
+        let ss = samples(&r, 0.025);
+        let total = length(&r);
+        let hit: f32 = ss
+            .iter()
+            .filter(|(p, d, _)| cover.near(*p, *d, DUP_DISTANCE, cos))
+            .map(|s| s.2)
+            .sum();
+        if total <= 0. || hit < 0.8 * total {
+            kept_cover.push(r.clone());
+            result.push(r);
+            continue;
+        }
+        let (tails, gone) = split_covered(&r, &cover, DUP_DISTANCE, cos);
+        removed.extend(gone);
+        for t in tails {
+            kept_cover.push(t.clone());
+            result.push(t);
+        }
+    }
+    *lines = result;
+    removed
+}
+/// Splits `r` into its uncovered tails (>= 0.35 m, kept) and the covered
+/// pieces (removed), 1 cm steps; shared by R3a and R5.
+fn split_covered(r: &[Vec3], cover: &Segments, distance: f32, cos: f32) -> (Vec<Vec<Vec3>>, Vec<Vec<Vec3>>) {
+    let mut tails = Vec::new();
+    let mut run = Vec::new();
+    let flush = |run: &mut Vec<Vec3>, tails: &mut Vec<Vec<Vec3>>| {
+        if length(run) >= 0.35 {
+            tails.push(std::mem::take(run));
+        } else {
+            run.clear();
+        }
+    };
+    for w in r.windows(2) {
+        let n = (w[0].distance(w[1]) / 0.01).ceil().max(1.) as usize;
+        for k in 0..=n {
+            let p = w[0].lerp(w[1], k as f32 / n as f32);
+            if cover.near(p, (w[1] - w[0]).normalize_or_zero(), distance, cos) {
+                flush(&mut run, &mut tails);
+            } else if run.last() != Some(&p) {
+                run.push(p);
+            }
+        }
+    }
+    flush(&mut run, &mut tails);
+    let kept = Segments::new(&tails, 0.002);
+    let mut gone = Vec::new();
+    let mut removed = Vec::new();
+    for w in r.windows(2) {
+        let n = (w[0].distance(w[1]) / 0.01).ceil().max(1.) as usize;
+        for k in 0..n {
+            let a = w[0].lerp(w[1], k as f32 / n as f32);
+            let b = w[0].lerp(w[1], (k + 1) as f32 / n as f32);
+            if kept.near((a + b) * 0.5, (b - a).normalize_or_zero(), 0.002, 0.) {
+                if gone.len() > 1 {
+                    removed.push(std::mem::take(&mut gone));
+                } else {
+                    gone.clear();
+                }
+            } else {
+                if gone.last() != Some(&a) {
+                    gone.push(a);
+                }
+                gone.push(b);
+            }
+        }
+    }
+    if gone.len() > 1 {
+        removed.push(gone);
+    }
+    (tails, removed)
 }
 /// The finder also sees visible park faces. Preserve their source before the
 /// named found/visual merge; visrails alone contains bars, not park coping.
@@ -593,6 +666,11 @@ mod tests {
         assert!(enabled_with(0b0010, "R1"));
         assert!(enabled_with(0b0010, "R9"), "unknown names are never switched off");
         assert_eq!(trials_where(|r| r == "R3b"), vec!["R3b"]);
+        assert!(!enabled_with(1 << 4, "R1b"));
+        assert!(!enabled_with(1 << 5, "R4"));
+        assert!(!enabled_with(1 << 6, "R5"));
+        assert!(enabled_with(1 << 6, "R4"));
+        assert_eq!(rules_label("rules 0123", &["R1b", "R5"]), "rules 0123 trial R1b,R5");
         assert_eq!(rules_label("rules 0123", &[]), "rules 0123");
         assert_eq!(rules_label("rules 0123", &["R2", "R3b"]), "rules 0123 trial R2,R3b");
         assert!(!crate::tiles::rules_compatible(&rules_label(&crate::tiles::rules_hash(), &["R1"])));
@@ -736,6 +814,75 @@ mod tests {
         let mut lines = actual.clone();
         drop_creases(&mut lines, &crease(false), &kept_tracks(), &[]);
         assert_eq!(lines, actual);
+    }
+    #[test]
+    fn r5_9mm_pair_leaves_one_line() {
+        let mut lines = vec![line(0., 1., 5.), line(0.009, 1., 5.)];
+        let gone = drop_duplicates(&mut lines, &[]);
+        assert_eq!(lines.len(), 1);
+        assert_eq!(gone.len(), 1);
+        assert!(length(&lines[0]) > 4.99, "a whole line stays, nothing is moved");
+    }
+    #[test]
+    fn r5_same_source_twins_52mm_apart_stay() {
+        let mut lines = vec![line(0., 1., 5.), line(0.052, 1., 5.)];
+        let before = lines.clone();
+        assert!(drop_duplicates(&mut lines, &[]).is_empty());
+        assert_eq!(lines, before);
+    }
+    #[test]
+    fn r5_train_pair_3cm_apart_stays() {
+        // A49: both head edges of a steel rail, 3 cm apart here, stay two lines;
+        // a non-track line beside a track is not covered by the track either.
+        let tracks = vec![line(0., 1., 5.), line(0.03, 1., 5.)];
+        let mut lines = tracks.clone();
+        assert!(drop_duplicates(&mut lines, &tracks).is_empty());
+        assert_eq!(lines.len(), 2);
+        let mut lines = vec![line(0., 1., 5.), line(0.02, 1., 5.)];
+        assert!(drop_duplicates(&mut lines, &[line(0., 1., 5.)]).is_empty());
+        assert_eq!(lines.len(), 2);
+    }
+    #[test]
+    fn r5_equal_length_tie_keeps_exactly_one() {
+        let (a, b) = (line(0., 1., 5.), line(0.01, 1., 5.));
+        let mut one = vec![a.clone(), b.clone()];
+        let mut two = vec![b.clone(), a.clone()];
+        drop_duplicates(&mut one, &[]);
+        drop_duplicates(&mut two, &[]);
+        assert_eq!(one.len(), 1);
+        assert_eq!(one, two, "the order the tile lists them in does not decide");
+    }
+    #[test]
+    fn r5_stacked_pair_3cm_in_z_both_kept_unless_max_3d_within_3cm() {
+        // 2 cm aside and 3 cm up: 3.6 cm in 3D at every sample -> both stay.
+        let mut lines = vec![line(0., 1., 5.), line(0.02, 1.03, 5.)];
+        assert!(drop_duplicates(&mut lines, &[]).is_empty());
+        assert_eq!(lines.len(), 2);
+        // 2.9 cm up: within the limit -> one goes.
+        let mut lines = vec![line(0., 1., 5.), line(0., 1.029, 5.)];
+        assert_eq!(drop_duplicates(&mut lines, &[]).len(), 1);
+        assert_eq!(lines.len(), 1);
+        // Mean under 3 cm but one stretch 5 cm off: that stretch is a kept tail.
+        let bent = vec![at(0., 0.01, 1.), at(3., 0.01, 1.), at(4., 0.05, 1.), at(5., 0.01, 1.)];
+        let mut lines = vec![line(0., 1., 5.), bent];
+        drop_duplicates(&mut lines, &[]);
+        assert_eq!(lines.len(), 2, "the off stretch (>= 0.35 m) stays as a tail");
+    }
+    #[test]
+    fn r5_drops_the_shorter_line_and_keeps_its_unique_tail() {
+        let mut lines = vec![line(0.008, 1., 6.), line(0., 1., 5.)];
+        drop_duplicates(&mut lines, &[]);
+        assert_eq!(lines.len(), 2);
+        assert!(lines.iter().any(|r| (length(r) - 6.).abs() < 1e-3), "the longer line stays whole");
+        assert!(lines.iter().any(|r| (length(r) - 1.).abs() < 0.02), "the 1 m unique tail of the shorter one");
+    }
+    #[test]
+    fn r5_does_nothing_outside_park_areas() {
+        let r = vec![Vec3::new(0., 0., 1.), Vec3::new(5., 0., 1.)];
+        let q = vec![Vec3::new(0., 0.01, 1.), Vec3::new(5., 0.01, 1.)];
+        let mut lines = vec![r.clone(), q.clone()];
+        assert!(drop_duplicates(&mut lines, &[]).is_empty());
+        assert_eq!(lines.len(), 2);
     }
     #[test]
     fn universal_rules_do_nothing_outside_park_areas() {
