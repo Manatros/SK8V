@@ -668,7 +668,18 @@ pub fn run_story_map(args: Vec<String>) -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-fn verify_coverage(dir: &Path, box_: [f32;4]) -> Result<(usize,usize,usize,usize),Box<dyn Error>> {
+/// Cells a verification covers: every cell of the box, or (a snapshot of a bake
+/// in progress) exactly the listed cells that lie inside the box.
+fn verify_cells(box_: [f32;4], size: f32, only: Option<&BTreeSet<tiles::Cell>>) -> Vec<tiles::Cell> {
+    let (x0,x1) = ((box_[0]/size).floor() as i32,(box_[1]/size).floor() as i32);
+    let (y0,y1) = ((box_[2]/size).floor() as i32,(box_[3]/size).floor() as i32);
+    match only {
+        Some(list) => list.iter().copied().filter(|&(x,y)| (x0..=x1).contains(&x) && (y0..=y1).contains(&y)).collect(),
+        None => (x0..=x1).flat_map(|x| (y0..=y1).map(move |y| (x,y))).collect(),
+    }
+}
+
+fn verify_coverage(dir: &Path, box_: [f32;4], only: Option<&BTreeSet<tiles::Cell>>) -> Result<(usize,usize,usize,usize),Box<dyn Error>> {
     if box_.iter().any(|n| !n.is_finite() || n.abs()>20000.) || box_[0]>=box_[1] || box_[2]>=box_[3] {
         return Err("invalid verification bounds".into());
     }
@@ -677,9 +688,9 @@ fn verify_coverage(dir: &Path, box_: [f32;4]) -> Result<(usize,usize,usize,usize
     let mut cache = tiles::Cache::default();
     let (mut baked,mut live,mut triangles,mut rails) = (0,0,0,0);
     let mut source = None;
-    for x in (box_[0]/size).floor() as i32..=(box_[1]/size).floor() as i32 {
-        for y in (box_[2]/size).floor() as i32..=(box_[3]/size).floor() as i32 {
-            let c = (x,y);
+    for c in verify_cells(box_,size,only) {
+        {
+            let (x,y) = c;
             let selected = cache.select(dir,[(x as f32+0.5)*size,(y as f32+0.5)*size],0.)
                 .ok_or_else(||format!("cell {c:?}: invalid rules or state policy"))?;
             if selected.live_only == [c] {
@@ -700,7 +711,11 @@ fn verify_coverage(dir: &Path, box_: [f32;4]) -> Result<(usize,usize,usize,usize
 /// Installation gate: complete coverage is invariant tiles plus intentional
 /// live cells, never an arbitrary count of files that might be stale.
 pub fn run_verify_world(args: Vec<String>) -> Result<(), Box<dyn Error>> {
-    if args.len()!=5 { return Err("--verify-world WORLD MINX MAXX MINY MAXY".into()); }
+    if !(5..=6).contains(&args.len()) { return Err("--verify-world WORLD MINX MAXX MINY MAXY [CELLLIST]".into()); }
+    // CELLLIST ("x y" per line, as the priority file): verify exactly these cells,
+    // for a snapshot of a bake in progress. Any listed cell that is missing fails.
+    let only = args.get(5).map(|p| parse_cells(&fs::read_to_string(p)?)).transpose()?;
+    if only.as_ref().is_some_and(|l| l.is_empty()) { return Err("empty cell list".into()); }
     let world = Path::new(&args[0]);
     let map = world.join("sk8v-map.svwc");
     if !SkateVRuntime::baked::verified_policy(&map) { return Err("unverified Story fallback map".into()); }
@@ -710,7 +725,7 @@ pub fn run_verify_world(args: Vec<String>) -> Result<(), Box<dyn Error>> {
         return Err("unverified Story visual rails".into());
     }
     let bounds = [args[1].parse()?,args[2].parse()?,args[3].parse()?,args[4].parse()?];
-    let (baked,live,triangles,rails) = verify_coverage(&world.join("tiles"),bounds)?;
+    let (baked,live,triangles,rails) = verify_coverage(&world.join("tiles"),bounds,only.as_ref())?;
     println!("Verified world: {baked} invariant cells + {live} live cells, {triangles} triangles, {rails} rail records");
     Ok(())
 }
@@ -1309,6 +1324,15 @@ fn bake(
         tiles::rules_hash(), tiles::live_policy(&live_cells)
     );
     tiles::write_live_cells(&out, size, &source, &live_cells)?;
+    // Written with live-cells.txt, not at the end: a work folder that is still
+    // baking then already carries its rules and tile size, so the priority
+    // tiles can be gated and installed from a snapshot (bake-to-play design
+    // 2026-11-16). Completeness is judged by the tiles, never by these files.
+    fs::write(out.join("tile-size.txt"), format!("{size}\n"))?;
+    fs::write(out.join("rules.txt"), world::park_rules::rules_label(&tiles::rules_hash(), &trials))?;
+    if !trials.is_empty() {
+        fs::write(out.join("trial.txt"), format!("trial bake: park rules switched off: {}\nnever install this output\n", trials.join(",")))?;
+    }
     fs::write(
         out.join("warnings.txt"),
         skipped
@@ -1574,7 +1598,8 @@ fn bake(
                 validation.step_examples.push(v[0]);
             }
         }
-        let temp = tiles::path(&out, c).with_extension("tmp");
+        // Atomic publish: a snapshot or a live reader never sees a half-written .svwt.
+        let temp = tiles::path(&out, c).with_extension("svwt.tmp");
         let mut writer = BufWriter::new(fs::File::create(&temp)?);
         tile.write(&mut writer)?;
         writer.flush()?;
@@ -1716,11 +1741,6 @@ fn bake(
 ")).collect::<String>())?;
     let workers = num_workers;
     if let Some(o) = obj.as_mut() { o.flush()?; }
-    fs::write(out.join("tile-size.txt"), format!("{size}\n"))?;
-    fs::write(out.join("rules.txt"), world::park_rules::rules_label(&tiles::rules_hash(), &trials))?;
-    if !trials.is_empty() {
-        fs::write(out.join("trial.txt"), format!("trial bake: park rules switched off: {}\nnever install this output\n", trials.join(",")))?;
-    }
     let ramps = ramps.load(std::sync::atomic::Ordering::Relaxed);
     let step_count = step_count.load(std::sync::atomic::Ordering::Relaxed);
     let report = format!(
@@ -2059,15 +2079,40 @@ mod batch_tests {
         let tile = Tile { cell:(0,0),size:64.,source,triangles:vec![([[1.,1.,0.],[2.,1.,0.],[1.,2.,0.]],0)],rails:vec![] , noses: Vec::new(), origins: Vec::new(), origin_names: Vec::new()};
         let save = || tile.write(fs::File::create(tiles::path(&dir,(0,0))).unwrap()).unwrap();
         save();
-        assert_eq!(verify_coverage(&dir,[0.,127.,0.,63.]).unwrap(),(1,1,1,0));
+        assert_eq!(verify_coverage(&dir,[0.,127.,0.,63.],None).unwrap(),(1,1,1,0));
         fs::remove_file(tiles::path(&dir,(0,0))).unwrap();
-        assert!(verify_coverage(&dir,[0.,127.,0.,63.]).is_err(),"unintended missing cells cannot be called complete");
+        assert!(verify_coverage(&dir,[0.,127.,0.,63.],None).is_err(),"unintended missing cells cannot be called complete");
         save();
         fs::write(tiles::path(&dir,(1,0)),b"stale").unwrap();
-        assert!(verify_coverage(&dir,[0.,127.,0.,63.]).is_err(),"old live-cell files must be absent from a newly generated payload");
+        assert!(verify_coverage(&dir,[0.,127.,0.,63.],None).is_err(),"old live-cell files must be absent from a newly generated payload");
         fs::remove_file(tiles::path(&dir,(1,0))).unwrap();
         fs::write(dir.join("live-cells.txt"),b"truncated").unwrap();
-        assert!(verify_coverage(&dir,[0.,127.,0.,63.]).is_err());
+        assert!(verify_coverage(&dir,[0.,127.,0.,63.],None).is_err());
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn cell_list_gate_checks_exactly_the_listed_cells() {
+        // A snapshot of a bake in progress holds some cells: the gate covers
+        // those and nothing else; a listed cell that is absent still fails.
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join(format!("../../out/tests/celllist-gate-{}",std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("tile-size.txt"),"64").unwrap();
+        fs::write(dir.join("rules.txt"),tiles::rules_hash()).unwrap();
+        let live = BTreeSet::from([(1,0)]);
+        let source = format!("source fixture\n{}\n{}",tiles::rules_hash(),tiles::live_policy(&live));
+        tiles::write_live_cells(&dir,64.,&source,&live).unwrap();
+        let tile = Tile { cell:(0,0),size:64.,source,triangles:vec![([[1.,1.,0.],[2.,1.,0.],[1.,2.,0.]],0)],rails:vec![] , noses: Vec::new(), origins: Vec::new(), origin_names: Vec::new()};
+        tile.write(fs::File::create(tiles::path(&dir,(0,0))).unwrap()).unwrap();
+        let bounds = [0.,255.,0.,63.]; // cells 0..=3; (2,0) and (3,0) were not baked yet
+        assert!(verify_coverage(&dir,bounds,None).is_err(),"the whole box is incomplete");
+        let listed = BTreeSet::from([(0,0),(1,0)]);
+        assert_eq!(verify_coverage(&dir,bounds,Some(&listed)).unwrap(),(1,1,1,0));
+        let with_missing = BTreeSet::from([(0,0),(2,0)]);
+        assert!(verify_coverage(&dir,bounds,Some(&with_missing)).is_err(),"a listed missing cell fails");
+        let outside = BTreeSet::from([(9,9)]);
+        assert_eq!(verify_coverage(&dir,bounds,Some(&outside)).unwrap(),(0,0,0,0),"cells outside the box are not part of the gate");
         fs::remove_dir_all(dir).unwrap();
     }
 
