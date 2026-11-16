@@ -1365,6 +1365,7 @@ fn bake(
     let is_ymap: Vec<bool> = spool.names.iter().map(|n| n.to_ascii_lowercase().ends_with(".ymap")).collect();
     let build = |c: tiles::Cell, lookups: &mut Lookups| -> Result<(Tile, Validation), Box<dyn Error + Send + Sync>> {
         let mut validation = Validation::default();
+        world::park_rules::begin();
         let at = Vec3::new((c.0 as f32 + 0.5) * size, (c.1 as f32 + 0.5) * size, 0.);
         let mut data = spool.around(at, margin, size)?;
         // Baked rail prop bars sit 2 cm under the visible rail line along
@@ -1385,7 +1386,8 @@ fn bake(
             .map(|(t, _)| svwc::surfaces::key(&t.v)).collect();
         let mut census = SkateVRuntime::live::Census::default();
         // Both stair variants: the game's settings pick (SkateVRuntime::live::shown).
-        let cleaned = SkateVRuntime::live::clean_static(
+        let park_sources:std::collections::HashMap<u64,String>=data.tris.iter().zip(&data.origins).filter(|(_,o)|spool.names[**o as usize].eq("id2_10_0.ybn")).map(|(t,o)|(svwc::surfaces::key(&t.v),spool.names[*o as usize].clone())).collect();
+        let cleaned = SkateVRuntime::live::clean_static_with_park_sources(
             &mut data.tris,
             &data.stairs,
             &tubes,
@@ -1393,6 +1395,7 @@ fn bake(
             &mut census,
             true,
             &exact,
+            &park_sources,
         );
         ramps.fetch_add(census.stair_ramps, std::sync::atomic::Ordering::Relaxed);
         step_count.fetch_add(census.steps, std::sync::atomic::Ordering::Relaxed);
@@ -1449,6 +1452,8 @@ fn bake(
                 .collect()
         };
         let mut area = world::build_area_tagged(at, input.into_iter());
+        world::park_rules::recording(false);
+        let kept_tracks = world::park_rules::kept_tracks();
         if !gta_park.is_empty() {
             let gta_area = world::build_area_tagged(at, gta_park.into_iter());
             let added = world::park_edge_lines(&mut area, &gta_area.rails);
@@ -1459,6 +1464,10 @@ fn bake(
             let boxed_area = world::build_area_tagged(at, with_boxes.into_iter());
             validation.bar_top_lines += world::bar_top_lines(&mut area, &boxed_area.rails, &slabs);
         }
+        world::park_rules::recording(true);
+        world::prune_park_creases(&mut area, &kept_tracks);
+        world::park_rules::recording(false);
+        world::park_rules::report(c,size,&input_origin,&spool.names);
         let mut tile = Tile {
             cell: c,
             size,

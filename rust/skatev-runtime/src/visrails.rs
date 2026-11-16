@@ -213,6 +213,19 @@ impl File {
     }
 }
 
+/// Raw visible-model bars, including lower levels; geometry evidence for park rules.
+pub fn raw_in(centre: [f32; 2], half: f32) -> Vec<Vec<Vec3>> {
+    let Some(Some(file)) = FILE.get() else { return Vec::new() };
+    let span = |v: f32| ((v-half)/file.cell).floor() as i32-1..=((v+half)/file.cell).floor() as i32+1;
+    let mut out=Vec::new();
+    for x in span(centre[0]) { for y in span(centre[1]) {
+        out.extend(file.cell_rails((x,y)).iter().filter(|r| r.windows(2).any(|w| {
+            let lo=w[0].min(w[1]);let hi=w[0].max(w[1]);
+            lo.x<=centre[0]+half && hi.x>=centre[0]-half && lo.y<=centre[1]+half && hi.y>=centre[1]-half
+        })).cloned());
+    }} out
+}
+
 /// Rails supported by the supplied collision, without cross-build reuse.
 pub fn rails_in(centre: [f32; 2], half: f32, tris: &[[Vec3; 3]]) -> Vec<Vec<Vec3>> {
     if !ENABLED.load(std::sync::atomic::Ordering::Relaxed) { return Vec::new(); }

@@ -23,6 +23,7 @@ pub fn rules_hash() -> String {
         let mut h = 0xcbf29ce484222325u64;
         for bytes in [
             include_bytes!("world.rs").as_slice(),
+            include_bytes!("world/park_rules.rs").as_slice(),
             include_bytes!("live.rs").as_slice(),
             include_bytes!("baked.rs").as_slice(),
             include_bytes!("rails.rs").as_slice(),

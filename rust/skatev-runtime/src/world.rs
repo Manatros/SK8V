@@ -5,6 +5,7 @@
 //! surfaces, `crackmaps.svgj` ground joints), by triangle vertex bits and
 //! position.
 use crate::{coords, curbs, rails};
+pub mod park_rules;
 use bevy_math::Vec3;
 use std::path::Path;
 
@@ -621,7 +622,7 @@ fn build_area_rules(center: Vec3, tris: impl Iterator<Item = ([[f32; 3]; 3], u32
     };
     // A visible rail's bends (the curved piece between two straight
     // tubes) are no tube to the finder: its pieces join across them.
-    let visual = {
+    let mut visual = {
         let mut visual = visual;
         crate::rails::join_ends_within(&mut visual, crate::rails::BEND_GAP);
         visual
@@ -629,6 +630,24 @@ fn build_area_rules(center: Vec3, tris: impl Iterator<Item = ([[f32; 3]; 3], u32
     if !visual.is_empty() {
         found = off_lines(found, &visual, VISUAL_SIDE, VISUAL_UP);
         all = off_lines(all, &visual, VISUAL_SIDE, VISUAL_UP);
+    }
+    let visible_park = crate::visparks::faces_in([center.x, center.y], RADIUS + 3.0);
+    let raw_bars = crate::visrails::raw_in([center.x, center.y], RADIUS + 3.0);
+    let removed_tubes = park_rules::drop_floating(&mut all, &visible_park, &raw_bars, &tracks);
+    let mut removed_capsules = vec![false; gta.len()];
+    if !removed_tubes.is_empty() {
+        boxed = off_lines(boxed, &removed_tubes, 0.01, 0.01);
+        let (inside,outside):(Vec<_>,Vec<_>)=found.into_iter().partition(|r|r.iter().all(|p|crate::parks::in_park(p.truncate())));
+        found = off_lines(inside, &removed_tubes, TUBE_SIDE, TUBE_UP);
+        found.extend(outside);
+        for (i, t) in gta.iter().enumerate() {
+            removed_capsules[i] = surfaces[i] & crate::live::PARKMESH_TAG == 0 && crate::parks::in_park(((t[0]+t[1]+t[2])/3.).truncate()) && removed_tubes.iter().flat_map(|r| r.windows(2)).any(|w| {
+                let radius = crate::tubes::half_width(w[0],w[1]);
+                let a=w[0]-Vec3::Z*radius;let b=w[1]-Vec3::Z*radius;let ab=b-a;
+                t.iter().all(|p| p.distance(a+ab*(((*p-a).dot(ab))/ab.length_squared().max(1e-12)).clamp(0.,1.))<=radius+0.003)
+            });
+        }
+        park_rules::record("R2", removed_tubes.clone(), gta.iter().zip(&removed_capsules).filter(|(_,gone)|**gone).map(|(t,_)|t.map(|p|p.to_array())).collect(), removed_tubes.len(), false);
     }
     if !all.is_empty() {
         found = off_lines(found, &all, TUBE_SIDE, TUBE_UP);
@@ -656,6 +675,9 @@ fn build_area_rules(center: Vec3, tris: impl Iterator<Item = ([[f32; 3]; 3], u32
     });
     crate::rails::dedupe_metres(&mut boxed);
     crate::rails::straighten(&mut boxed, STRAIGHT);
+    visual.extend(park_rules::take_visible_finder(&mut found, &gta, &surfaces));
+    let removed = park_rules::prefer_visible(&mut found, &visual);
+    park_rules::record("R3a", removed, Vec::new(), 0, false);
     found.extend(visual);
     // Tubes and visual rails can also describe slot edges. Top lifting can
     // bring an initially distant finder line into the slot. Apply ownership
@@ -704,6 +726,7 @@ fn build_area_rules(center: Vec3, tris: impl Iterator<Item = ([[f32; 3]; 3], u32
     if crate::live::STEP_RAILS.load(std::sync::atomic::Ordering::Relaxed) {
         found.append(&mut noses);
     }
+    park_rules::remember_tracks(&tracks);
     found.extend(tracks);
     // Only tube/visual rails receive missing-solid boxes; finder ledges and
     // tracks keep their authored collision. A nearby face alone is not proof
@@ -748,7 +771,7 @@ fn build_area_rules(center: Vec3, tris: impl Iterator<Item = ([[f32; 3]; 3], u32
     cache.buried = set(&solids);
     // Rails were found on the full GTA set; buried risers then leave the
     // collision (their bevels cover them).
-    let mut keep = vec![true; gta.len()];
+    let mut keep: Vec<bool> = removed_capsules.iter().map(|gone| !gone).collect();
     for &i in buried.iter().filter(|&&i| !is_step[i]).chain(&interior).chain(&caps).chain(&solids) {
         keep[i] = false;
     }
@@ -773,7 +796,7 @@ fn build_area_rules(center: Vec3, tris: impl Iterator<Item = ([[f32; 3]; 3], u32
         .zip(&keep)
         .filter(|(_, k)| **k)
         .map(|((t, s), _)| (*t, *s))
-        .chain(bevel_tris.iter().zip(&sources).filter(|&(_, &i)| !is_step[i]).map(|(t, &i)| (*t, surfaces[i] | skate_host::bridge::NO_GRIND_TAG)))
+        .chain(bevel_tris.iter().zip(&sources).filter(|&(_, &i)| !is_step[i] && !removed_capsules[i]).map(|(t, &i)| (*t, surfaces[i] | skate_host::bridge::NO_GRIND_TAG)))
         .chain(rail_boxes.iter().map(|t| (*t, crate::materials::surface(METAL_MATERIAL).packed() | crate::live::RAILBOX_TAG)))
         .chain(track_boxes.iter().map(|t| (*t, crate::materials::surface(METAL_MATERIAL).packed())))
         .collect();
@@ -1485,6 +1508,20 @@ pub fn park_edge_lines(area: &mut Area, gta_rails: &[Vec<[f32; 3]>]) -> usize {
         area.rails = gta.into_iter().map(|r| r.into_iter().map(|p| coords::to_skate(p).to_array()).collect()).collect();
     }
     added
+}
+
+/// Final park post-pass after park edge/rim/bar restoration (GTA metres internally).
+pub fn prune_park_creases(area: &mut Area, tracks: &[Vec<Vec3>]) {
+    let visible=crate::visparks::faces_in([area.center.x,area.center.y], RADIUS+3.0);
+    // These are the actual snapped train/orphan edge lines captured before any
+    // auxiliary build, rather than node polylines or unrelated main-pass rails.
+    let mut lines:Vec<Vec<Vec3>>=area.rails.iter().map(|r|r.iter().map(|p|coords::from_skate(Vec3::from_array(*p))).collect()).collect();
+    let removed=park_rules::drop_creases(&mut lines,&visible,tracks);
+    if removed.is_empty() { return; }
+    let key=|r:&[Vec3]|r.iter().map(|p|p.to_array().map(f32::to_bits)).collect::<Vec<_>>();
+    let gone:rustc_hash::FxHashSet<_>=removed.iter().map(|r|key(r)).collect();
+    area.rails.retain(|r|!gone.contains(&key(&r.iter().map(|p|coords::from_skate(Vec3::from_array(*p))).collect::<Vec<_>>())));
+    park_rules::record("R3b",removed,Vec::new(),0,false);
 }
 
 /// A ramp's side rims in a park get a line from where they stand clear of the floor

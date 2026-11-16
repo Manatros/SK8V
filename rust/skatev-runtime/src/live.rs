@@ -780,7 +780,11 @@ impl Cleaned {
 /// model (baked static props); the high-res park pass treats them like stairs:
 /// never cut, and no visible triangle near them is used (2026-10-31 test:
 /// the Little Seoul halfpipe's flat deck was cut down to the ground below).
-pub fn clean_static(tris: &mut Vec<Tri>, stairs: &[bool], tubes: &[(svwc::bounds::V3, svwc::bounds::V3, f32)], mut extra: Vec<Tri>, census: &mut Census, variants: bool, exact: &std::collections::HashSet<u64>) -> Cleaned {
+pub fn clean_static(tris: &mut Vec<Tri>, stairs: &[bool], tubes: &[(svwc::bounds::V3, svwc::bounds::V3, f32)], extra: Vec<Tri>, census: &mut Census, variants: bool, exact: &std::collections::HashSet<u64>) -> Cleaned {
+    clean_static_with_park_sources(tris,stairs,tubes,extra,census,variants,exact,&Default::default())
+}
+
+pub fn clean_static_with_park_sources(tris: &mut Vec<Tri>, stairs: &[bool], tubes: &[(svwc::bounds::V3, svwc::bounds::V3, f32)], mut extra: Vec<Tri>, census: &mut Census, variants: bool, exact: &std::collections::HashSet<u64>, sources: &std::collections::HashMap<u64,String>) -> Cleaned {
     use std::sync::atomic::Ordering::Relaxed;
     let mut cleaned = Cleaned::default();
     let no_grind = skate_host::bridge::NO_GRIND_TAG;
@@ -836,7 +840,7 @@ pub fn clean_static(tris: &mut Vec<Tri>, stairs: &[bool], tubes: &[(svwc::bounds
         let stairs: Vec<Tri> = ramps.iter().chain(&steps).chain(&unflagged_steps).chain(&unflagged_ramps).copied()
             .chain(tris.iter().filter(|t| exact.contains(&svwc::surfaces::key(&t.v))).copied())
             .collect();
-        let parks = crate::visparks::replace(tris, &stairs);
+        let parks = crate::visparks::replace_with_sources(tris, &stairs, sources);
         census.park_replaced = parks.removed.len();
         census.park_added = parks.added.len();
         if variants {
@@ -849,7 +853,7 @@ pub fn clean_static(tris: &mut Vec<Tri>, stairs: &[bool], tubes: &[(svwc::bounds
         }
         for ((t, from), cut) in parks.added.iter().zip(parks.surface_from).zip(parks.cut) {
             let k = svwc::surfaces::key(&t.v);
-            *cleaned.tags.entry(k).or_default() |= PARKMESH_TAG | if cut { PARKCUT_TAG } else { 0 };
+            *cleaned.tags.entry(k).or_default() |= if parks.bar_bodies.contains(&k) { VISBAR_TAG } else { PARKMESH_TAG | if cut { PARKCUT_TAG } else { 0 } };
             cleaned.surface_from.insert(k, from);
         }
         park_added = parks.added;

@@ -9,6 +9,13 @@ use std::path::Path;
 use std::sync::OnceLock;
 use svwc::Tri;
 
+/// Visible park faces near an area, retaining the actual model outside its ownership circle.
+pub fn faces_in(centre: [f32; 2], half: f32) -> Vec<[[f32; 3]; 3]> {
+    FILE.get().and_then(Option::as_ref).into_iter().flatten().flat_map(|(_,v)|v).filter(|t| {
+        let (lo,hi)=bounds(t,0.0);lo.x<=centre[0]+half && hi.x>=centre[0]-half && lo.y<=centre[1]+half && hi.y>=centre[1]-half
+    }).copied().collect()
+}
+
 /// GTAxSkate HighResParks (Developer > World collision, default on).
 pub static HIGH_RES_PARKS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
 /// A GTA and a visible surface closer than this are the same surface (m):
@@ -214,6 +221,8 @@ pub struct Replacement {
     support_work: (usize, usize, usize), // queries, total visited, worst query
     /// GTA triangles replaced (kept as the HighResParks-off variant).
     pub removed: Vec<Tri>,
+    /// Thin bodies built from confirmed railing-only polylines.
+    pub bar_bodies: std::collections::HashSet<u64>,
     /// Visible triangles added, then the cut GTA pieces and moved copies.
     pub added: Vec<Tri>,
     /// Per added triangle, the vertex key of the GTA triangle whose surface
@@ -230,13 +239,19 @@ pub struct Replacement {
 /// (design 2026-10-26-one-source-collision 1). `stairs` are the area's stair
 /// ramps and steps: never cut, and no visible triangle near them is used.
 pub fn replace(tris: &mut Vec<Tri>, stairs: &[Tri]) -> Replacement {
+    replace_with_sources(tris, stairs, &Default::default())
+}
+
+/// Bake-only source witnesses; live geometry without a verified origin gets no spot exception.
+pub fn replace_with_sources(tris: &mut Vec<Tri>, stairs: &[Tri], sources: &std::collections::HashMap<u64, String>) -> Replacement {
     let Some(Some(parks)) = FILE.get() else { return Replacement::default() };
     let mut out = Replacement::default();
     for park in crate::parks::PARKS {
         let Some((_, visible)) = parks.iter().find(|(id, _)| id == park.id) else { continue };
         // See-through boxes first: their bars are taken, the rest of the park
         // never sees them (design 2026-11-09-see-through).
-        let rest = see_through_boxes(tris, stairs, visible, park.centre, park.radius, park.id, &mut out);
+        let bars=crate::visrails::raw_in(park.centre.to_array(),park.radius+2.0);
+        let rest = see_through_boxes_with_bars(tris, stairs, visible, park.centre, park.radius, park.id, &mut out, &bars, sources);
         replace_park(tris, stairs, rest.as_deref().unwrap_or(visible), park.centre, park.radius, park.id, &mut out);
     }
     out
@@ -266,7 +281,48 @@ const BOX_SPAN: f32 = 0.80;
 /// the box around the bars left hundreds of shards (Strawberry -287/-1574, 1107-2).
 /// Returns the park's visible faces without the bars taken here.
 fn see_through_boxes(tris: &mut Vec<Tri>, stairs: &[Tri], visible: &[[[f32; 3]; 3]], centre: Vec2, radius: f32, id: &'static str, out: &mut Replacement) -> Option<Vec<[[f32; 3]; 3]>> {
-    let mut park: Vec<usize> = (0..tris.len()).filter(|&i| centroid(&tris[i].v).truncate().distance(centre) <= radius).collect();
+    see_through_boxes_with_bars(tris, stairs, visible, centre, radius, id, out, &[], &Default::default())
+}
+
+// One manually authorized wall, two authored panels separated by its opening.
+// Source + exact AABBs prevent this exception from admitting any other glass box.
+const LAMESA_WALL: [([f32;3],[f32;3]);2] = [
+    ([712.44073,-1200.6392,24.951017],[722.8443,-1200.4612,27.799616]),
+    ([724.2782,-1200.6362,26.600368],[738.2821,-1200.3916,27.831234]),
+];
+fn spot_panel(t: &Tri, sources: &std::collections::HashMap<u64,String>) -> Option<usize> {
+    let name=sources.get(&svwc::surfaces::key(&t.v))?;
+    if name.rsplit(['/','\\']).next()!=Some("id2_10_0.ybn") {return None;}
+    LAMESA_WALL.iter().position(|(lo,hi)|t.v.iter().all(|q|(0..3).all(|k|q[k]>=lo[k]-0.003 && q[k]<=hi[k]+0.003)))
+}
+/// Clip actual visible bar segments to the box and require two separated levels,
+/// each covering >=80% of its length. A post can never supply that evidence.
+fn spanning_bars(bars:&[Vec<Vec3>], origin:Vec3, u:Vec3, n:Vec3, ul:(f32,f32), wl:(f32,f32), zl:(f32,f32)) -> Vec<Vec<Vec3>> {
+    let mut levels:Vec<(f32,Vec<Vec<Vec3>>)>=Vec::new();
+    for w in bars.iter().flat_map(|r|r.windows(2)) {
+        let (a,b)=(w[0]-origin,w[1]-origin);let ab=b-a;
+        if ab.dot(u).abs()<0.3 || ab.z.abs()>0.15*ab.dot(u).abs() {continue;}
+        let (mut lo,mut hi)=(0.0f32,1.0f32);
+        for (x,d,l,h) in [(a.dot(u),ab.dot(u),ul.0,ul.1),(a.dot(n),ab.dot(n),wl.0-0.05,wl.1+0.05),(a.z,ab.z,zl.0-0.05,zl.1+0.05)] {
+            if d.abs()<1e-8 {if x<l || x>h {hi=-1.;break;}} else {let (x0,x1)=((l-x)/d,(h-x)/d);lo=lo.max(x0.min(x1));hi=hi.min(x0.max(x1));}
+        }
+        if hi<=lo {continue;}
+        let line=vec![a+ab*lo+origin,a+ab*hi+origin];
+        let z=a.z+ab.z*((ul.0+ul.1)*0.5-a.dot(u))/ab.dot(u);
+        let k=levels.iter().position(|(h,_)|(z-*h).abs()<0.08).unwrap_or_else(||{levels.push((z,Vec::new()));levels.len()-1});
+        levels[k].1.push(line);
+    }
+    levels.retain(|(_,lines)| {
+        let mut spans:Vec<_>=lines.iter().map(|r|{let (a,b)=((r[0]-origin).dot(u),(r[1]-origin).dot(u));(a.min(b),a.max(b))}).collect();
+        spans.sort_by(|a,b|a.0.total_cmp(&b.0));
+        let (mut covered,mut end)=(0.,f32::NEG_INFINITY);
+        for (a,b) in spans {covered+=(b-a.max(end)).max(0.);end=end.max(b);}
+        covered>=BOX_SPAN*(ul.1-ul.0)
+    });
+    if levels.len()<2 {Vec::new()} else {levels.into_iter().flat_map(|(_,r)|r).collect()}
+}
+fn see_through_boxes_with_bars(tris: &mut Vec<Tri>, stairs: &[Tri], visible: &[[[f32; 3]; 3]], centre: Vec2, radius: f32, id: &'static str, out: &mut Replacement, bars:&[Vec<Vec3>], sources:&std::collections::HashMap<u64,String>) -> Option<Vec<[[f32;3];3]>> {
+    let mut park: Vec<usize> = (0..tris.len()).filter(|&i| centroid(&tris[i].v).truncate().distance(centre) <= radius || (id=="lamesa" && spot_panel(&tris[i],sources).is_some())).collect();
     if park.is_empty() { return None; }
     // A tile lists faces in its own order: the decision must not depend on it, or one tile
     // keeps the box and the next removes it (peer review 2026-11-09).
@@ -384,9 +440,18 @@ fn see_through_boxes(tris: &mut Vec<Tri>, stairs: &[Tri], visible: &[[[f32; 3]; 
             })).collect();
             // Both sides wholly of a fence's material. Glass in the volume keeps the box; a
             // wall's top flush under the fence is in the volume's margin and simply stays.
-            if !s.faces.iter().chain(&h.faces).all(|&i| BOX_MATERIALS.contains(&tris[i].material)) { continue; }
-            if faces.iter().any(|&i| tris[i].material == GLASS) { continue; }
-            let faces: Vec<usize> = faces.into_iter().filter(|&i| BOX_MATERIALS.contains(&tris[i].material)).collect();
+            let panel=spot_panel(&tris[s.faces[0]],sources);
+            let spot=id=="lamesa" && panel.is_some() && faces.iter().all(|&i|spot_panel(&tris[i],sources)==panel);
+            if !spot && !s.faces.iter().chain(&h.faces).all(|&i| BOX_MATERIALS.contains(&tris[i].material)) { continue; }
+            if !spot && faces.iter().any(|&i| tris[i].material == GLASS) { continue; }
+            let faces: Vec<usize> = faces.into_iter().filter(|&i| spot || BOX_MATERIALS.contains(&tris[i].material)).collect();
+            if spot {
+                let (lo,hi)=LAMESA_WALL[panel.unwrap()];
+                let vs:Vec<_>=faces.iter().flat_map(|&i|tris[i].v.map(v3)).collect();
+                let a=vs.iter().copied().fold(Vec3::splat(f32::INFINITY),Vec3::min);
+                let b=vs.iter().copied().fold(Vec3::splat(f32::NEG_INFINITY),Vec3::max);
+                if a.distance(v3(lo))>0.01 || b.distance(v3(hi))>0.01 {continue;}
+            }
             if faces.len() < 8 { continue; }
             // The visible faces inside, and how they fill the broad side (4 cm grid).
             const CELL: f32 = 0.04;
@@ -420,13 +485,23 @@ fn see_through_boxes(tris: &mut Vec<Tri>, stairs: &[Tri], visible: &[[[f32; 3]; 
             }
             let filled = fill.iter().filter(|&&b| b).count() as f32 / fill.len() as f32;
             let span = (0..nu).filter(|&x| (0..nz).any(|y| fill[x + y * nu])).count() as f32 / nu as f32;
-            if solid || !(BOX_FILL.0..=BOX_FILL.1).contains(&filled) || span < BOX_SPAN { continue; }
+            let rail_only=filled<BOX_FILL.0 && crate::world::park_rules::enabled("R1");
+            let bar_lines=if rail_only {spanning_bars(bars,origin,u,s.n,ul,wl,zl)} else {Vec::new()};
+            let new_rule=rail_only && !bar_lines.is_empty();
+            if solid || (spot && !new_rule) || (!new_rule && (!(BOX_FILL.0..=BOX_FILL.1).contains(&filled) || span<BOX_SPAN)) {continue;}
+            // Universal R1 keeps every removed face's centroid inside the park.
+            if new_rule && !spot && faces.iter().any(|&i|centroid(&tris[i].v).truncate().distance(centre)>radius) {continue;}
             if faces.iter().any(|&i| samples(&tris[i].v).into_iter().any(|p| stair_grid.at(p).iter().any(|&k| distance(p, &stairs[k as usize].v) <= MATCH))) { continue; }
             if probe {
                 let m = (u * (ul.0 + ul.1) * 0.5 + s.n * (wl.0 + wl.1) * 0.5 + origin).with_z((zl.0 + zl.1) * 0.5);
                 eprintln!("BOX {id} at {:.2} {:.2} {:.2} len {len:.2} thick {:.2} height {height:.2} faces {} material {} visible {} filled {filled:.2} span {span:.2}", m.x, m.y, m.z, gap.1, faces.len(), tris[s.faces[0]].material, inside.len());
             }
             let (material, key) = (tris[s.faces[0]].material, svwc::surfaces::key(&tris[s.faces[0]].v));
+            if new_rule {
+                let bodies=crate::visrails::boxes(&bar_lines);
+                for v in bodies {let v=v.map(|p|p.to_array());out.bar_bodies.insert(svwc::surfaces::key(&v));out.added.push(Tri{v,material});out.surface_from.push(key);out.cut.push(false);out.park.push(id);}
+                crate::world::park_rules::record(if spot {"R1-spot"} else {"R1"},Vec::new(),faces.iter().map(|&i|tris[i].v).collect(),1,spot);
+            }
             for k in inside {
                 taken[k] = true;
                 out.added.push(Tri { v: visible[k], material });
@@ -2700,4 +2775,46 @@ mod tests {
             .collect();
         assert!(sloped_cut.is_empty(), "sloped cut shard inside owned visible floor must drop: {sloped_cut:?}");
     }
+    #[test]
+    fn r1_three_bar_levels_replace_the_box_with_three_thin_bodies() {
+        let (x,y)=(-1370.,-1400.);
+        let mut gta=closed_box(x,x+6.,y,y+0.18,1.,2.2,69);
+        let bars:Vec<_>=[1.3,1.7,2.2].into_iter().map(|z|vec![Vec3::new(x,y+0.09,z),Vec3::new(x+6.,y+0.09,z)]).collect();
+        let mut out=Replacement::default();
+        see_through_boxes_with_bars(&mut gta,&[],&[],AT,60.,"vespucci",&mut out,&bars,&Default::default());
+        assert!(gta.is_empty());assert_eq!(out.removed.len(),12);assert_eq!(out.added.len(),36);assert_eq!(out.bar_bodies.len(),36);
+        assert!(out.added.iter().flat_map(|t|t.v).any(|p|(p[2]-2.2).abs()<1e-5),"top bar retained at the grind height");
+        lengths_match(&out);
+    }
+    #[test]
+    fn r1_one_post_cannot_replace_a_box() {
+        let (x,y)=(-1370.,-1400.);let mut gta=closed_box(x,x+6.,y,y+0.18,1.,2.2,69);
+        let bars=vec![vec![Vec3::new(x+1.,y+0.09,1.),Vec3::new(x+1.,y+0.09,2.2)]];
+        let mut out=Replacement::default();see_through_boxes_with_bars(&mut gta,&[],&[],AT,60.,"vespucci",&mut out,&bars,&Default::default());
+        assert_eq!(gta.len(),12);assert!(out.added.is_empty());
+    }
+    #[test]
+    fn r1_lamesa_exception_requires_exact_source_bounds_bars_and_no_pane() {
+        let (lo,hi)=LAMESA_WALL[0];
+        let make=||closed_box(lo[0],hi[0],lo[1],hi[1],lo[2],hi[2],55);
+        let bars:Vec<_>=[27.27,27.5,27.8].into_iter().map(|z|vec![Vec3::new(lo[0],-1200.55,z),Vec3::new(hi[0],-1200.55,z)]).collect();
+        let sources=make().iter().map(|t|(svwc::surfaces::key(&t.v),"id2_10_0.ybn".to_string())).collect();
+        let run=|gta:&mut Vec<Tri>,visible:&[[[f32;3];3]],bars:&[Vec<Vec3>],sources:&std::collections::HashMap<u64,String>| {
+            let mut out=Replacement::default();see_through_boxes_with_bars(gta,&[],visible,Vec2::new(718.,-1231.),30.,"lamesa",&mut out,bars,sources);out
+        };
+        let mut gta=make();let out=run(&mut gta,&[],&bars,&sources);assert!(gta.is_empty());assert_eq!(out.removed.len(),12);
+        let mut gta=make();run(&mut gta,&[],&bars,&Default::default());assert_eq!(gta.len(),12,"unknown origin");
+        let mut gta=make();run(&mut gta,&[],&bars[..1],&sources);assert_eq!(gta.len(),12,"one bar only");
+        let pane=[[[lo[0],-1200.55,26.7],[hi[0],-1200.55,26.7],[hi[0],-1200.55,27.7]]];
+        let mut gta=make();run(&mut gta,&pane,&bars,&sources);assert_eq!(gta.len(),12,"visible glass pane");
+    }
+    #[test]
+    fn r1_another_glass_box_stays_even_with_three_bar_levels_and_same_source() {
+        let (x,y)=(-1370.,-1400.);let mut gta=closed_box(x,x+6.,y,y+0.18,1.,2.2,55);
+        let bars:Vec<_>=[1.3,1.7,2.2].into_iter().map(|z|vec![Vec3::new(x,y+0.09,z),Vec3::new(x+6.,y+0.09,z)]).collect();
+        let sources=gta.iter().map(|t|(svwc::surfaces::key(&t.v),"id2_10_0.ybn".to_string())).collect();
+        let mut out=Replacement::default();see_through_boxes_with_bars(&mut gta,&[],&[],AT,60.,"vespucci",&mut out,&bars,&sources);
+        assert_eq!(gta.len(),12);assert!(out.removed.is_empty());
+    }
+
 }
