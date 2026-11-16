@@ -45,4 +45,10 @@ struct ApplyTime {
     unsigned calls;
 };
 ApplyTime TakeApplyTime();
+
+// Multi-ped object-space pose overrides (used by replay for NPC animations).
+bool EnsureJobsInstalled(void (*log)(const char*));
+void SetExtraPedPose(std::uintptr_t skeleton, const float* objectMatrices, int count);
+void ClearExtraPedPose(std::uintptr_t skeleton);
+void ClearExtraPedPoses();
 } // namespace posehook

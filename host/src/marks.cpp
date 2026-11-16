@@ -1,35 +1,19 @@
 #include "marks.h"
+#include "text_parse.h"
 
 #include <windows.h>
 
-#include <cmath>
 #include <cstdio>
-#include <cstdlib>
 #include <fstream>
 #include <sstream>
 
 namespace marks {
 namespace {
 
-std::vector<std::string> Split(const std::string& line) {
-    std::vector<std::string> out;
-    size_t start = 0;
-    for (size_t i = 0; i <= line.size(); ++i) {
-        if (i == line.size() || line[i] == '\t') {
-            out.push_back(line.substr(start, i - start));
-            start = i + 1;
-        }
-    }
-    return out;
-}
+using text_parse::Number;
 
-bool Number(const std::string& text, float& out) {
-    if (text.empty()) return false;
-    char* end = nullptr;
-    const float v = std::strtof(text.c_str(), &end);
-    if (end != text.c_str() + text.size() || !std::isfinite(v)) return false;
-    out = v;
-    return true;
+std::vector<std::string> Split(const std::string& line) {
+    return text_parse::Split(line, '\t');
 }
 
 std::string Clean(std::string s) {

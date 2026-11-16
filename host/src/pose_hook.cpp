@@ -69,6 +69,24 @@ struct PoseBuffer {
 PoseBuffer g_buffers[3];
 std::atomic<int> g_latest{-1};
 
+constexpr int kMaxExtraPeds = 16;
+struct ExtraPedSlot {
+    std::atomic_flag lock = ATOMIC_FLAG_INIT;
+    std::atomic<std::uintptr_t> skeleton{0};
+    std::atomic<std::uintptr_t> locals{0};
+    PoseBuffer buffers[3];
+    std::atomic<int> latest{-1};
+};
+ExtraPedSlot g_extraPeds[kMaxExtraPeds];
+
+struct SlotLock {
+    std::atomic_flag& flag;
+    explicit SlotLock(std::atomic_flag& f) : flag(f) {
+        while (flag.test_and_set(std::memory_order_acquire)) {}
+    }
+    ~SlotLock() { flag.clear(std::memory_order_release); }
+};
+
 // Hand-off fade: direction +1 in (GTA -> Skate), -1 out (Skate -> GTA).
 std::atomic<int> g_fadeDir{0}, g_fadeMs{0};
 std::atomic<ULONGLONG> g_fadeStart{0};
@@ -230,14 +248,47 @@ void TimedApply(std::uintptr_t s, bool fresh, int where) {
     g_applyCalls.fetch_add(1, std::memory_order_relaxed);
 }
 
+void ApplyExtra(std::uintptr_t s, const PoseBuffer& buffer) {
+    const std::uintptr_t data = *reinterpret_cast<const std::uintptr_t*>(s + 0x00);
+    const std::uintptr_t locals = *reinterpret_cast<const std::uintptr_t*>(s + 0x10);
+    const std::uintptr_t objects = *reinterpret_cast<const std::uintptr_t*>(s + 0x18);
+    const int count = *reinterpret_cast<const int*>(s + 0x20);
+    if (!data || !locals || !objects || count <= 0 || count > kMaxBones || buffer.count != count) return;
+    const auto* parents = *reinterpret_cast<const std::int16_t* const*>(data + 0x38);
+    if (!parents) return;
+    const M* object = reinterpret_cast<const M*>(buffer.bones);
+    for (int i = 0; i < count; ++i) {
+        StoreXyz(objects + 64 * i, object[i]);
+        StoreXyz(locals + 64 * i, LocalOf(object, parents, i, count));
+    }
+}
+
 template <int Index>
 std::uintptr_t __fastcall JobWrap(std::uintptr_t params, std::uintptr_t b, std::uintptr_t c, std::uintptr_t d) {
     JobDetour& job = g_jobs[Index];
     const std::uintptr_t result = reinterpret_cast<JobFn>(job.trampoline)(params, b, c, d);
+    if (!params) return result;
+    const std::uintptr_t jobLocals = *reinterpret_cast<const std::uintptr_t*>(params + job.localsOffset);
+    if (!jobLocals) return result;
     const std::uintptr_t s = g_skeleton.load(std::memory_order_acquire);
-    if (s && params) {
+    if (s) {
         const std::uintptr_t locals = *reinterpret_cast<const std::uintptr_t*>(s + 0x10);
-        if (locals && *reinterpret_cast<const std::uintptr_t*>(params + job.localsOffset) == locals) TimedApply(s, Index == 0, 1);
+        if (locals == jobLocals) {
+            TimedApply(s, Index == 0, 1);
+            return result;
+        }
+    }
+    for (int i = 0; i < kMaxExtraPeds; ++i) {
+        ExtraPedSlot& slot = g_extraPeds[i];
+        if (slot.locals.load(std::memory_order_acquire) != jobLocals) continue;
+        SlotLock guard(slot.lock);
+        if (slot.locals.load(std::memory_order_relaxed) != jobLocals) continue;
+        const std::uintptr_t es = slot.skeleton.load(std::memory_order_relaxed);
+        const int latest = slot.latest.load(std::memory_order_relaxed);
+        if (es && latest >= 0 && latest < 3) {
+            ApplyExtra(es, slot.buffers[latest]);
+        }
+        break;
     }
     return result;
 }
@@ -460,5 +511,64 @@ void FadeIn(int ms) {
 }
 
 bool FadeOutDone() { return g_fadeDir.load() < 0 && (g_outDone.load() || SkateWeight() <= 0.0f); }
+
+bool EnsureJobsInstalled(void (*log)(const char*)) {
+    static void (*const noop)(const char*) = [](const char*) {};
+    return InstallJobs(log ? log : noop);
+}
+
+void SetExtraPedPose(std::uintptr_t skeleton, const float* objectMatrices, int count) {
+    if (!skeleton || !objectMatrices || count <= 0 || count > kMaxBones) return;
+    const std::uintptr_t locals = *reinterpret_cast<const std::uintptr_t*>(skeleton + 0x10);
+    const std::uintptr_t objects = *reinterpret_cast<const std::uintptr_t*>(skeleton + 0x18);
+    const int skelCount = *reinterpret_cast<const int*>(skeleton + 0x20);
+    if (!locals || !objects || skelCount != count) return;
+
+    int freeIdx = -1;
+    int matchIdx = -1;
+    for (int i = 0; i < kMaxExtraPeds; ++i) {
+        const std::uintptr_t curSkel = g_extraPeds[i].skeleton.load(std::memory_order_relaxed);
+        if (curSkel == skeleton) { matchIdx = i; break; }
+        if (curSkel == 0 && freeIdx < 0) freeIdx = i;
+    }
+    const int idx = (matchIdx >= 0) ? matchIdx : freeIdx;
+    if (idx < 0) return;
+
+    ExtraPedSlot& slot = g_extraPeds[idx];
+    SlotLock guard(slot.lock);
+    const int curLatest = slot.latest.load(std::memory_order_relaxed);
+    const int next = (curLatest + 1) % 3;
+    std::memcpy(slot.buffers[next].bones, objectMatrices, sizeof(float) * 16 * static_cast<std::size_t>(count));
+    slot.buffers[next].count = count;
+    slot.latest.store(next, std::memory_order_release);
+    slot.skeleton.store(skeleton, std::memory_order_release);
+    slot.locals.store(locals, std::memory_order_release);
+
+    // Also write immediately on the script thread in case GTA's anim job doesn't run at timescale 0.
+    ApplyExtra(skeleton, slot.buffers[next]);
+}
+
+void ClearExtraPedPose(std::uintptr_t skeleton) {
+    if (!skeleton) return;
+    for (int i = 0; i < kMaxExtraPeds; ++i) {
+        if (g_extraPeds[i].skeleton.load(std::memory_order_acquire) != skeleton) continue;
+        SlotLock guard(g_extraPeds[i].lock);
+        if (g_extraPeds[i].skeleton.load(std::memory_order_relaxed) == skeleton) {
+            g_extraPeds[i].locals.store(0, std::memory_order_release);
+            g_extraPeds[i].skeleton.store(0, std::memory_order_release);
+            g_extraPeds[i].latest.store(-1, std::memory_order_release);
+        }
+        break;
+    }
+}
+
+void ClearExtraPedPoses() {
+    for (int i = 0; i < kMaxExtraPeds; ++i) {
+        SlotLock guard(g_extraPeds[i].lock);
+        g_extraPeds[i].locals.store(0, std::memory_order_release);
+        g_extraPeds[i].skeleton.store(0, std::memory_order_release);
+        g_extraPeds[i].latest.store(-1, std::memory_order_release);
+    }
+}
 
 } // namespace posehook

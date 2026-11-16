@@ -18,7 +18,7 @@ bool Enabled();
 // (design 2026-11-09-replay-look-sound).
 void ConfigureLook(bool sound, float soundGainDb, bool fisheye, float filterStrength);
 // INI: ReplayVehicles, ReplayPeds (world actors in replay).
-void ConfigureActors(bool vehicles, bool peds);
+void ConfigureActors(bool vehicles, bool peds, bool objects = true);
 // INI: ReplayHudStyle (GTA clean text vs Skate 3 controller binds).
 void ConfigureHudStyle(HudStyle style);
 HudStyle GetHudStyle();

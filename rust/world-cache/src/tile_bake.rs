@@ -11,11 +11,12 @@ use rage_formats::{
     resource::{ResReader, SYSTEM_BASE, prepare_rsc7, u16_le, u32_le, u64_le, vec3_le},
 };
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque},
     error::Error,
     fs,
     io::{BufWriter, Write},
     path::{Path, PathBuf},
+    sync::{Arc, Mutex},
     time::Instant,
 };
 use svwc::bounds::{self, Place};
@@ -69,6 +70,25 @@ impl Origins {
     }
 }
 
+/// Pre-parsed spool record cached in memory across overlapping tile reads.
+#[derive(Clone, Copy)]
+struct RawRecord {
+    id: u64,
+    flags: u32,
+    origin: u32,
+    tri: svwc::Tri,
+}
+
+const RAW_CACHE_CAP: usize = 512;
+const RAW_CACHE_MAX_RECORDS: usize = 2_000_000;
+
+#[derive(Default)]
+struct RawCellCache {
+    map: HashMap<tiles::Cell, Arc<Vec<RawRecord>>>,
+    order: VecDeque<tiles::Cell>,
+    total_records: usize,
+}
+
 /// Disk-backed raw collision grid. RAM holds one decoded resource / one tile's
 /// support, independent of the total selected world area. Spools are temporary.
 struct Spool {
@@ -77,6 +97,7 @@ struct Spool {
     /// Source file names (file name only), indexed by the spool records.
     names: Vec<String>,
     index: BTreeMap<String, u32>,
+    cache: Mutex<RawCellCache>,
 }
 
 /// Record: id u64, flags u32, origin u32, three vertices.
@@ -92,7 +113,13 @@ impl Spool {
                 fs::remove_file(p)?;
             }
         }
-        Ok(Self { dir, next: 0, names: Vec::new(), index: BTreeMap::new() })
+        Ok(Self {
+            dir,
+            next: 0,
+            names: Vec::new(),
+            index: BTreeMap::new(),
+            cache: Mutex::new(RawCellCache::default()),
+        })
     }
     fn push(
         &mut self,
@@ -123,30 +150,30 @@ impl Spool {
             let max = v[0].max(v[1]).max(v[2]);
             let a = tiles::cell(min.to_array(), size);
             let b = tiles::cell(max.to_array(), size);
-            let mut record = Vec::with_capacity(RECORD);
-            record.extend(self.next.to_le_bytes());
+            let mut record = [0u8; RECORD];
+            record[..8].copy_from_slice(&self.next.to_le_bytes());
             self.next += 1;
-            record.extend(
-                (t.material as u32
-                    | if i == usize::MAX {
-                        1 << 16
-                    } else if data.stairs.get(i).copied().unwrap_or(false) {
-                        1 << 17
-                    } else {
-                        0
-                    })
-                .to_le_bytes(),
-            );
-            record.extend(origin.to_le_bytes());
+            let flags = t.material as u32
+                | if i == usize::MAX {
+                    1 << 16
+                } else if data.stairs.get(i).copied().unwrap_or(false) {
+                    1 << 17
+                } else {
+                    0
+                };
+            record[8..12].copy_from_slice(&flags.to_le_bytes());
+            record[12..16].copy_from_slice(&origin.to_le_bytes());
+            let mut off = 16;
             for p in t.v {
                 for n in p {
-                    record.extend(n.to_le_bytes());
+                    record[off..off + 4].copy_from_slice(&n.to_le_bytes());
+                    off += 4;
                 }
             }
             for x in a.0..=b.0 {
                 for y in a.1..=b.1 {
                     if support.is_empty() || support.contains(&(x, y)) {
-                        buffers.entry((x, y)).or_default().extend(&record);
+                        buffers.entry((x, y)).or_default().extend_from_slice(&record);
                     }
                 }
             }
@@ -158,51 +185,88 @@ impl Spool {
                 .append(true)
                 .open(self.dir.join(format!("{}_{}.raw", c.0, c.1)))?
                 .write_all(&b)?;
+            if let Ok(mut cache) = self.cache.lock() {
+                if let Some(old) = cache.map.remove(&c) {
+                    cache.total_records = cache.total_records.saturating_sub(old.len());
+                }
+            }
         }
         *data = Collision::default();
         Ok(())
     }
+    fn load_cell(&self, c: tiles::Cell) -> std::io::Result<Option<Arc<Vec<RawRecord>>>> {
+        if let Some(cached) = self.cache.lock().unwrap().map.get(&c).cloned() {
+            return Ok(Some(cached));
+        }
+        let p = self.dir.join(format!("{}_{}.raw", c.0, c.1));
+        let bytes = match fs::read(p) {
+            Ok(b) => b,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(e) => return Err(e),
+        };
+        let mut records = Vec::with_capacity(bytes.len() / RECORD);
+        for r in bytes.chunks_exact(RECORD) {
+            let id = u64::from_le_bytes(r[..8].try_into().unwrap());
+            let flags = u32::from_le_bytes(r[8..12].try_into().unwrap());
+            let origin = u32::from_le_bytes(r[12..16].try_into().unwrap());
+            let tri = svwc::Tri {
+                material: (flags & 255) as u8,
+                v: std::array::from_fn(|i| {
+                    std::array::from_fn(|k| {
+                        f32::from_le_bytes(
+                            r[16 + (i * 3 + k) * 4..20 + (i * 3 + k) * 4]
+                                .try_into()
+                                .unwrap(),
+                        )
+                    })
+                }),
+            };
+            records.push(RawRecord { id, flags, origin, tri });
+        }
+        let arc = Arc::new(records);
+        let mut cache = self.cache.lock().unwrap();
+        if !cache.map.contains_key(&c) {
+            let new_len = arc.len();
+            while !cache.order.is_empty()
+                && (cache.order.len() >= RAW_CACHE_CAP
+                    || cache.total_records + new_len > RAW_CACHE_MAX_RECORDS)
+            {
+                if let Some(old) = cache.order.pop_front() {
+                    if let Some(removed) = cache.map.remove(&old) {
+                        cache.total_records = cache.total_records.saturating_sub(removed.len());
+                    }
+                }
+            }
+            cache.total_records += new_len;
+            cache.order.push_back(c);
+            cache.map.insert(c, Arc::clone(&arc));
+        }
+        Ok(Some(arc))
+    }
     fn around(&self, at: Vec3, half: f32, size: f32) -> std::io::Result<Collision> {
-        let mut seen = BTreeSet::new();
+        let mut seen = HashSet::new();
         let mut out = Collision::default();
         for c in tiles::cells([at.x, at.y], half, size) {
-            let p = self.dir.join(format!("{}_{}.raw", c.0, c.1));
-            let bytes = match fs::read(p) {
-                Ok(b) => b,
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
-                Err(e) => return Err(e),
+            let Some(records) = self.load_cell(c)? else {
+                continue;
             };
-            for r in bytes.chunks_exact(RECORD) {
-                let id = u64::from_le_bytes(r[..8].try_into().unwrap());
-                if !seen.insert(id) {
+            for &rec in records.iter() {
+                if !seen.insert(rec.id) {
                     continue;
                 }
-                let flags = u32::from_le_bytes(r[8..12].try_into().unwrap());
-                let origin = u32::from_le_bytes(r[12..16].try_into().unwrap());
-                let t = svwc::Tri {
-                    material: (flags & 255) as u8,
-                    v: std::array::from_fn(|i| {
-                        std::array::from_fn(|k| {
-                            f32::from_le_bytes(
-                                r[16 + (i * 3 + k) * 4..20 + (i * 3 + k) * 4]
-                                    .try_into()
-                                    .unwrap(),
-                            )
-                        })
-                    }),
-                };
+                let t = rec.tri;
                 if !(0..2).all(|k| {
                     t.v.iter().any(|p| p[k] >= at[k] - half)
                         && t.v.iter().any(|p| p[k] <= at[k] + half)
                 }) {
                     continue;
                 }
-                if flags & (1 << 16) != 0 {
+                if rec.flags & (1 << 16) != 0 {
                     out.spare.push(t);
                 } else {
                     out.tris.push(t);
-                    out.stairs.push(flags & (1 << 17) != 0);
-                    out.origins.push(origin);
+                    out.stairs.push(rec.flags & (1 << 17) != 0);
+                    out.origins.push(rec.origin);
                 }
             }
         }
@@ -1279,7 +1343,26 @@ fn bake(
 ", source.lines().next().unwrap_or(""));
     let prior = fs::read_to_string(out.join("visbars-report.txt")).unwrap_or_default();
     let prior_rows: Vec<String> = if prior.starts_with(&report_header) { prior.lines().skip(2).map(str::to_owned).collect() } else { Vec::new() };
+    let live_dir: Option<PathBuf> = std::env::var_os("SKATEV_BAKE_LIVE_DIR")
+        .map(PathBuf::from)
+        .filter(|p| p.is_dir());
+    let write_progress = |done: usize, total: usize, started: Instant| {
+        if let Some(ref live) = live_dir {
+            let elapsed = started.elapsed().as_secs_f64();
+            let eta_secs = if done > 0 && elapsed > 0.5 && total >= done {
+                ((total - done) as f64 * (elapsed / done as f64)).round() as u64
+            } else {
+                0
+            };
+            let dst = live.join("bake-progress.txt");
+            let tmp = live.join("bake-progress.txt.tmp");
+            if fs::write(&tmp, format!("{done} {total} {eta_secs} {}\n", out.display())).is_ok() {
+                let _ = fs::rename(&tmp, &dst);
+            }
+        }
+    };
     let bar_reports = std::sync::Mutex::new(BTreeMap::<tiles::Cell, Vec<String>>::new());
+    let is_ymap: Vec<bool> = spool.names.iter().map(|n| n.to_ascii_lowercase().ends_with(".ymap")).collect();
     let build = |c: tiles::Cell, lookups: &mut Lookups| -> Result<(Tile, Validation), Box<dyn Error + Send + Sync>> {
         let mut validation = Validation::default();
         let at = Vec3::new((c.0 as f32 + 0.5) * size, (c.1 as f32 + 0.5) * size, 0.);
@@ -1289,7 +1372,7 @@ fn bake(
         {
             let all: Vec<[Vec3; 3]> = data.tris.iter().map(|t| t.v.map(Vec3::from_array)).collect();
             let rails = SkateVRuntime::visrails::rails_in([at.x, at.y], size * 0.5 + margin, &all);
-            let is_prop: Vec<bool> = data.origins.iter().map(|&o| spool.names[o as usize].to_ascii_lowercase().ends_with(".ymap")).collect();
+            let is_prop: Vec<bool> = data.origins.iter().map(|&o| is_ymap[o as usize]).collect();
             lower_prop_bars(&mut data.tris, &is_prop, &rails);
         }
         // Face origins by vertex key, before the cleanup reorders and drops.
@@ -1298,7 +1381,7 @@ fn bake(
         // Baked static props (origin: their ymap) are exact authored surfaces:
         // the high-res park pass must not cut or replace them.
         let exact: std::collections::HashSet<u64> = data.tris.iter().zip(&data.origins)
-            .filter(|(_, o)| spool.names[**o as usize].to_ascii_lowercase().ends_with(".ymap"))
+            .filter(|(_, o)| is_ymap[**o as usize])
             .map(|(t, _)| svwc::surfaces::key(&t.v)).collect();
         let mut census = SkateVRuntime::live::Census::default();
         // Both stair variants: the game's settings pick (SkateVRuntime::live::shown).
@@ -1484,6 +1567,13 @@ fn bake(
             return Err(format!("tile {c:?}: read-back mismatch").into());
         }
         fs::rename(&temp, tiles::path(&out, c))?;
+        if let Some(ref live) = live_dir {
+            let live_dst = tiles::path(live, c);
+            let live_tmp = live_dst.with_extension("svwt.tmp");
+            if fs::copy(tiles::path(&out, c), &live_tmp).is_ok() {
+                let _ = fs::rename(&live_tmp, &live_dst);
+            }
+        }
         validation.check(&saved, at, &local_tris);
         Ok((tile, validation))
     };
@@ -1523,9 +1613,26 @@ fn bake(
     }
 
     if !tasks.is_empty() {
+        // Optional priority cell list (e.g. skateparks / start area) bakes first,
+        // while row-major spatial order keeps neighboring tiles hitting RawCellCache.
+        let priority: HashSet<tiles::Cell> = std::env::var_os("SKATEV_BAKE_PRIORITY_FILE")
+            .and_then(|p| fs::read_to_string(p).ok())
+            .map(|text| {
+                text.lines()
+                    .filter_map(|line| {
+                        let line = line.split('#').next()?.trim();
+                        let mut parts = line.split_whitespace();
+                        let x: i32 = parts.next()?.parse().ok()?;
+                        let y: i32 = parts.next()?.parse().ok()?;
+                        Some((x, y))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        tasks.sort_unstable_by_key(|&(x, y)| (!priority.contains(&(x, y)), y, x));
         let task_idx = std::sync::atomic::AtomicUsize::new(0);
         let busy = std::sync::atomic::AtomicUsize::new(0);
-        let (tx, rx) = std::sync::mpsc::channel();
+        let (tx, rx) = std::sync::mpsc::sync_channel(64);
         let build_ref = &build;
         let tasks_ref = &tasks;
 
@@ -1556,6 +1663,11 @@ fn bake(
             }
             drop(tx);
 
+            let total_tasks = tasks.len();
+            let mut done_tasks = 0usize;
+            let bake_started = Instant::now();
+            let mut last_progress = Instant::now();
+            write_progress(resumed, resumed + total_tasks, bake_started);
             for (c, res) in rx {
                 let (tile, local_validation) = match res {
                     Ok(pair) => pair,
@@ -1565,11 +1677,19 @@ fn bake(
                 account(&tile, &mut obj, &mut vertex, &mut no_grind, &mut length)?;
                 triangles += tile.triangles.len();
                 rails += tile.rails.len();
+                done_tasks += 1;
+                if last_progress.elapsed().as_secs() >= 5 || done_tasks == total_tasks {
+                    write_progress(resumed + done_tasks, resumed + total_tasks, bake_started);
+                    last_progress = Instant::now();
+                }
                 eprintln!(
                     "tile {c:?}: {} triangles, {} rail segments",
                     tile.triangles.len(),
                     tile.rails.len()
                 );
+            }
+            if let Some(ref live) = live_dir {
+                let _ = fs::remove_file(live.join("bake-progress.txt"));
             }
             Ok::<(), Box<dyn Error>>(())
         })?;

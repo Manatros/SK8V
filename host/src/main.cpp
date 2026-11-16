@@ -54,6 +54,7 @@
 #include "collision_view.h"
 #include "interaction_menu_logic.h"
 #include "tutorial_teleport.h"
+#include "swap_place.h"
 #include "tutorial_missions.h"
 #include "ped_speech.h"
 #include "runtime_bridge.h"
@@ -1252,6 +1253,9 @@ struct Session {
     bool placedValid = false;
     SvVec3 entryAt{};              // where the last entry put the skater
     DWORD entrySettleUntil = 0;    // until then Skate's skater must be near entryAt
+    bool entrySettled = true;      // false from an entry until the skater arrived at entryAt (or timed out)
+    float placedAtLeave[3]{};      // the last ped position Skate placed, as Leave began
+    bool placedValidAtLeave = false;
     bool keepPlace = false;     // Leave: the ped stays where it is
     bool teleportWait = false;  // waiting for the collision at a teleport target
     // GTA delegation (swim / climb): which action, since when, settled since.
@@ -1356,6 +1360,47 @@ void Notify(Session& s, const std::string& text, DWORD ms = 4000) {
     s.message = text;
     s.messageUntil = GetTickCount() + ms;
     Logf("SkateV Legacy: %s", text.c_str());
+}
+
+void TickBackgroundBakeNotice(Session& s, const std::string& worldCache, const Ped player) {
+    static DWORD nextCheck = 0;
+    static DWORD nextShow = 0;
+    static bool wasRunning = false;
+    const DWORD now = GetTickCount();
+    if (now < nextCheck) return;
+    nextCheck = now + 5000;
+    if (worldCache.empty()) return;
+    const std::string path = worldCache + "\\tiles\\bake-progress.txt";
+    std::ifstream in(path);
+    std::size_t done = 0, total = 0;
+    unsigned long long eta = 0;
+    if (in >> done >> total >> eta && total > 0) {
+        std::string stagedDir;
+        std::getline(in >> std::ws, stagedDir);
+        wasRunning = true;
+        if (now >= nextShow) {
+            nextShow = now + 45000;
+            const unsigned pct = static_cast<unsigned>((done * 100) / total);
+            std::string etaText = eta >= 60
+                ? std::to_string((eta + 30) / 60) + " min left"
+                : (eta > 0 ? std::to_string(eta) + "s left" : "calculating ETA");
+            std::string areaStatus;
+            if (!stagedDir.empty() && player) {
+                const Vector3 pos = Call<Vector3>(gta::GET_ENTITY_COORDS, player, 1);
+                const int cx = static_cast<int>(std::floor(pos.x / 64.0f));
+                const int cy = static_cast<int>(std::floor(pos.y / 64.0f));
+                const std::string tilePath = stagedDir + "\\" + std::to_string(cx) + "_" + std::to_string(cy) + ".svwt";
+                std::error_code ec;
+                const bool hereReady = std::filesystem::exists(std::filesystem::u8path(tilePath), ec);
+                areaStatus = hereReady ? " | Area here: NEW BAKE READY" : " | Area here: still baking";
+            }
+            Notify(s, "World bake: " + std::to_string(done) + "/" + std::to_string(total) +
+                      " (" + std::to_string(pct) + "%, " + etaText + ")" + areaStatus, 4500);
+        }
+    } else if (wasRunning) {
+        wasRunning = false;
+        Notify(s, "World bake complete! All tiles active.", 5000);
+    }
 }
 
 // SkateMods: right after the game loads, GTA and other mods can stall for a
@@ -1626,6 +1671,8 @@ void Leave(Session& s, const Config& cfg, const char* why, bool voluntary) {
     const bool wasSkating = s.state == LifeState::Skating;
     SetState(s, LifeState::Leaving, why);
     s.wipingOut = false, s.lineAt = 0; // no get-up line on the next entry
+    s.placedAtLeave[0] = s.placed[0], s.placedAtLeave[1] = s.placed[1], s.placedAtLeave[2] = s.placed[2];
+    s.placedValidAtLeave = s.placedValid;
     s.placedValid = false;
     s.armed = false;
     posehook::FadeOut(kHandOffMs);
@@ -1638,7 +1685,7 @@ void Leave(Session& s, const Config& cfg, const char* why, bool voluntary) {
     if (s.ped && Call<BOOL>(gta::DOES_ENTITY_EXIST, s.ped)) SetGtaPosing(s.ped, true);
     // Final Skate pose before Skate stops stepping.
     SvOutput o{};
-    if (g_runtime.Output(o) && o.tick != 0) s.last = o;
+    if (g_runtime.Output(o) && o.tick != 0 && s.entrySettled) s.last = o; // an unsettled entry's output may be stale
     g_runtime.Deactivate();
     // GTA's camera takes over where Skate's camera looks, easing in; Skate's
     // camera stays until the ease is over.
@@ -1659,6 +1706,13 @@ void Leave(Session& s, const Config& cfg, const char* why, bool voluntary) {
             // Skate's root is at ground contact (measured: biped root - ground
             // = 0.00 m); the GTA ped origin sits PedZOffset above it.
             Call<void>(gta::SET_ENTITY_COORDS_NO_OFFSET, s.ped, p.x, p.y, p.z + cfg.pedZOffset, 0, 0, 0);
+            if (s.placedValidAtLeave) {
+                const float lx = p.x - s.placedAtLeave[0], ly = p.y - s.placedAtLeave[1], lz = p.z + cfg.pedZOffset - s.placedAtLeave[2];
+                const float jump = std::sqrt(lx * lx + ly * ly + lz * lz);
+                if (jump > 1.0f)
+                    Logf("SkateV Legacy: leave target is %.1f m from the last placed ped position (output tick %llu)", jump,
+                         static_cast<unsigned long long>(s.last.tick));
+            }
             // On foot the feet give the facing; on the board they point
             // sideways, so the board's rolling direction (s.facing) does.
             const bool biped = std::string_view(s.last.state_utf8).rfind("Biped", 0) == 0;
@@ -1767,8 +1821,20 @@ bool CheckDelegation(Session& s, const Config& cfg, const SvPad& pad) {
 // Ground contact under the player (2 in above ground, like the mashup host).
 SvVec3 GroundUnder(Ped ped) {
     const Vector3 pos = Call<Vector3>(gta::GET_ENTITY_COORDS, ped, 1);
-    float ground = pos.z - 1.0f;
-    Call<BOOL>(gta::GET_GROUND_Z_FOR_3D_COORD, pos.x, pos.y, pos.z + 0.5f, &ground, 0, 0);
+    float probed = pos.z - 1.0f;
+    const bool ok = Call<BOOL>(gta::GET_GROUND_Z_FOR_3D_COORD, pos.x, pos.y, pos.z + 0.5f, &probed, 0, 0) != 0;
+    // GTA's probe fails or answers sea level where it has no collision (offshore tutorial islands,
+    // unstreamed areas; 2026-11-15 entry at z 0.05). swapplace::EntryGround keeps the ped's own
+    // height then and lets Skate's collision settle the skater.
+    const float ground = swapplace::EntryGround(ok, probed, pos.z);
+    if (!ok || ground != probed) {
+        static DWORD lastLog = 0;
+        const DWORD now = GetTickCount();
+        if (now - lastLog > 2000) {
+            lastLog = now;
+            Logf("SkateV Legacy: ground probe ok=%d groundZ=%.2f pedZ=%.2f -> using %.2f", ok ? 1 : 0, probed, pos.z, ground);
+        }
+    }
     return {pos.x, pos.y, ground};
 }
 
@@ -1922,7 +1988,7 @@ void TryEnter(Session& s, const Config& cfg, bool strict) {
     SendCharacter(s, g_config);
     SetState(s, LifeState::Entering, strict ? "board action" : "menu");
     Logf("SkateV Legacy: entering off the board at %.2f %.2f %.2f heading %.1f", spawn.position.x, spawn.position.y, spawn.position.z, spawn.heading_degrees);
-    s.entryAt = spawn.position, s.entrySettleUntil = GetTickCount() + 1500;
+    s.entryAt = spawn.position, s.entrySettleUntil = GetTickCount() + 3000, s.entrySettled = false;
 }
 
 // Tells the runtime which GTA character wears Skate's pose: the player's own
@@ -3116,9 +3182,9 @@ void UpdateActive(Session& s, const Config& cfg, const SvPad& pad) {
         pedcollision::Tick(s.ped, nullptr, 0);
         return;
     }
+    const SvOutput lastBefore = s.last; // restored while the entry settle holds (stale skater, below)
     s.last = o;
     Lap(kPartStep);
-
     {
         // The skater's own voice, in GTA's pattern for a fall: the falling
         // scream on a long drop, pain on each hard hit (ImpactGrunts), then a
@@ -3158,10 +3224,27 @@ void UpdateActive(Session& s, const Config& cfg, const SvPad& pad) {
     // entering, skate mode off; Manatros: "teleporting between places when
     // swapping skate and GTA mode"). Until Skate's skater is at the entry
     // point, nothing is placed or judged from it.
-    if (static_cast<LONG>(GetTickCount() - s.entrySettleUntil) < 0) {
+    if (!s.entrySettled) {
         const float ex = p.x - s.entryAt.x, ey = p.y - s.entryAt.y, ez = p.z - s.entryAt.z;
-        if (!(ex * ex + ey * ey + ez * ez < 10.0f * 10.0f)) return;
-        s.entrySettleUntil = GetTickCount();
+        const long remaining = static_cast<LONG>(s.entrySettleUntil - GetTickCount());
+        const swapplace::Settle decision = swapplace::DecideSettle(ex, ey, ez, remaining);
+        if (decision == swapplace::Settle::Hold) {
+            // Not yet this session's skater: Leave must not place the ped from it either.
+            s.last = lastBefore;
+            return;
+        }
+        s.entrySettled = true;
+        if (decision == swapplace::Settle::Abort) {
+            // Skate's skater never reached the entry point (stale output of another session):
+            // never place the ped there; it stays where it stood.
+            Logf("SkateV Legacy: entry settle timeout: skater (%.1f %.1f %.1f) is %.1f m from entry (%.1f %.1f %.1f); ped stays, skate mode off",
+                 p.x, p.y, p.z, std::sqrt(ex * ex + ey * ey + ez * ez), s.entryAt.x, s.entryAt.y, s.entryAt.z);
+            s.keepPlace = true;
+            Leave(s, cfg, "entry settle failed", false);
+            s.keepPlace = false;
+            return;
+        }
+        Logf("SkateV Legacy: entry settle end: skater %.1f m from entry", std::sqrt(ex * ex + ey * ey + ez * ez));
     }
     // Fell through a hole in Skate's collision where GTA has a floor (rc6 test:
     // the same spot near (-147, 449) three times): put the ped back on GTA's
@@ -3214,7 +3297,9 @@ void UpdateActive(Session& s, const Config& cfg, const SvPad& pad) {
         const Vector3 at = Call<Vector3>(gta::GET_ENTITY_COORDS, s.ped, 1);
         const float dx = at.x - s.placed[0], dy = at.y - s.placed[1], dz = at.z - s.placed[2];
         if (dx * dx + dy * dy + dz * dz > 25.0f && std::isfinite(at.x + at.y + at.z)) {
-            Logf("SkateV Legacy: ped moved %.0f m by something else (a teleport): Skate follows", std::sqrt(dx * dx + dy * dy + dz * dz));
+            Logf("SkateV Legacy: ped moved %.0f m by something else (a teleport): Skate follows (ped %.1f %.1f %.1f, placed %.1f %.1f %.1f, inVehicle=%d, state %s)",
+                 std::sqrt(dx * dx + dy * dy + dz * dz), at.x, at.y, at.z, s.placed[0], s.placed[1], s.placed[2],
+                 Call<BOOL>(gta::IS_PED_IN_ANY_VEHICLE, s.ped, 0) ? 1 : 0, o.state_utf8);
             s.keepPlace = true;
             Leave(s, cfg, "teleported", false);
             s.keepPlace = false;
@@ -5357,6 +5442,7 @@ void ScriptMain() {
             }
             if (const char* notice = objectdropper::TakeNotice()) Notify(s, notice, 3000);
             collisionview::Tick(player);
+            TickBackgroundBakeNotice(s, cfg.worldCache, player);
             Lap(kPartAfter);
         } else if (f6) {
             Notify(s, "runtime unavailable: " + error);

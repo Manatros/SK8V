@@ -2208,9 +2208,7 @@ mod tests {
         assert_eq!(&b, b"a\xc3\xa9\0");
     }
 
-    #[test]
-    #[ignore = "production data on the developer PC; run explicitly"]
-    fn production_runtime_prepares_cleanly_at_vespucci() {
+    fn assert_production_runtime_prepares_at(position: SvVec3) {
         use std::ffi::CString;
         use std::path::Path;
         // SKATEV_TEST_GTA = the game folder of an installed GTAxSkate.
@@ -2237,7 +2235,7 @@ mod tests {
         let track = SvLifecycleTrack {
             size: size_of::<SvLifecycleTrack>() as u32,
             flags: 0,
-            position: SvVec3 { x: -1210.0, y: -1485.0, z: 4.3 },
+            position,
             heading_degrees: 0.0,
         };
         assert_eq!(unsafe { sv_lifecycle_track(rt, &track) }, 1);
@@ -2270,61 +2268,13 @@ mod tests {
 
     #[test]
     #[ignore = "production data on the developer PC; run explicitly"]
+    fn production_runtime_prepares_cleanly_at_vespucci() {
+        assert_production_runtime_prepares_at(SvVec3 { x: -1210.0, y: -1485.0, z: 4.3 });
+    }
+
+    #[test]
+    #[ignore = "production data on the developer PC; run explicitly"]
     fn production_runtime_prepares_cleanly_at_portola_metro() {
-        use std::ffi::CString;
-        use std::path::Path;
-        // SKATEV_TEST_GTA = the game folder of an installed GTAxSkate.
-        let Ok(gta) = std::env::var("SKATEV_TEST_GTA") else { return };
-        let (root, cache) = (Path::new(&gta).join(r"GTAxSkate\skate-data\assets"), Path::new(&gta).join(r"GTAxSkate\world\sk8v.svwc"));
-        let (root, cache) = (root.as_path(), cache.as_path());
-        if !root.exists() || !cache.exists() {
-            return;
-        }
-        let root_c = CString::new(root.to_str().unwrap()).unwrap();
-        let cache_c = CString::new(cache.to_str().unwrap()).unwrap();
-        let info = SvCreateInfo {
-            size: size_of::<SvCreateInfo>() as u32,
-            abi_version: SKATEV_ABI_VERSION,
-            reserved: [0; 32],
-            data_root_utf8: root_c.as_ptr(),
-            world_cache_utf8: cache_c.as_ptr(),
-            log_path_utf8: ptr::null(),
-            skater_triangle_budget: 3000,
-            presentation_flags: 1,
-        };
-        let rt = unsafe { sv_create(&info) };
-        assert!(!rt.is_null());
-        let track = SvLifecycleTrack {
-            size: size_of::<SvLifecycleTrack>() as u32,
-            flags: 0,
-            position: SvVec3 { x: -680.0, y: -220.0, z: 38.0 },
-            heading_degrees: 0.0,
-        };
-        assert_eq!(unsafe { sv_lifecycle_track(rt, &track) }, 1);
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
-        let mut state = SvLifecycleState::default();
-        let mut out = SvOutput::default();
-        loop {
-            unsafe {
-                sv_get_output(rt, &mut out);
-                sv_lifecycle_get_state(rt, &mut state);
-            }
-            if out.status == STATUS_ERROR {
-                let mut buf = [0 as c_char; 256];
-                unsafe { sv_get_status_text(rt, buf.as_mut_ptr(), 256) };
-                let msg = unsafe { std::ffi::CStr::from_ptr(buf.as_ptr()) }.to_string_lossy();
-                panic!("Runtime reported error: {msg}");
-            }
-            if state.prepared != 0 {
-                break;
-            }
-            if std::time::Instant::now() > deadline {
-                panic!("Timed out waiting for Skate to prepare: preparing={}, prepared={}", state.preparing, state.prepared);
-            }
-            std::thread::sleep(std::time::Duration::from_millis(50));
-        }
-        assert_eq!(state.prepared, 1);
-        assert_eq!(state.preparing, 0);
-        unsafe { sv_destroy(rt) };
+        assert_production_runtime_prepares_at(SvVec3 { x: -680.0, y: -220.0, z: 38.0 });
     }
 }

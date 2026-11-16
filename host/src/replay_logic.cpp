@@ -43,6 +43,7 @@ void Recording::Add(const Frame& f, double dt) {
     Frame& slot = slots_[(head_ + count_) % slots_.size()];
     static_cast<FrameData&>(slot) = f;  // the bones into the slot's own room
     slot.bones.assign(f.bones.begin(), f.bones.end());
+    slot.pedPoses = f.pedPoses;
     slot.time = clock_;
     ++count_;
 }
@@ -297,12 +298,12 @@ std::map<int, ActorSpan> ComputeActorSpans(const Recording& rec) {
     const std::size_t recSize = rec.Size();
     for (std::size_t i = 0; i < recSize; ++i) {
         const Frame& f = rec.Get(i);
-        for (int v = 0; v < f.vehicleCount; ++v) {
-            const ActorSample& s = f.vehicles[v];
-            if (!s.handle) continue;
+        auto addSpan = [&](const ActorSample& s, ActorKind kind) {
+            if (!s.handle) return;
             auto& sp = spans[s.handle];
             sp.handle = s.handle;
-            sp.isPed = false;
+            sp.kind = kind;
+            sp.isPed = (kind == ActorKind::Ped);
             if (f.time < sp.firstTime) {
                 sp.firstTime = f.time;
                 sp.firstSample = s;
@@ -311,22 +312,10 @@ std::map<int, ActorSpan> ComputeActorSpans(const Recording& rec) {
                 sp.lastTime = f.time;
                 sp.lastSample = s;
             }
-        }
-        for (int p = 0; p < f.pedCount; ++p) {
-            const ActorSample& s = f.peds[p];
-            if (!s.handle) continue;
-            auto& sp = spans[s.handle];
-            sp.handle = s.handle;
-            sp.isPed = true;
-            if (f.time < sp.firstTime) {
-                sp.firstTime = f.time;
-                sp.firstSample = s;
-            }
-            if (f.time > sp.lastTime) {
-                sp.lastTime = f.time;
-                sp.lastSample = s;
-            }
-        }
+        };
+        for (int v = 0; v < f.vehicleCount; ++v) addSpan(f.vehicles[v], ActorKind::Vehicle);
+        for (int p = 0; p < f.pedCount; ++p) addSpan(f.peds[p], ActorKind::Ped);
+        for (int o = 0; o < f.objectCount; ++o) addSpan(f.objects[o], ActorKind::Object);
     }
     return spans;
 }

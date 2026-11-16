@@ -564,6 +564,31 @@ int main() {
         assert(GetActorReplayState(spans[201], 1.8) == ActorReplayState::AfterSpan);
     }
 
+    {
+        Recording rec(10.0);
+        rec.Reserve(10.0, 10.0, 2);
+        Frame f0{}, f1{};
+        f0.objectCount = 1;
+        f0.objects[0].handle = 301;
+        f0.objects[0].model = 0x1234;
+        f0.objects[0].pos[0] = 1.0f;
+        rec.Add(f0, 0.0);
+
+        f1.objectCount = 1;
+        f1.objects[0].handle = 301;
+        f1.objects[0].model = 0x1234;
+        f1.objects[0].pos[0] = 5.0f;
+        rec.Add(f1, 1.0);
+
+        auto spans = ComputeActorSpans(rec);
+        assert(spans.size() == 1);
+        assert(spans[301].kind == ActorKind::Object);
+        assert(!spans[301].isPed);
+        assert(spans[301].firstSample.pos[0] == 1.0f);
+        assert(spans[301].lastSample.pos[0] == 5.0f);
+        assert(GetActorReplayState(spans[301], 0.5) == ActorReplayState::Active);
+    }
+
     std::cout << "replay tests passed\n";
     return 0;
 }

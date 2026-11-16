@@ -13,6 +13,14 @@ namespace replay {
 // space, RAGE row layout (as posehook::PublishPose takes them).
 static constexpr int kMaxTrackedVehicles = 48;
 static constexpr int kMaxTrackedPeds = 32;
+static constexpr int kMaxTrackedObjects = 32;
+static constexpr int kMaxTrackedPedPoses = 12;
+
+enum class ActorKind : std::uint8_t {
+    Vehicle = 0,
+    Ped = 1,
+    Object = 2,
+};
 
 struct ActorSample {
     int handle = 0;
@@ -26,6 +34,7 @@ struct ActorSample {
 
 struct ActorSpan {
     int handle = 0;
+    ActorKind kind = ActorKind::Vehicle;
     bool isPed = false;
     double firstTime = 1e9;
     double lastTime = -1e9;
@@ -72,9 +81,18 @@ struct FrameData {
     ActorSample vehicles[kMaxTrackedVehicles] = {};
     int pedCount = 0;
     ActorSample peds[kMaxTrackedPeds] = {};
+    int objectCount = 0;
+    ActorSample objects[kMaxTrackedObjects] = {};
+};
+struct PedBonePose {
+    int handle = 0;
+    std::uint32_t model = 0;
+    int boneCount = 0;
+    std::vector<float> pose7; // boneCount * 7 floats: qx, qy, qz, qw, px, py, pz (entity-relative)
 };
 struct Frame : FrameData {
     std::vector<float> bones;    // bones x 16
+    std::vector<PedBonePose> pedPoses;
 };
 
 // The last `seconds` of frames. Slots are reused (no allocation once full).
