@@ -165,7 +165,10 @@ fn main() -> Result<(), Box<dyn Error>> {
         // The bake gate (scripts/bake-world.ps1): tiles, runtime and floor
         // map must come from one source; any rule edit changes these lines.
         Some("--rules") => {
-            println!("{}", SkateVRuntime::tiles::rules_hash());
+            // With SKATEV_R*_OFF set the label carries "trial ...": the install
+            // script's rules gate then refuses the bake.
+            println!("{}", SkateVRuntime::world::park_rules::rules_label(
+                &SkateVRuntime::tiles::rules_hash(), &SkateVRuntime::world::park_rules::trial_switches_from_env()));
             println!("floor-policy {:016x}", SkateVRuntime::baked::policy_source());
             return Ok(());
         },

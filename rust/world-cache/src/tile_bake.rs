@@ -842,6 +842,13 @@ fn bake(
     selection: String,
 ) -> Result<(), Box<dyn Error>> {
     let start = Instant::now();
+    // Rule A/B switches (SKATEV_R*_OFF) are read here only; such a bake is a
+    // trial, marked in rules.txt and trial.txt, which the runtime and
+    // build-world-collision.ps1 refuse (peer review 2026-11-16, finding 4).
+    let trials = world::park_rules::apply_trials_from_env();
+    if !trials.is_empty() {
+        eprintln!("TRIAL BAKE: park rules {} switched off; the output is marked non-installable", trials.join(","));
+    }
     let gta = Path::new(&paths[0]);
     let keys = Path::new(&paths[1]);
     // Retained in the CLI for older callers. A flattened extraction loses
@@ -1465,7 +1472,8 @@ fn bake(
             validation.bar_top_lines += world::bar_top_lines(&mut area, &boxed_area.rails, &slabs);
         }
         world::park_rules::recording(true);
-        world::prune_park_creases(&mut area, &kept_tracks);
+        let origin_of = |t: &[[f32; 3]; 3]| input_origin.get(&svwc::surfaces::key(t)).map(|n| spool.names[*n as usize].clone());
+        world::prune_park_creases(&mut area, &kept_tracks, Some(&origin_of));
         world::park_rules::recording(false);
         world::park_rules::report(c,size,&input_origin,&spool.names);
         let mut tile = Tile {
@@ -1709,7 +1717,10 @@ fn bake(
     let workers = num_workers;
     if let Some(o) = obj.as_mut() { o.flush()?; }
     fs::write(out.join("tile-size.txt"), format!("{size}\n"))?;
-    fs::write(out.join("rules.txt"), tiles::rules_hash())?;
+    fs::write(out.join("rules.txt"), world::park_rules::rules_label(&tiles::rules_hash(), &trials))?;
+    if !trials.is_empty() {
+        fs::write(out.join("trial.txt"), format!("trial bake: park rules switched off: {}\nnever install this output\n", trials.join(",")))?;
+    }
     let ramps = ramps.load(std::sync::atomic::Ordering::Relaxed);
     let step_count = step_count.load(std::sync::atomic::Ordering::Relaxed);
     let report = format!(

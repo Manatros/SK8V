@@ -250,7 +250,8 @@ pub fn replace_with_sources(tris: &mut Vec<Tri>, stairs: &[Tri], sources: &std::
         let Some((_, visible)) = parks.iter().find(|(id, _)| id == park.id) else { continue };
         // See-through boxes first: their bars are taken, the rest of the park
         // never sees them (design 2026-11-09-see-through).
-        let bars=crate::visrails::raw_in(park.centre.to_array(),park.radius+2.0);
+        // No bar data: R1 has no evidence and keeps every box (unwrap to empty).
+        let bars=crate::visrails::raw_in(park.centre.to_array(),park.radius+2.0).unwrap_or_default();
         let rest = see_through_boxes_with_bars(tris, stairs, visible, park.centre, park.radius, park.id, &mut out, &bars, sources);
         replace_park(tris, stairs, rest.as_deref().unwrap_or(visible), park.centre, park.radius, park.id, &mut out);
     }

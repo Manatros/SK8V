@@ -396,6 +396,9 @@ impl StaticWorld {
         }
         crate::ground_at::publish(crate::ground_at::GroundIndex::build(tris.iter().map(|t| (t.v, t.material))));
         let (read, build) = (read.elapsed(), std::time::Instant::now());
+        // The park rules' audit gathers this build's train witnesses for the
+        // crease pass below; a live build keeps no report.
+        park_rules::begin();
         let mut area = build_area_rules(
             center,
             tris.iter()
@@ -414,6 +417,11 @@ impl StaticWorld {
             true,
             true,
         );
+        // Live-built cells apply the same park rules as baked cells (peer
+        // review 2026-11-16, finding 4): R1-R3a ran inside; R3b here.
+        let witnesses = park_rules::kept_tracks();
+        prune_park_creases(&mut area, &witnesses, None);
+        park_rules::end();
         hide_switched_off(&mut area);
         area.live_required = true;
         area.fixed = self.fixed_version;
@@ -633,13 +641,11 @@ fn build_area_rules(center: Vec3, tris: impl Iterator<Item = ([[f32; 3]; 3], u32
     }
     let visible_park = crate::visparks::faces_in([center.x, center.y], RADIUS + 3.0);
     let raw_bars = crate::visrails::raw_in([center.x, center.y], RADIUS + 3.0);
-    let removed_tubes = park_rules::drop_floating(&mut all, &visible_park, &raw_bars, &tracks);
+    let removed_tubes = park_rules::drop_floating(&mut all, &visible_park, raw_bars.as_deref(), &tracks);
     let mut removed_capsules = vec![false; gta.len()];
     if !removed_tubes.is_empty() {
         boxed = off_lines(boxed, &removed_tubes, 0.01, 0.01);
-        let (inside,outside):(Vec<_>,Vec<_>)=found.into_iter().partition(|r|r.iter().all(|p|crate::parks::in_park(p.truncate())));
-        found = off_lines(inside, &removed_tubes, TUBE_SIDE, TUBE_UP);
-        found.extend(outside);
+        found = park_rules::lines_off_dropped_tubes(found, &removed_tubes, TUBE_SIDE);
         for (i, t) in gta.iter().enumerate() {
             removed_capsules[i] = surfaces[i] & crate::live::PARKMESH_TAG == 0 && crate::parks::in_park(((t[0]+t[1]+t[2])/3.).truncate()) && removed_tubes.iter().flat_map(|r| r.windows(2)).any(|w| {
                 let radius = crate::tubes::half_width(w[0],w[1]);
@@ -1511,17 +1517,42 @@ pub fn park_edge_lines(area: &mut Area, gta_rails: &[Vec<[f32; 3]>]) -> usize {
 }
 
 /// Final park post-pass after park edge/rim/bar restoration (GTA metres internally).
-pub fn prune_park_creases(area: &mut Area, tracks: &[Vec<Vec3>]) {
+/// Baked and live-built cells both run it (peer review 2026-11-16, finding 4).
+/// `origin_of`: the bake's origin name of a GTA-space triangle, for the audit.
+pub fn prune_park_creases(area: &mut Area, tracks: &[Vec<Vec3>], origin_of: Option<&dyn Fn(&[[f32; 3]; 3]) -> Option<String>>) {
     let visible=crate::visparks::faces_in([area.center.x,area.center.y], RADIUS+3.0);
+    // Visible-model bars (SVRL) are never creases, whatever lies under them.
+    let bars=crate::visrails::raw_in([area.center.x,area.center.y], RADIUS+3.0).unwrap_or_default();
     // These are the actual snapped train/orphan edge lines captured before any
     // auxiliary build, rather than node polylines or unrelated main-pass rails.
     let mut lines:Vec<Vec<Vec3>>=area.rails.iter().map(|r|r.iter().map(|p|coords::from_skate(Vec3::from_array(*p))).collect()).collect();
-    let removed=park_rules::drop_creases(&mut lines,&visible,tracks);
+    let removed=park_rules::drop_creases(&mut lines,&visible,tracks,&bars);
     if removed.is_empty() { return; }
     let key=|r:&[Vec3]|r.iter().map(|p|p.to_array().map(f32::to_bits)).collect::<Vec<_>>();
     let gone:rustc_hash::FxHashSet<_>=removed.iter().map(|r|key(r)).collect();
     area.rails.retain(|r|!gone.contains(&key(&r.iter().map(|p|coords::from_skate(Vec3::from_array(*p))).collect::<Vec<_>>())));
-    park_rules::record("R3b",removed,Vec::new(),0,false);
+    let notes=removed.iter().map(|r|crease_note(area,r,&bars,origin_of)).collect();
+    park_rules::record_noted("R3b",removed,Vec::new(),0,false,notes);
+}
+
+/// What a removed crease line lay on: the origins and tag classes of the
+/// area's faces within 2 cm of its ends and middle, and its distance to the
+/// nearest visible bar (the R3b audit lists every removal with this).
+fn crease_note(area: &Area, r: &[Vec3], bars: &[Vec<Vec3>], origin_of: Option<&dyn Fn(&[[f32; 3]; 3]) -> Option<String>>) -> String {
+    let probes=[r[0],r[r.len()/2],*r.last().unwrap(),(r[0]+*r.last().unwrap())*0.5];
+    let mut origins=std::collections::BTreeSet::new();
+    let mut classes=std::collections::BTreeSet::new();
+    for (t,tag) in area.triangles.iter().zip(&area.tags) {
+        let g=t.map(|p|coords::from_skate(Vec3::from_array(p)));
+        if !probes.iter().any(|p|closest_on_triangle(*p,&g).distance(*p)<=0.02) { continue; }
+        classes.insert(if tag & crate::live::VISBAR_TAG!=0 {"visbar"} else if tag & crate::live::PARKMESH_TAG!=0 {"parkmesh"} else {"gta"});
+        if let Some(name)=origin_of.and_then(|f|f(&g.map(|p|p.to_array()))) { origins.insert(name); }
+    }
+    let bar=bars.iter().flat_map(|b|b.windows(2)).map(|w|{
+        let ab=w[1]-w[0];let p=probes[3];
+        p.distance(w[0]+ab*((p-w[0]).dot(ab)/ab.length_squared().max(1e-12)).clamp(0.,1.))
+    }).fold(f32::INFINITY,f32::min);
+    format!("faces {:?} origins {:?} bar-distance {:.3}",classes,origins,bar)
 }
 
 /// A ramp's side rims in a park get a line from where they stand clear of the floor

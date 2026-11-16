@@ -14,6 +14,8 @@ struct Event {
     faces: Vec<[[f32; 3]; 3]>,
     boxes: usize,
     spot: bool,
+    /// One note per removed line (what it lay on), printed per line.
+    notes: Vec<String>,
 }
 thread_local! { static AUDIT: RefCell<Audit> = RefCell::new(Audit::default()); }
 pub fn begin() {
@@ -46,6 +48,16 @@ pub(crate) fn record(
     boxes: usize,
     spot: bool,
 ) {
+    record_noted(rule, lines, faces, boxes, spot, Vec::new());
+}
+pub(crate) fn record_noted(
+    rule: &'static str,
+    lines: Vec<Vec<Vec3>>,
+    faces: Vec<[[f32; 3]; 3]>,
+    boxes: usize,
+    spot: bool,
+    notes: Vec<String>,
+) {
     AUDIT.with(|a| {
         let mut a = a.borrow_mut();
         if a.active {
@@ -55,9 +67,14 @@ pub(crate) fn record(
                 faces,
                 boxes,
                 spot,
+                notes,
             });
         }
     });
+}
+/// Live builds: stop recording and drop what was gathered (no report).
+pub fn end() {
+    AUDIT.with(|a| *a.borrow_mut() = Audit::default());
 }
 pub fn report(
     cell: crate::tiles::Cell,
@@ -70,7 +87,7 @@ pub fn report(
         let (mut lines, mut metres, mut boxes, mut faces, mut outside) = (0, 0.0f32, 0, 0, 0);
         let mut names = std::collections::BTreeSet::new();
         for e in events.iter().filter(|e| e.rule == rule) {
-            for r in &e.lines {
+            for (k, r) in e.lines.iter().enumerate() {
                 let clipped = crate::tiles::split_rail(
                     &r.iter().map(|p| p.to_array()).collect::<Vec<_>>(),
                     size,
@@ -81,6 +98,13 @@ pub fn report(
                 .collect::<Vec<_>>();
                 if !clipped.is_empty() {
                     lines += 1;
+                    if let Some(note) = e.notes.get(k) {
+                        let m: f32 = r.windows(2).map(|w| w[0].distance(w[1])).sum();
+                        eprintln!(
+                            "PARK-RULE-LINE tile {},{} {rule} at {:.2} {:.2} {:.2} len {m:.3} {note}",
+                            cell.0, cell.1, r[0].x, r[0].y, r[0].z
+                        );
+                    }
                 }
                 metres += clipped
                     .iter()
@@ -121,8 +145,38 @@ pub fn report(
         );
     }
 }
+/// The rules an A/B trial switches off: `SKATEV_R1_OFF`, `SKATEV_R2_OFF`,
+/// `SKATEV_R3a_OFF`, `SKATEV_R3b_OFF`. Only the baker reads the environment
+/// (`apply_trials_from_env`), and it then marks its output as a trial that
+/// is never installable; the runtime DLL and every live-built cell apply
+/// all rules (peer review 2026-11-16, finding 4).
+pub const RULES: [&str; 4] = ["R1", "R2", "R3a", "R3b"];
+static TRIALS: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
 pub(crate) fn enabled(rule: &str) -> bool {
-    std::env::var_os(format!("SKATEV_{rule}_OFF")).is_none()
+    enabled_with(TRIALS.load(std::sync::atomic::Ordering::Relaxed), rule)
+}
+fn enabled_with(off: u8, rule: &str) -> bool {
+    RULES.iter().position(|r| *r == rule).is_none_or(|i| off & (1 << i) == 0)
+}
+fn trials_where(off: impl Fn(&str) -> bool) -> Vec<&'static str> {
+    RULES.iter().copied().filter(|r| off(r)).collect()
+}
+/// Which rules the environment switches off (the baker only).
+pub fn trial_switches_from_env() -> Vec<&'static str> {
+    trials_where(|r| std::env::var_os(format!("SKATEV_{r}_OFF")).is_some())
+}
+/// Baker only: apply the environment's switches and return them (empty: a
+/// normal bake). The caller must mark its output as a trial when non-empty.
+pub fn apply_trials_from_env() -> Vec<&'static str> {
+    let off = trial_switches_from_env();
+    let mask = off.iter().fold(0u8, |m, r| m | 1 << RULES.iter().position(|x| x == r).unwrap());
+    TRIALS.store(mask, std::sync::atomic::Ordering::Relaxed);
+    off
+}
+/// The `rules.txt` text of a bake: the plain hash, or a trial label the
+/// runtime (`rules_compatible`) and `build-world-collision.ps1` both refuse.
+pub fn rules_label(hash: &str, off: &[&str]) -> String {
+    if off.is_empty() { hash.to_string() } else { format!("{hash} trial {}", off.join(",")) }
 }
 pub(crate) fn length(r: &[Vec3]) -> f32 {
     r.windows(2).map(|w| w[0].distance(w[1])).sum()
@@ -233,13 +287,18 @@ pub(crate) fn floating(
     }
     total > 0. && supported < 0.80 * total
 }
+/// `bars`: None when no visible-bar data exists for the area (the `.visrails`
+/// file is not loaded, or holds no cell there): R2 then keeps every tube, since
+/// without bars every elevated tube would look unsupported (peer review
+/// 2026-11-16, finding 1: real rails on legs, live-built cells).
 pub(crate) fn drop_floating(
     lines: &mut Vec<Vec<Vec3>>,
     visible: &[[[f32; 3]; 3]],
-    bars: &[Vec<Vec3>],
+    bars: Option<&[Vec<Vec3>]>,
     tracks: &[Vec<Vec3>],
 ) -> Vec<Vec<Vec3>> {
     let mut dropped = Vec::new();
+    let Some(bars) = bars else { return dropped };
     if enabled("R2") {
         lines.retain(|r| {
             let train = samples(r, 0.1)
@@ -254,6 +313,20 @@ pub(crate) fn drop_floating(
         });
     }
     dropped
+}
+/// A finder line resting on a dropped tube's capsule (within `TUBE_SIDE`
+/// sideways, `ON_TUBE_UP` vertically) goes with it; a coping or visible-model
+/// edge line below the tube stays (peer review 2026-11-16, finding 2: with
+/// `TUBE_UP` = 0.25 m a tube 0.21-0.25 m over a coping took the coping line).
+pub(crate) const ON_TUBE_UP: f32 = 0.02;
+pub(crate) fn lines_off_dropped_tubes(found: Vec<Vec<Vec3>>, removed: &[Vec<Vec3>], side: f32) -> Vec<Vec<Vec3>> {
+    if removed.is_empty() {
+        return found;
+    }
+    let (inside, outside): (Vec<_>, Vec<_>) = found.into_iter().partition(|r| inside(r));
+    let mut found = crate::world::off_lines(inside, removed, side, ON_TUBE_UP);
+    found.extend(outside);
+    found
 }
 /// Cross-source only. Kept visible points are never moved or averaged.
 pub(crate) fn prefer_visible(gta: &mut Vec<Vec<Vec3>>, visual: &[Vec<Vec3>]) -> Vec<Vec<Vec3>> {
@@ -394,22 +467,28 @@ pub(crate) fn shallow_creases(visible: &[[[f32; 3]; 3]]) -> Vec<Vec<Vec3>> {
         .map(|v| vec![v[0].0, v[0].1])
         .collect()
 }
+/// A line within this of a visible-model bar (SVRL polyline) is the bar's own
+/// line, never a crease (peer review 2026-11-16, finding 3).
+pub(crate) const BAR_LINE: f32 = 0.05;
 pub(crate) fn drop_creases(
     lines: &mut Vec<Vec<Vec3>>,
     visible: &[[[f32; 3]; 3]],
     tracks: &[Vec<Vec3>],
+    bars: &[Vec<Vec3>],
 ) -> Vec<Vec<Vec3>> {
-    drop_creases_with_distance(lines, visible, tracks, 0.30)
+    drop_creases_with_distance(lines, visible, tracks, bars, 0.30)
 }
 fn drop_creases_with_distance(
     lines: &mut Vec<Vec<Vec3>>,
     visible: &[[[f32; 3]; 3]],
     tracks: &[Vec<Vec3>],
+    bars: &[Vec<Vec3>],
     protected_distance: f32,
 ) -> Vec<Vec<Vec3>> {
     if !enabled("R3b") {
         return Vec::new();
     }
+    let bars = Segments::new(bars, BAR_LINE);
     let creases = Segments::new(&shallow_creases(visible), 0.025);
     let ends: Vec<_> = lines
         .iter()
@@ -442,7 +521,8 @@ fn drop_creases_with_distance(
                 .all(|(p, d, _)| creases.near(*p, *d, 0.025, 5f32.to_radians().cos()))
             && !ss
                 .iter()
-                .any(|(p, d, _)| on_lines(*p, *d, tracks, protected_distance, 0.0));
+                .any(|(p, d, _)| on_lines(*p, *d, tracks, protected_distance, 0.0))
+            && !ss.iter().any(|(p, d, _)| bars.near(*p, *d, BAR_LINE, 0.0));
         if drop {
             removed.push(r.clone());
         }
@@ -477,6 +557,45 @@ mod tests {
     #[test]
     fn r2_tube_38cm_above_visible_deck_goes() {
         assert!(floating(&line(0., 0.38, 5.), &deck(), &[], false));
+    }
+    #[test]
+    fn r2_without_bar_data_keeps_the_elevated_tube() {
+        // Peer review 2026-11-16 (1): no .visrails loaded, or no cell for the
+        // area -> no evidence -> every tube stays (rails on legs, live cells).
+        let mut lines = vec![line(0., 0.38, 5.)];
+        assert!(drop_floating(&mut lines, &deck(), None, &[]).is_empty());
+        assert_eq!(lines.len(), 1);
+        let mut lines = vec![line(0., 0.38, 5.)];
+        assert_eq!(drop_floating(&mut lines, &deck(), Some(&[]), &[]).len(), 1, "bar data present, no bar near: dropped");
+        assert!(lines.is_empty());
+    }
+    #[test]
+    fn r2_dropped_tube_takes_only_lines_on_itself() {
+        // Peer review 2026-11-16 (2): the coping 0.22 m under a dropped tube keeps
+        // its line; a finder line on the tube's own top goes.
+        let dropped = vec![line(0., 0.38, 5.)];
+        let coping = line(0., 0.16, 5.);
+        let on_tube = line(0.03, 0.37, 5.);
+        let kept = lines_off_dropped_tubes(vec![coping.clone(), on_tube], &dropped, 0.20);
+        assert_eq!(kept, vec![coping]);
+        let outside = vec![Vec3::new(0., 0., 1.), Vec3::new(5., 0., 1.)];
+        assert_eq!(lines_off_dropped_tubes(vec![outside.clone()], &dropped, 0.20), vec![outside]);
+    }
+    #[test]
+    fn rule_switches_come_from_the_baker_not_the_environment() {
+        // Peer review 2026-11-16 (4): the DLL never reads SKATEV_R*_OFF.
+        // SAFETY: single-threaded within this test; no other test reads this name.
+        unsafe { std::env::set_var("SKATEV_R2_OFF", "1") };
+        assert!(enabled("R2"));
+        assert!(trial_switches_from_env().contains(&"R2"));
+        unsafe { std::env::remove_var("SKATEV_R2_OFF") };
+        assert!(!enabled_with(0b0010, "R2"));
+        assert!(enabled_with(0b0010, "R1"));
+        assert!(enabled_with(0b0010, "R9"), "unknown names are never switched off");
+        assert_eq!(trials_where(|r| r == "R3b"), vec!["R3b"]);
+        assert_eq!(rules_label("rules 0123", &[]), "rules 0123");
+        assert_eq!(rules_label("rules 0123", &["R2", "R3b"]), "rules 0123 trial R2,R3b");
+        assert!(!crate::tiles::rules_compatible(&rules_label(&crate::tiles::rules_hash(), &["R1"])));
     }
     #[test]
     fn r2_tube_on_deck_stays() {
@@ -573,23 +692,34 @@ mod tests {
     #[test]
     fn r3b_71cm_flat_crease_goes() {
         let mut r = vec![line(0., 1., 0.71)];
-        assert_eq!(drop_creases(&mut r, &crease(false), &[]).len(), 1);
+        assert_eq!(drop_creases(&mut r, &crease(false), &[], &[]).len(), 1);
         assert!(r.is_empty());
     }
     #[test]
     fn r3b_71cm_right_angle_edge_stays() {
         let mut r = vec![line(0., 1., 0.71)];
-        drop_creases(&mut r, &crease(true), &[]);
+        drop_creases(&mut r, &crease(true), &[], &[]);
         assert_eq!(r.len(), 1);
     }
     #[test]
     fn r3b_connected_end_and_train_line_stay() {
         let mut r = vec![line(0., 1., 0.71), vec![at(0.71, 0., 1.), at(0.71, 1., 1.)]];
-        drop_creases(&mut r, &crease(false), &[]);
+        drop_creases(&mut r, &crease(false), &[], &[]);
         assert_eq!(r.len(), 2);
         let mut r = vec![line(0., 1., 0.71)];
-        drop_creases(&mut r, &crease(false), &[line(0., 1., 0.71)]);
+        drop_creases(&mut r, &crease(false), &[line(0., 1., 0.71)], &[]);
         assert_eq!(r.len(), 1);
+    }
+    #[test]
+    fn r3b_short_visible_bar_line_on_a_flat_crease_stays() {
+        // Peer review 2026-11-16 (3): an isolated bar (SVRL) line is the bar's
+        // own line, whatever the visible faces under it fold like.
+        let mut r = vec![line(0., 1., 0.71)];
+        let bar = vec![at(-0.5, 0., 1.03), at(1.5, 0., 1.03)];
+        assert!(drop_creases(&mut r, &crease(false), &[], &[bar]).is_empty());
+        assert_eq!(r.len(), 1);
+        let far = vec![at(-0.5, 0.3, 1.0), at(1.5, 0.3, 1.0)];
+        assert_eq!(drop_creases(&mut r, &crease(false), &[], &[far]).len(), 1);
     }
     #[test]
     fn bake_audit_preserves_actual_orphan_tracks_across_auxiliary_builds() {
@@ -604,7 +734,7 @@ mod tests {
             "auxiliary builds cannot replace the main train/orphan source witnesses"
         );
         let mut lines = actual.clone();
-        drop_creases(&mut lines, &crease(false), &kept_tracks());
+        drop_creases(&mut lines, &crease(false), &kept_tracks(), &[]);
         assert_eq!(lines, actual);
     }
     #[test]
@@ -613,7 +743,7 @@ mod tests {
         assert!(!floating(&r, &deck(), &[], false));
         let mut lines = vec![r.clone()];
         prefer_visible(&mut lines, &[r.clone()]);
-        drop_creases(&mut lines, &deck(), &[]);
+        drop_creases(&mut lines, &deck(), &[], &[]);
         assert_eq!(lines, vec![r]);
     }
 }
