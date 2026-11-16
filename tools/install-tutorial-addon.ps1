@@ -80,9 +80,13 @@ if ($Mode -eq 'Install') {
     }
     [IO.File]::WriteAllText((Join-Path $targetDir 'addon-installed.json'), ($receipt | ConvertTo-Json -Depth 4), [Text.UTF8Encoding]::new($false))
     if (Test-Path -LiteralPath $iniPath) {
+        # Keys go into [SkateV]. Appending them at the end of the file put them into the last
+        # section ([Preset.User]), whose __count then no longer matched, so the F10 menu refused
+        # every change ("User snapshot invalid; settings unchanged", test 2026-11-16 evening).
         [string[]]$lines = @(Get-Content -LiteralPath $iniPath | Where-Object { $_ -notmatch '^(TutorialRoot|SkateTutorialPack)=' })
-        $lines += "TutorialRoot=$targetDir"
-        $lines += 'SkateTutorialPack=1'
+        $keys = @("TutorialRoot=$targetDir", 'SkateTutorialPack=1')
+        $at = [Array]::IndexOf($lines, '[SkateV]')
+        $lines = if ($at -ge 0) { @($lines[0..$at]) + $keys + @($lines | Select-Object -Skip ($at + 1)) } else { @('[SkateV]') + $keys + $lines }
         [IO.File]::WriteAllLines($iniPath, $lines)
     }
     Write-Host "Installed optional Tutorial Island add-on cleanly into: $targetDir"
