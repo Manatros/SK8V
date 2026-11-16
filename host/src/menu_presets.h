@@ -55,13 +55,14 @@ inline bool Validate(const std::vector<Page>& pages, const Settings& settings, s
 // tool wrote into the section) no longer make it invalid: it is truncated only when fewer keys are
 // stored than __count promised, and it has grown past it only when more known keys are stored.
 // `reason` names the failed check; the caller logs it.
-inline bool SnapshotComplete(std::size_t present, std::size_t stored, std::size_t storedKnown, long long count, std::string& reason) {
+// `body`: keys stored before the __count line. A snapshot is written as its keys, then
+// __schema and __count, so its body must hold exactly __count keys; lines after __count were
+// appended later by something else (2026-11-16: the tutorial installer) and are ignored.
+inline bool SnapshotComplete(std::size_t present, std::size_t body, long long count, std::string& reason) {
     if (!present) return reason = "no known setting is stored in it", false;
     if (count < 0) return reason = "__count is missing", false;
-    if (stored < static_cast<std::size_t>(count))
-        return reason = "truncated: " + std::to_string(stored) + " keys stored, __count says " + std::to_string(count), false;
-    if (storedKnown > static_cast<std::size_t>(count))
-        return reason = "more menu keys stored (" + std::to_string(storedKnown) + ") than __count says (" + std::to_string(count) + ")", false;
+    if (body != static_cast<std::size_t>(count))
+        return reason = std::to_string(body) + " keys stored before __count, __count says " + std::to_string(count), false;
     return true;
 }
 

@@ -24,6 +24,8 @@ bool Enabled();
 // Enabled, not failed, and a bent frame was drawn in the last half second:
 // only then is the replay HUD drawn by this overlay instead of by GTA.
 bool Drawing();
+// True while the lens is switched on, from the first frame (Drawing() lags until the first draw).
+bool Bending();
 // The replay HUD as items (screen 0-1, as GTA's DRAW_RECT and text): solid
 // rectangles (straight colour, 0-1) and white texts (`y` their top; `scale`
 // GTA's text scale). Texts are drawn in two bands, the top fifth and the

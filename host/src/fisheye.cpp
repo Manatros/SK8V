@@ -484,6 +484,12 @@ void SetHudItems(const std::vector<HudRect>& rects, const std::vector<HudText>& 
         if (!(g_hud.texts[i] == band[i])) g_hud.texts[i] = std::move(band[i]), ++g_hud.serial[i];  // painted again only on change
 }
 
+// The lens is switched on (it bends the next present), even before its first draw:
+// gates for overlays that must not be bent (Copilot review 2026-11-16).
+bool Bending() {
+    return g_enabled.load() && !g_failed.load();
+}
+
 bool Drawing() {
     return g_enabled.load() && !g_failed.load() && GetTickCount64() - g_drawnAt.load() < 500;
 }
