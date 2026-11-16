@@ -119,5 +119,43 @@ int wmain(int argc, wchar_t** argv) {
     assert(std::wstring(legacy) == L"1");
     GetPrivateProfileStringW(L"SkateV", L"CameraFocus", L"", legacy, 32, cameraIni.c_str());
     assert(std::wstring(legacy) == L"Board");
+    // Foreign keys in a snapshot (another tool wrote them, or a row was removed) are ignored; a truncated
+    // snapshot or a bad value is refused and the log says which check failed (design 2026-11-16-replay-lens-and-prompts #7).
+    {
+        static std::string logged;
+        const auto foreignIni = std::wstring(argv[1]) + L"\\foreign-presets.ini";
+        DeleteFileW(foreignIni.c_str());
+        std::vector<menu::Page> two = {{"F", {menu::Flag("A", "FlagA", true), menu::Number("B", "NumB", 1, 0, 3, 0.5f, {}, {}, true)}}};
+        menu::Start(foreignIni, two, {}, [](const char* text) { logged += text, logged += '\n'; });
+        assert(menu::ApplyPreset("Other", {{"FlagA", "0"}, {"NumB", "2"}}));
+        assert(menu::SaveCustomPreset());
+        assert(menu::ApplyPreset("Reset", {{"FlagA", "1"}, {"NumB", "1"}}));
+        WritePrivateProfileStringW(L"Preset.Custom", L"Foreign1", L"x", foreignIni.c_str());
+        WritePrivateProfileStringW(L"Preset.Custom", L"Foreign2", L"y", foreignIni.c_str());
+        logged.clear();
+        assert(menu::RestoreCustomPreset());  // 4 keys stored, __count 2, both menu keys present: accepted
+        assert(menu::Current().at("FlagA") == "0" && menu::Current().at("NumB") == "2" && logged.find("rejected") == std::string::npos);
+        // A menu key missing from a snapshot with no foreign keys to cover for it: truncated.
+        WritePrivateProfileStringW(L"Preset.Custom", L"Foreign1", nullptr, foreignIni.c_str());
+        WritePrivateProfileStringW(L"Preset.Custom", L"Foreign2", nullptr, foreignIni.c_str());
+        WritePrivateProfileStringW(L"Preset.Custom", L"NumB", nullptr, foreignIni.c_str());
+        const auto settled = menu::Current();
+        assert(!menu::RestoreCustomPreset() && menu::Current() == settled);
+        assert(logged.find("snapshot [Preset.Custom] rejected: truncated") != std::string::npos);
+        // A bad value: refused, with the setting named.
+        WritePrivateProfileStringW(L"Preset.Custom", L"NumB", L"banana", foreignIni.c_str());
+        logged.clear();
+        assert(!menu::RestoreCustomPreset() && menu::Current() == settled);
+        assert(logged.find("rejected: Missing or invalid preset setting: NumB") != std::string::npos);
+        // More menu keys than __count promised is refused too.
+        WritePrivateProfileStringW(L"Preset.Custom", L"NumB", L"2", foreignIni.c_str());
+        WritePrivateProfileStringW(L"Preset.Custom", L"__count", L"1", foreignIni.c_str());
+        logged.clear();
+        assert(!menu::RestoreCustomPreset() && logged.find("more menu keys stored") != std::string::npos);
+        // Pure rule.
+        std::string why;
+        assert(menu::presets::SnapshotComplete(2, 4, 2, 2, why));
+        assert(!menu::presets::SnapshotComplete(0, 2, 0, 2, why) && !menu::presets::SnapshotComplete(2, 2, 2, -1, why));
+    }
     std::cout << "PASS: production preset validation, complete reset, User isolation, Custom persistence, duplicate callbacks, restart reporting and transactional failure\n";
 }

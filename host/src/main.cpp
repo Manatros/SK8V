@@ -32,6 +32,7 @@
 #include "host_util.h"
 #include "physics_level.h"
 #include "hud_overlay.h"
+#include "fisheye.h"
 #include "records_ui.h"
 #include "lifecycle.h"
 #include "thread_census.h"
@@ -3462,7 +3463,8 @@ void UpdateActive(Session& s, const Config& cfg, const SvPad& pad) {
     if (g_replayPose && !menu::IsOpen())
         replay::Record(o, s.placedValid ? s.placed : nullptr, g_replayPose, g_replayBones, havePose ? &boardPose : nullptr);
     if (g_quirkRequested.exchange(false) && cfg.backwardsMan) g_runtime.TriggerQuirk(0);
-    if (cfg.skateHud && cfg.showDebug) { // dev only; the player sees hud_overlay
+    // Debug overlays are drawn into the scene, so the replay's fisheye pass would bend them: hidden while it runs.
+    if (cfg.skateHud && cfg.showDebug && !fisheye::Drawing()) { // dev only; the player sees hud_overlay
         SvScoreState score{};
         g_runtime.Score(score);
         DrawHud(o, score, true);
@@ -3651,7 +3653,7 @@ void LifecycleFrame(Session& s, const Config& cfg, bool f6) {
     }
     case LifeState::Skating: {
         SvPad pad = ReadPad(); // once per frame
-        if (cfg.skateHud && cfg.showInputs) DrawInputs(pad);
+        if (cfg.skateHud && cfg.showInputs && !fisheye::Drawing()) DrawInputs(pad);
         // Leaving is SK8V's: hold Y (the keyboard's binding for it) puts the
         // board away. Our F leave was removed with the F entry (Manatros
         // 2026-10-20: "stay with the SK8V version mostly").
@@ -5441,7 +5443,7 @@ void ScriptMain() {
                 Call<void>(gta::RENDER_SCRIPT_CAMS, 1, 1, 300, 1, 0, 0);
             }
             if (const char* notice = objectdropper::TakeNotice()) Notify(s, notice, 3000);
-            collisionview::Tick(player);
+            if (!fisheye::Drawing()) collisionview::Tick(player);  // wireframe, tiles line and legend: not bent by the lens
             TickBackgroundBakeNotice(s, cfg.worldCache, player);
             Lap(kPartAfter);
         } else if (f6) {
@@ -5487,7 +5489,7 @@ void ScriptMain() {
         gtaaudio::Tick(s.state == LifeState::Skating);
         Lap(kPartAudio);
         if (s.state == LifeState::Skating && g_keyboard && !g_controller && g_config.skateHud && g_config.keyboardHints && !menu::IsOpen() &&
-            !objectdropper::IsOpen())
+            !objectdropper::IsOpen() && !fisheye::Drawing())
             DrawKeyboardHints(std::string_view(s.last.state_utf8).rfind("Biped", 0) == 0);
         skatemap::Tick(SkateOwnsPlayer(s), g_config.gpsWhileSkating, g_config.skateSpots, boardshop::BeachShopAvailable());
         {

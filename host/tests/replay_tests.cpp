@@ -221,6 +221,32 @@ int main() {
     assert(std::fabs(LensFov(kLens85, 0) - 16.1f) < 0.1f);
     assert(std::fabs(LensFov(kLens135, 0) - 10.2f) < 0.1f);
     assert(Cycle(0, -1, kLensCount) == kLensCount - 1 && Cycle(kLensCount - 1, 1, kLensCount) == 0);
+    // Wide follows Auto in the cycle: a plain 120-degree camera (no zoom, no bend).
+    assert(Cycle(kLensAuto, 1, kLensCount) == kLensWide && Cycle(kLensWide, 1, kLensCount) == kLensFisheye);
+    assert(std::string(LensName(kLensWide)) == "Wide" && std::string(LensName(kLensFisheye)) == "Fisheye");
+    assert(LensFov(kLensWide, 50.0f) == 120.0f && LensIs120(kLensWide) && LensIs120(kLensFisheye) && !LensIs120(kLens14));
+    // Lens strength: 25..100 in steps of 25, 100 = the lens as it was.
+    assert(ClampLensStrength(100) == 100 && ClampLensStrength(0) == 25 && ClampLensStrength(500) == 100 && ClampLensStrength(-5) == 25);
+    assert(ClampLensStrength(60) == 50 && ClampLensStrength(63) == 75 && ClampLensStrength(75) == 75);
+    {
+        // Frame identity: the same frames and blend are the same picture; any change is another.
+        Recording::Sample x;
+        Frame f0, f1;
+        f0.time = 1.0, f0.gameMs = 1000, f1.time = 1.02, f1.gameMs = 1020;
+        x.a = &f0, x.b = &f1, x.t = 0.5f;
+        const std::uint64_t id = FrameIdentity(x);
+        assert(id == FrameIdentity(x));
+        Recording::Sample y = x;
+        y.t = 0.51f;
+        assert(FrameIdentity(y) != id);
+        y = x, y.a = &f1, y.b = &f1;
+        assert(FrameIdentity(y) != id);
+        Frame f2 = f0;
+        f2.gameMs = 1001;
+        y = x, y.a = &f2;
+        assert(FrameIdentity(y) != id);
+        assert(FrameIdentity(Recording::Sample{}) != id);
+    }
     // Filters: Off, black and white, Film 1..25 = NG_filmic01..25.
     assert(FilterModifier(0) == nullptr && std::string(FilterName(0)) == "Off");
     assert(std::string(FilterModifier(1)) == "blackNwhite");

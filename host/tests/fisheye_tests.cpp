@@ -6,6 +6,7 @@
 #include <cmath>
 #include <cstdint>
 #include <iostream>
+#include <limits>
 #include <vector>
 
 int main() {
@@ -24,6 +25,40 @@ int main() {
             fisheye::SourcePoint(static_cast<float>(x), static_cast<float>(y), 1920, 1080, 120, sx, sy);
             assert(sx >= -0.5f && sx <= 1920.5f && sy >= -0.5f && sy <= 1080.5f);
         }
+
+    {
+        // Lens strength (design 2026-11-16-replay-lens-and-prompts). 1.0 is today's mapping, checked against the
+        // closed form in double precision; 0 is the plain rectilinear 120-degree view (every pixel shows itself);
+        // in between the sample point lies between the two.
+        const double w = 1920, h = 1080, aspect = w / h, halfDiag = std::sqrt(aspect * aspect + 1);
+        const double tanHalf = std::tan(60.0 * 0.01745329), cornerAngle = std::atan(halfDiag * tanHalf);
+        const float xs[] = {0, 100, 480, 960, 1500, 1920}, ys[] = {0, 90, 540, 800, 1080};
+        for (float x : xs)
+            for (float y : ys) {
+                const double px = (x / w * 2 - 1) * aspect, py = y / h * 2 - 1, r = std::sqrt(px * px + py * py);
+                double qx = px, qy = py;
+                if (r > 1e-5) {
+                    const double k = std::tan(r / halfDiag * cornerAngle) / tanHalf / r;
+                    qx = px * k, qy = py * k;
+                }
+                const double refX = (qx / aspect * 0.5 + 0.5), refY = (qy * 0.5 + 0.5);
+                float fx, fy, dx, dy, zx, zy, hx, hy;
+                fisheye::SourcePoint(x, y, 1920, 1080, 120, dx, dy);        // the default argument
+                fisheye::SourcePoint(x, y, 1920, 1080, 120, fx, fy, 1.0f);  // explicit full strength
+                assert(dx == fx && dy == fy);
+                assert(std::fabs(fx / w - refX) < 1e-5 && std::fabs(fy / h - refY) < 1e-5);
+                fisheye::SourcePoint(x, y, 1920, 1080, 120, zx, zy, 0.0f);
+                assert(std::fabs(zx - x) < 1e-3f && std::fabs(zy - y) < 1e-3f);
+                fisheye::SourcePoint(x, y, 1920, 1080, 120, hx, hy, 0.5f);
+                assert(std::fabs(hx - (x + fx) * 0.5f) < 1e-2f && std::fabs(hy - (y + fy) * 0.5f) < 1e-2f);
+            }
+        fisheye::SetStrength(0.25f);
+        assert(fisheye::Strength() == 0.25f);
+        fisheye::SetStrength(7.0f);
+        assert(fisheye::Strength() == 1.0f);  // clamped
+        fisheye::SetStrength(std::numeric_limits<float>::quiet_NaN());
+        assert(fisheye::Strength() == 1.0f);  // never a broken value
+    }
 
     {
         // Take Photo's PNG writer: a 4 x 2 picture becomes a PNG file.
@@ -154,7 +189,8 @@ int main() {
         // while the edges still come from the 120-degree frame.
         fisheye::SetHudItems({}, {}, false);
         std::vector<std::uint32_t> red(256 * 144, 0xFF0000FFu);  // R8G8B8A8: red
-        fisheye::BeginDetail();
+        fisheye::BeginDetail(0xABCDu);
+        assert(fisheye::DetailId() == 0xABCDu);  // the frame identity the detail belongs to
         fisheye::ArmDetail();  // the script saw GTA render at the detail FOV
         for (int i = 0; i < 6 && !fisheye::DetailCaptured(); ++i) {
             ctx->UpdateSubresource(back, 0, nullptr, red.data(), 256 * 4, 0);
@@ -194,7 +230,7 @@ int main() {
 
         std::vector<std::uint32_t> detailFiltered(256 * 144, 0xFF3C3C3Cu);  // darker base (60)
         for (int y = 0; y < 144; ++y) detailFiltered[y * 256 + 128] = 0xFFDCDCDCu;  // bright 1 px stripe (220)
-        fisheye::BeginDetail();
+        fisheye::BeginDetail(2);
         fisheye::ArmDetail();
         for (int i = 0; i < 6 && !fisheye::DetailCaptured(); ++i) {
             ctx->UpdateSubresource(back, 0, nullptr, detailFiltered.data(), 256 * 4, 0);

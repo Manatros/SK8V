@@ -197,16 +197,33 @@ Edges Input::Poll(const PadIn& pad, const KeysIn& in) {
 }
 
 const char* LensName(int lens) {
-    static const char* const names[kLensCount] = {"Auto lens", "Fisheye", "14 mm", "24 mm", "35 mm", "50 mm", "85 mm", "135 mm"};
+    static const char* const names[kLensCount] = {"Auto lens", "Wide", "Fisheye", "14 mm", "24 mm", "35 mm", "50 mm", "85 mm", "135 mm"};
     return lens >= 0 && lens < kLensCount ? names[lens] : names[0];
 }
 
 float LensFov(int lens, float autoFov) {
     // 35 mm film: the frame is 24 mm high; GTA's field of view is vertical.
-    static const float focal[kLensCount] = {0.0f, 0.0f, 14.0f, 24.0f, 35.0f, 50.0f, 85.0f, 135.0f};
-    if (lens == kLensFisheye) return 120.0f;
+    static const float focal[kLensCount] = {0.0f, 0.0f, 0.0f, 14.0f, 24.0f, 35.0f, 50.0f, 85.0f, 135.0f};
+    if (LensIs120(lens)) return 120.0f;
     if (lens <= kLensAuto || lens >= kLensCount) return autoFov;
     return 2.0f * std::atan(12.0f / focal[lens]) * 57.29578f;
+}
+
+std::uint64_t FrameIdentity(const Recording::Sample& s) {
+    // FNV-1a over what makes the shown picture: both frames' recorded times and the blend between them.
+    std::uint64_t h = 1469598103934665603ull;
+    auto mix = [&h](const void* p, std::size_t n) {
+        const auto* b = static_cast<const unsigned char*>(p);
+        for (std::size_t i = 0; i < n; ++i) h = (h ^ b[i]) * 1099511628211ull;
+    };
+    for (const Frame* f : {s.a, s.b}) {
+        const double time = f ? f->time : -1.0;
+        const std::uint32_t ms = f ? f->gameMs : 0u;
+        mix(&time, sizeof(time));
+        mix(&ms, sizeof(ms));
+    }
+    mix(&s.t, sizeof(s.t));
+    return h;
 }
 
 const char* FilterName(int filter) {

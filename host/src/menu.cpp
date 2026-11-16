@@ -101,12 +101,21 @@ bool Snapshot(const wchar_t* section, Settings& out, bool& exists) {
     }
     std::vector<wchar_t> lines(1 << 16);
     GetPrivateProfileSectionW(section, lines.data(), static_cast<DWORD>(lines.size()), g_ini.c_str());
-    std::size_t stored = 0;
-    for (const wchar_t* line = lines.data(); *line; line += wcslen(line) + 1)
-        if (wcsncmp(line, L"__", 2) != 0 && wcschr(line, L'=')) ++stored;
-    const auto count = GetPrivateProfileIntW(section, L"__count", -1, g_ini.c_str());
+    std::size_t stored = 0, storedKnown = 0;
+    for (const wchar_t* line = lines.data(); *line; line += wcslen(line) + 1) {
+        const wchar_t* eq = wcschr(line, L'=');
+        if (wcsncmp(line, L"__", 2) == 0 || !eq) continue;
+        ++stored;
+        if (out.count(util::Narrow(std::wstring(line, eq)))) ++storedKnown;  // `out` holds every current menu key
+    }
+    const auto count = static_cast<int>(GetPrivateProfileIntW(section, L"__count", static_cast<UINT>(-1), g_ini.c_str()));
     std::string error;
-    return present && count >= 0 && static_cast<std::size_t>(count) == stored && presets::Validate(g_pages, out, error);
+    if (!presets::SnapshotComplete(present, stored, storedKnown, count, error) || !presets::Validate(g_pages, out, error)) {
+        // 2026-11-16: "can't change settings" came from this check; say which one failed.
+        if (g_log) g_log(("SkateV preset: snapshot [" + util::Narrow(section) + "] rejected: " + error).c_str());
+        return false;
+    }
+    return true;
 }
 
 bool User(Settings& out) {

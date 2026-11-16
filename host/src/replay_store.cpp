@@ -8,9 +8,12 @@ namespace replay {
 namespace {
 
 constexpr char kMagic[4] = {'S', 'V', 'R', 'P'};
-constexpr std::uint32_t kVersion = 2;
+// v2 added the filter strength per clip; v3 (design 2026-11-16-replay-lens-and-prompts) appends the
+// lens strength and whether the player edited the clip's base camera. Older files still load
+// (lens strength 100, base edited when it is not at its defaults); an older host rejects v3.
+constexpr std::uint32_t kVersion = 3;
 
-bool SupportedVersion(std::uint32_t version) { return version == 1 || version == kVersion; }
+bool SupportedVersion(std::uint32_t version) { return version >= 1 && version <= kVersion; }
 
 struct Writer {
     std::vector<std::uint8_t>& out;
@@ -136,6 +139,8 @@ std::vector<std::uint8_t> Serialize(const SavedReplay& r) {
         w.Str(FilterKey(c.filter));
         w.Str(LensName(c.lens));
         w.Pod(static_cast<std::int32_t>(c.filterStrength));
+        w.Pod(static_cast<std::int32_t>(c.lensStrength));
+        w.Pod(static_cast<std::uint8_t>(c.baseEdited ? 1 : 0));
     }
     w.Pod(r.soundStartMs);
     w.Pod(static_cast<std::uint32_t>(r.pcm.size()));
@@ -224,6 +229,12 @@ bool Deserialize(const std::vector<std::uint8_t>& bytes, SavedReplay& out, std::
             if (lens == LensName(j)) c.lens = j;
         }
         if (version >= 2) c.filterStrength = std::clamp(static_cast<int>(r.Pod<std::int32_t>()), -1, 100);
+        if (version >= 3) {
+            c.lensStrength = ClampLensStrength(static_cast<int>(r.Pod<std::int32_t>()));
+            c.baseEdited = r.Pod<std::uint8_t>() != 0;
+        } else {
+            c.baseEdited = !IsDefaultBase(c.base);  // cannot tell an edit from the editor's placement: ask, to be safe
+        }
         s.clips.push_back(std::move(c));
     }
     s.soundStartMs = r.Pod<std::uint32_t>();

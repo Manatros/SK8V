@@ -139,6 +139,7 @@ EditResult Edit::DeleteMarker(double t, double within, bool confirmed) {
     joined.speed = clips_[i].speed, joined.shake = clips_[i].shake;
     joined.filter = clips_[i].filter, joined.lens = clips_[i].lens;
     joined.filterStrength = clips_[i].filterStrength;
+    joined.lensStrength = clips_[i].lensStrength;
     markers_.erase(markers_.begin() + best);
     clips_[i] = joined;
     clips_.erase(clips_.begin() + static_cast<std::ptrdiff_t>(i) + 1);
@@ -169,14 +170,26 @@ double Edit::NextStop(double t) const {
     return out_;
 }
 
+bool IsDefaultBase(const CameraParams& p) {
+    const CameraParams d;
+    return p.yaw == d.yaw && p.pitch == d.pitch && p.distance == d.distance && p.height == d.height && p.target == d.target &&
+           p.zoomMm == d.zoomMm && p.position[0] == d.position[0] && p.position[1] == d.position[1] &&
+           p.position[2] == d.position[2] && p.positioned == d.positioned;
+}
+
 EditResult Edit::SetCamera(int clip, CameraKind k, bool confirmed) {
     if (clip < 0 || clip >= static_cast<int>(clips_.size())) return EditResult::NotFound;
     Clip& c = clips_[static_cast<std::size_t>(clip)];
     if (c.camera == k) return EditResult::Ok;
-    if (!confirmed && (!c.keys.empty() || c.camera != CameraKind::Game)) return EditResult::NeedsConfirm;
+    // Ask only when the change throws work away: camera keys, or base parameters the player
+    // edited (design 2026-11-16-replay-lens-and-prompts: no prompt at every camera change).
+    // `baseEdited`, not "differs from the defaults": opening the camera editor places the
+    // base at the current camera, which is not an edit.
+    if (!confirmed && (!c.keys.empty() || (c.baseEdited && !IsDefaultBase(c.base)))) return EditResult::NeedsConfirm;
     c.camera = k;
     c.keys.clear();
     c.base = CameraParams{};
+    c.baseEdited = false;
     edited_ = true;
     return EditResult::Ok;
 }

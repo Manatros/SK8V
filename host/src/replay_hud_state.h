@@ -179,6 +179,7 @@ inline SvReplayHudState BuildReplayHudState(const ReplayHudInput& in) {
 
     std::string zoom;
     if (clip.lens == kLensFisheye) zoom = "Fish Eye";
+    else if (clip.lens == kLensWide) zoom = "Wide";
     else if (!preview && std::isfinite(in.shownZoomMm) && in.shownZoomMm > 0.0f) {
         const double zoomMm = std::clamp(static_cast<double>(in.shownZoomMm), 1.0, 9999.0);
         zoom = std::to_string(static_cast<int>(std::lround(zoomMm))) + "mm";
