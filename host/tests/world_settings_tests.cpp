@@ -93,6 +93,21 @@ int wmain(int argc, wchar_t** argv) {
     g_plainGtaCompare = false;
     SendWorldOptions(saved, capture);
     assert(options == original);
+    // CollisionSource=Live (SK8V style): no tiles, no GTAxSkate rules, saved switches kept.
+    Config live = saved;
+    live.liveCollision = true;
+    SendWorldOptions(live, capture);
+    for (const auto& [id, on] : options) assert(!on);
+    assert(WorldState(live) == "Live (SK8V style)");
+    assert(!live.stepRails && !live.highResParks);
+    SendWorldOptions(saved, capture);
+    assert(options == original);
+    WritePrivateProfileStringW(L"SkateV", L"CollisionSource", L"Live", ini.c_str());
+    assert(LoadConfig().liveCollision);
+    WritePrivateProfileStringW(L"SkateV", L"CollisionSource", L"Baked", ini.c_str());
+    assert(!LoadConfig().liveCollision);
+    WritePrivateProfileStringW(L"SkateV", L"CollisionSource", nullptr, ini.c_str());
+    assert(!LoadConfig().liveCollision);
     assert(!saved.stepRails && !saved.highResParks);
     assert(WorldState(saved).find("custom:") == 0);
     for (const auto& setting : BestWorldSettings()) {

@@ -191,6 +191,9 @@ struct Config {
     bool stamina = true;           // Stamina: GTA's stamina skill weakens push and pop when low; skating trains it
     int skaterTriangles = 3000;
     bool dynamicWorld = true;
+    // CollisionSource: Baked = GTAxSkate's baked map tiles + rules (default);
+    // Live = SK8V style: GTA's loaded collision, no baked tiles, no GTAxSkate rules.
+    bool liveCollision = false;
     float dynamicRadius = 35.0f;
     bool pedHitboxes = true; // peds as their own ragdoll parts (PedHitboxes=0: the old box)
     // Ped launch (not physical): peds never slow the rider; the first touch
@@ -441,6 +444,7 @@ const Key kKeys[] = {
     {"SkitchStandoff", Store<&Config::skitchStandoff>},
     {"SkaterTriangles", Store<&Config::skaterTriangles>},
     {"DynamicWorld", Store<&Config::dynamicWorld>},
+    {"CollisionSource", [](Config& c, const std::string& v) { c.liveCollision = v == "Live"; }},
     {"DynamicRadius", Store<&Config::dynamicRadius>},
     {"PedHitboxes", Store<&Config::pedHitboxes>},
     {"PedLaunch", Store<&Config::pedLaunch>},
@@ -4062,7 +4066,9 @@ std::string SavedWorldState(const Config& c, bool values = false) {
     return changed.empty() ? "best" : "custom: " + changed;
 }
 std::string WorldState(const Config& c, bool values = false) {
-    return g_plainGtaCompare ? "COMPARE (plain GTA)" : SavedWorldState(c, values);
+    if (g_plainGtaCompare) return "COMPARE (plain GTA)";
+    if (c.liveCollision) return "Live (SK8V style)";
+    return SavedWorldState(c, values);
 }
 #ifndef GTAXSKATE_TEST_WORLD_BASELINE
 #define GTAXSKATE_TEST_WORLD_BASELINE 0
@@ -4642,6 +4648,10 @@ std::vector<menu::Page> MenuPages(Session& s) {
                "Railings collide only where their bars are (best: on). Off: GTA's solid boxes."),
         Helped(Flag("Unmarked stairs as steps (test)", "UnflaggedStairs", D.unflaggedStairs, Bound("UnflaggedStairs", [&s] { WorldChanged(s, "UnflaggedStairs"); })),
                "Treats unmarked stairs as steps for testing (best: off)."),
+        Helped(Choice("Collision and grind rails", "CollisionSource", {"Baked", "Live"},
+                      {"Baked map (GTAxSkate)", "Live (SK8V style)"}, Bound("CollisionSource", [&s] { WorldChanged(s, "CollisionSource"); })),
+               "Baked map: GTAxSkate's pre-built collision and grind lines (needs the world tiles). "
+               "Live: GTA's own collision as SK8V does it, no bake needed; fewer grind lines."),
         Helped(Flag("Nearby entities collide", "DynamicWorld", D.dynamicWorld, Bound("DynamicWorld", [&s] { WorldChanged(s, "DynamicWorld"); })),
                "Vehicles, people and props near you collide with the board (best: on)."),
         Action("Reset all settings to GTAxSkate defaults", [&s] {
@@ -4775,7 +4785,7 @@ std::vector<menu::Page> MenuPages(Session& s) {
         if (page.title == "Dev") {
             // Collision switches, test marks, resets and diagnostics are developer
             // rows (B136); the player-facing ones stay on their player page.
-            if (k == "DynamicWorld") return "World";
+            if (k == "DynamicWorld" || k == "CollisionSource") return "World";
             if (std::any_of(std::begin(kWorldSwitches), std::end(kWorldSwitches),
                             [&k](const WorldSwitch& w) { return k == w.key; })) return "Collision switches";
             if (any({"CollisionView", "CollisionViewRange"}) || labelIs({"World collision:", "Compare: plain GTA"})) return "Collision switches";
@@ -5062,7 +5072,8 @@ std::vector<menu::Page> MenuPages(Session& s) {
                       {"Collectibles", {"Collectibles", "Collectibles:", "Unlock all collectibles"}},
                       {"Records board", {"Show records"}},
                       {"On the map", {"SkateSpots"}}}},
-        {"World", {{"What the board hits", {"DynamicWorld", "VehiclePush", "ObjectPush", "VehicleDamage", "BoardScratches"}},
+        {"World", {{"Collision and grind rails", {"CollisionSource"}},
+                   {"What the board hits", {"DynamicWorld", "VehiclePush", "ObjectPush", "VehicleDamage", "BoardScratches"}},
                    {"People and injuries", {"PedsSurvive", "PedLaunch", "PedBumpImpulse", "Injuries"}},
                    {"On foot, swimming and aim", {"GtaDelegation", "SwimDepth", "BoardAim", "Stamina"}}}},
         {"GPS", {{"GPS", {"GPS", "GpsWhileSkating"}}}},
@@ -5178,9 +5189,10 @@ void SetWorldOption(std::uint32_t id, bool on) {
 
 template <class Set>
 void SendWorldOptions(const Config& c, Set set) {
+    const bool plain = g_plainGtaCompare || c.liveCollision;
     for (const auto& w : kWorldSwitches) if (w.id != kHostOnlyWorldSwitch)
-        set(w.id, !g_plainGtaCompare && c.*(w.value));
-    set(8, !g_plainGtaCompare);
+        set(w.id, !plain && c.*(w.value));
+    set(8, !plain);
 }
 
 void ApplyWorldOptions(const Config& c) {

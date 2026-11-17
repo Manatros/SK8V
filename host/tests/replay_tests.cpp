@@ -604,7 +604,7 @@ int main() {
         f1.objects[0].handle = 301;
         f1.objects[0].model = 0x1234;
         f1.objects[0].pos[0] = 5.0f;
-        rec.Add(f1, 1.0);
+        rec.Add(f1, 0.5);  // Add ignores dt >= 1 s (a hitch), so stay under it
 
         auto spans = ComputeActorSpans(rec);
         assert(spans.size() == 1);
