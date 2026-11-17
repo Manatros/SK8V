@@ -448,7 +448,9 @@ pub(crate) fn drop_duplicates(lines: &mut Vec<Vec<Vec3>>, tracks: &[Vec<Vec3>]) 
     removed
 }
 /// Splits `r` into its uncovered tails (>= 0.35 m, kept) and the covered
-/// pieces (removed), 1 cm steps; shared by R3a and R5.
+/// pieces (removed). Refine transitions between 1 cm samples so the tail
+/// threshold measures the coverage boundary, not the first uncovered sample.
+/// Shared by R3a and R5.
 fn split_covered(r: &[Vec3], cover: &Segments, distance: f32, cos: f32) -> (Vec<Vec<Vec3>>, Vec<Vec<Vec3>>) {
     let mut tails = Vec::new();
     let mut run = Vec::new();
@@ -461,13 +463,30 @@ fn split_covered(r: &[Vec3], cover: &Segments, distance: f32, cos: f32) -> (Vec<
     };
     for w in r.windows(2) {
         let n = (w[0].distance(w[1]) / 0.01).ceil().max(1.) as usize;
+        let dir = (w[1] - w[0]).normalize_or_zero();
+        let mut previous = w[0];
+        let mut was_covered = cover.near(previous, dir, distance, cos);
         for k in 0..=n {
             let p = w[0].lerp(w[1], k as f32 / n as f32);
-            if cover.near(p, (w[1] - w[0]).normalize_or_zero(), distance, cos) {
+            let covered = cover.near(p, dir, distance, cos);
+            if covered != was_covered {
+                let (mut yes, mut no) = if covered { (p, previous) } else { (previous, p) };
+                for _ in 0..16 {
+                    let mid = (yes + no) * 0.5;
+                    if mid == yes || mid == no { break; }
+                    if cover.near(mid, dir, distance, cos) { yes = mid; } else { no = mid; }
+                }
+                // Keep the covered side of the final floating-point bracket:
+                // rounding must not shorten an exactly 35 cm unique tail.
+                if run.last() != Some(&yes) { run.push(yes); }
+            }
+            if covered {
                 flush(&mut run, &mut tails);
             } else if run.last() != Some(&p) {
                 run.push(p);
             }
+            previous = p;
+            was_covered = covered;
         }
     }
     flush(&mut run, &mut tails);
@@ -909,6 +928,32 @@ mod tests {
         assert_eq!(lines.len(), 2);
         assert!(lines.iter().any(|r| (length(r) - 6.).abs() < 1e-3), "the longer line stays whole");
         assert!(lines.iter().any(|r| (length(r) - 1.).abs() < 0.04), "the 1 m unique tail, less the 3 cm overlap tolerance");
+    }
+
+    #[test]
+    fn r5_unique_tail_threshold_uses_the_coverage_boundary() {
+        for tail in [0.349, 0.350, 0.355] {
+            // The 3 cm end cap of the covering segment is covered too.
+            // Reverse the candidate to exercise both transition directions.
+            for reverse in [false, true] {
+                let cover = line(0., 1., 6.);
+                let mut candidate = vec![at(-tail - DUP_DISTANCE, 0., 1.), at(4., 0., 1.)];
+                if reverse { candidate.reverse(); }
+                let mut lines = vec![cover.clone(), candidate.clone()];
+                let removed = drop_duplicates(&mut lines, &[]);
+                assert!(!removed.is_empty());
+                assert!(lines.contains(&cover));
+                let tails: Vec<_> = lines.iter().filter(|r| **r != cover).collect();
+                if tail < 0.35 {
+                    assert!(tails.is_empty(), "{tail} m, reverse={reverse}");
+                } else {
+                    assert_eq!(tails.len(), 1, "{tail} m, reverse={reverse}");
+                    assert!((length(tails[0]) - tail).abs() < 0.0005,
+                        "true {tail} m, measured {}, reverse={reverse}", length(tails[0]));
+                    assert!(tails[0].contains(&candidate[if reverse { 1 } else { 0 }]));
+                }
+            }
+        }
     }
     #[test]
     fn r5_does_nothing_outside_park_areas() {

@@ -411,7 +411,17 @@ fn see_through_boxes_with_bars(tris: &mut Vec<Tri>, stairs: &[Tri], visible: &[[
     see_through_boxes_with_reach(tris, stairs, visible, centre, radius, id, out, bars, sources, Some(visible),&[])
 }
 fn see_through_boxes_with_reach(tris: &mut Vec<Tri>, stairs: &[Tri], visible: &[[[f32; 3]; 3]], centre: Vec2, radius: f32, id: &'static str, out: &mut Replacement, bars:&[Vec<Vec3>], sources:&std::collections::HashMap<u64,String>, reach: Option<&[[[f32; 3]; 3]]>, uncertain:&[[[f32;3];2]]) -> Option<Vec<[[f32;3];3]>> {
+    // R1b is additive. Expanding the candidate pool first can regroup a box
+    // straddling the circle and veto an existing R1 replacement, retaining GTA
+    // layers inside the park (Strawberry). Preserve the original circle pass
+    // and its ownership decisions before considering additional ring boxes.
+    let rest = see_through_box_pass(tris, stairs, visible, centre, radius, id, out, bars, sources, reach, uncertain, 0.0);
     let ring = ring();
+    if ring == 0.0 { return rest; }
+    see_through_box_pass(tris, stairs, rest.as_deref().unwrap_or(visible), centre, radius, id, out, bars, sources, reach, uncertain, ring).or(rest)
+}
+
+fn see_through_box_pass(tris: &mut Vec<Tri>, stairs: &[Tri], visible: &[[[f32; 3]; 3]], centre: Vec2, radius: f32, id: &'static str, out: &mut Replacement, bars:&[Vec<Vec3>], sources:&std::collections::HashMap<u64,String>, reach: Option<&[[[f32; 3]; 3]]>, uncertain:&[[[f32;3];2]], ring: f32) -> Option<Vec<[[f32;3];3]>> {
     let mut park: Vec<usize> = (0..tris.len()).filter(|&i| centroid(&tris[i].v).truncate().distance(centre) <= radius + ring || (id=="lamesa" && spot_panel(&tris[i],sources).is_some())).collect();
     if park.is_empty() { return None; }
     // A tile lists faces in its own order: the decision must not depend on it, or one tile
@@ -495,7 +505,6 @@ fn see_through_boxes_with_reach(tris: &mut Vec<Tri>, stairs: &[Tri], visible: &[
         }
     }
     sides.sort_by_cached_key(|s| order(&tris[s.faces.iter().copied().min_by_key(|&i| order(&tris[i])).unwrap_or(0)]));
-    let stair_grid = Grid::new(stairs.iter().map(|t| &t.v), MATCH);
     let mut taken = vec![false; visible.len()];
     let mut gone = vec![false; tris.len()];
     let probe = std::env::var_os("SKATEV_BOX_PROBE").is_some();
@@ -604,8 +613,17 @@ fn see_through_boxes_with_reach(tris: &mut Vec<Tri>, stairs: &[Tri], visible: &[
                 })
             }) {continue;}
             if solid || (spot && !new_rule) || (!new_rule && (!(BOX_FILL.0..=BOX_FILL.1).contains(&filled) || span<BOX_SPAN)) {continue;}
-            if faces.iter().any(|&i| samples(&tris[i].v).into_iter().any(|p| stair_grid.at(p).iter().any(|&k| distance(p, &stairs[k as usize].v) <= MATCH))) {
-                if probe && spot {eprintln!("BOX {id} panel {panel:?} retained: stair within {MATCH} m");}
+            // Contact means the actual stair triangle intersects the box's XY
+            // footprint at the box's height (2 cm vertical contact allowance).
+            // Clip the triangle itself: face samples miss small intersections
+            // and proximity alone vetoes stairs 20 cm beside the fence.
+            let mid = Vec3::new((ul.0 + ul.1) * 0.5, (wl.0 + wl.1) * 0.5, (zl.0 + zl.1) * 0.5);
+            let half = Vec3::new((ul.1 - ul.0) * 0.5, (wl.1 - wl.0) * 0.5, (zl.1 - zl.0) * 0.5 + 0.02);
+            if stairs.iter().any(|t| {
+                let unit = t.v.map(|p| { let q = local(p); (Vec3::new(q.dot(u), q.dot(s.n), q.z) - mid) / half });
+                clipped_support_polygon(unit, 1.0).1 >= 3
+            }) {
+                if probe && spot {eprintln!("BOX {id} panel {panel:?} retained: stair contacts XY footprint within 0.02 m vertically");}
                 continue;
             }
             if probe {
@@ -2721,6 +2739,26 @@ mod tests {
     }
 
     #[test]
+    fn stair_box_veto_requires_footprint_contact() {
+        let (x, y) = (-1360., -1400.);
+        let bars = fence_bars(x, y + 0.05, 1., 2.2);
+        // Touching side, 20 cm beside, 1 cm above, and 3 cm above.
+        for (sy0, sy1, z, keep) in [
+            (y - 0.2, y, 1.5, true),
+            (y - 0.3, y - 0.2, 1.5, false),
+            (y, y + 0.1, 2.21, true),
+            (y, y + 0.1, 2.23, false),
+        ] {
+            let stairs: Vec<_> = square(x + 2., x + 3., sy0, sy1, z).into_iter()
+                .map(|v| Tri { v, material: 1 }).collect();
+            let mut gta = closed_box(x, x + 6., y, y + 0.1, 1., 2.2, 69);
+            let mut out = Replacement::default();
+            see_through_boxes(&mut gta, &stairs, &bars, AT, 60., "vespucci", &mut out);
+            assert_eq!(gta.len(), if keep { 12 } else { 0 }, "stair at y={sy0}..{sy1}, z={z}");
+        }
+    }
+
+    #[test]
     fn a_fence_box_is_decided_the_same_in_any_face_order() {
         // Two collinear boxes sharing posts at their joint.
         let (x0, y0) = (-1360.0f32, -1400.0f32);
@@ -2962,6 +3000,27 @@ mod tests {
             see_through_boxes_with_bars(&mut gta,&[],&visible,AT,60.,"vespucci",&mut Replacement::default(),&[],&Default::default());
         });
         assert!(gta.is_empty(),"ordinary fill-band replacement retains rev4 admission");
+    }
+
+    #[test]
+    fn r1b_preserves_ordinary_boundary_box_replacement() {
+        let (x, y) = (AT.x + 55., AT.y - 0.05);
+        let make = || closed_box(x, x + 6., y, y + 0.1, 1., 2.2, 69);
+        let visible = fence_bars(x, y + 0.05, 1., 2.2);
+        let run = || {
+            let mut gta = make();
+            let mut out = Replacement::default();
+            see_through_boxes(&mut gta, &[], &visible, AT, 60., "vespucci", &mut out);
+            (gta, out)
+        };
+        let mut legacy = None;
+        crate::world::park_rules::with_trials_for_test(1 << 4, || { legacy = Some(run()); });
+        let (old_gta, old_out) = legacy.unwrap();
+        assert_eq!(old_out.removed.len(), 10, "rev4 admits all but the outside end cap");
+        let (gta, out) = run();
+        assert_eq!(gta.iter().map(|t| t.v).collect::<Vec<_>>(), old_gta.iter().map(|t| t.v).collect::<Vec<_>>());
+        assert_eq!(out.removed.len(), old_out.removed.len());
+        assert_eq!(out.added.iter().map(|t| t.v).collect::<Vec<_>>(), old_out.added.iter().map(|t| t.v).collect::<Vec<_>>());
     }
     #[test]
     fn r1b_v2_roundtrip_keeps_ownership_separate_from_wall_evidence() {
