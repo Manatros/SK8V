@@ -80,10 +80,18 @@ if ($Mode -eq 'Install') {
     }
     [IO.File]::WriteAllText((Join-Path $targetDir 'addon-installed.json'), ($receipt | ConvertTo-Json -Depth 4), [Text.UTF8Encoding]::new($false))
     if (Test-Path -LiteralPath $iniPath) {
+        # Keys go into [SkateV]. Appending them at the end of the file put them into the last
+        # section ([Preset.User]), whose __count then no longer matched, so the F10 menu refused
+        # every change ("User snapshot invalid; settings unchanged", test 2026-11-16 evening).
         [string[]]$lines = @(Get-Content -LiteralPath $iniPath | Where-Object { $_ -notmatch '^(TutorialRoot|SkateTutorialPack)=' })
-        $lines += "TutorialRoot=$targetDir"
-        $lines += 'SkateTutorialPack=1'
-        [IO.File]::WriteAllLines($iniPath, $lines)
+        $keys = @("TutorialRoot=$targetDir", 'SkateTutorialPack=1')
+        $at = [Array]::IndexOf($lines, '[SkateV]')
+        $lines = if ($at -ge 0) { @($lines[0..$at]) + $keys + @($lines | Select-Object -Skip ($at + 1)) } else { @('[SkateV]') + $keys + $lines }
+        # Keep the file UTF-16 when it was: the host's fast menu save needs UTF-16 (menu.cpp text::Stage);
+        # a UTF-8 rewrite made every F10 save fall back to the profile API (~1.8 s instead of ~14 ms).
+        $head = [IO.File]::ReadAllBytes($iniPath) | Select-Object -First 2
+        $enc = if ($head.Count -eq 2 -and $head[0] -eq 0xFF -and $head[1] -eq 0xFE) { [Text.UnicodeEncoding]::new($false, $true) } else { [Text.UTF8Encoding]::new($false) }
+        [IO.File]::WriteAllLines($iniPath, $lines, $enc)
     }
     Write-Host "Installed optional Tutorial Island add-on cleanly into: $targetDir"
     return
