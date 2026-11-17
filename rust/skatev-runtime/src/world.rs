@@ -1547,12 +1547,23 @@ pub fn prune_park_creases(area: &mut Area, tracks: &[Vec<Vec3>], origin_of: Opti
     area.rails=lines.into_iter().map(|r|r.into_iter().map(|p|coords::to_skate(p).to_array()).collect()).collect();
 }
 
-/// Live areas have no tile serialization; baked areas sweep the final tile
-/// pieces instead, in tile_bake::finish_park_lines.
+/// Live areas compare the same 64 m pieces as tile_bake::finish_park_lines.
+/// Keep the unsplit input byte-for-byte when no duplicate is removed.
 pub fn prune_park_duplicates(area: &mut Area, tracks: &[Vec<Vec3>]) {
-    let mut lines:Vec<Vec<Vec3>>=area.rails.iter().map(|r|r.iter().map(|p|coords::from_skate(Vec3::from_array(*p))).collect()).collect();
-    if !park_rules::sweep_duplicates(&mut lines,tracks) {return;}
-    area.rails=lines.into_iter().map(|r|r.into_iter().map(|p|coords::to_skate(p).to_array()).collect()).collect();
+    if !park_rules::enabled("R5") { return; }
+    let mut cells: std::collections::BTreeMap<crate::tiles::Cell, Vec<Vec<Vec3>>> = Default::default();
+    for rail in &area.rails {
+        let gta: Vec<_> = rail.iter().map(|p| coords::from_skate(Vec3::from_array(*p)).to_array()).collect();
+        for (cell, piece) in crate::tiles::split_rail(&gta, 64.0) {
+            cells.entry(cell).or_default().push(piece.into_iter().map(Vec3::from_array).collect());
+        }
+    }
+    let mut changed = false;
+    for lines in cells.values_mut() {
+        changed |= park_rules::sweep_duplicates(lines, tracks);
+    }
+    if !changed { return; }
+    area.rails = cells.into_values().flatten().map(|r| r.into_iter().map(|p| coords::to_skate(p).to_array()).collect()).collect();
 }
 
 /// R4 (rev 5, 1115-5): crest hysteresis. An existing line whose end lies on a
@@ -1666,12 +1677,16 @@ fn grow_end(
     };
     let mut dir = (end - back(r)).with_z(0.0).normalize_or_zero();
     if dir == Vec3::ZERO { return None; }
-    profile(end, dir)?;
+    let (crest, _) = profile(end, dir)?;
+    // Direction follows the true crest, independently of the gradual sideways
+    // correction of an offset seed. Otherwise that correction steers across it.
+    let mut crest_history = vec![crest - dir * 0.5, crest];
     let mut ext: Vec<Vec3> = Vec::new();
     let mut pending: Vec<Vec3> = Vec::new();
     let mut last = end;
     let mut travelled = 0.0;
     let mut gap_length = 0.0;
+    let mut gap_crest = crest;
     while travelled + RIDGE_STEP <= max_length + 1e-4 {
         let c = Vec3::new(last.x + dir.x * RIDGE_STEP, last.y + dir.y * RIDGE_STEP, last.z);
         // Missing crest samples may be bridged; park bounds and other lines
@@ -1684,21 +1699,22 @@ fn grow_end(
             let p = Vec3::new(c.x + n.x * o, c.y + n.y * o, 0.0);
             let z = if o == co { crest.z } else { height(p.x, p.y, crest.z)? };
             let p = p.with_z(z);
-            Some(p)
+            Some((p, crest))
         });
         match step {
-            Some(p) => {
+            Some((p, crest)) => {
                 if !crate::parks::in_park(p.truncate()) || line_near(p,own) { break; }
                 let step_length=last.distance(p);
-                if !pending.is_empty() && gap_length + step_length > RIDGE_GAP + 1e-4 { break; }
+                if !pending.is_empty() && gap_length + gap_crest.distance(crest) > RIDGE_GAP + 1e-4 { break; }
                 if travelled+step_length>max_length { break; }
                 travelled+=step_length;
                 gap_length = 0.0;
+                gap_crest = crest;
                 ext.append(&mut pending);
                 ext.push(p);
                 last = p;
-                let all: Vec<Vec3> = r.iter().copied().chain(ext.iter().copied()).collect();
-                dir = (p - back(&all)).with_z(0.0).normalize_or_zero();
+                crest_history.push(crest);
+                dir = (crest - back(&crest_history)).with_z(0.0).normalize_or_zero();
                 if dir == Vec3::ZERO { break; }
             }
             None => {
@@ -1706,7 +1722,9 @@ fn grow_end(
                 let step_length=last.distance(c);
                 if travelled+step_length>max_length { break; }
                 travelled+=step_length;
-                gap_length += step_length;
+                let next_crest = gap_crest + dir * RIDGE_STEP;
+                gap_length += gap_crest.distance(next_crest);
+                gap_crest = next_crest;
                 pending.push(c);
                 last = *pending.last().unwrap();
             }
@@ -3206,6 +3224,17 @@ mod tests {
         prune_park_duplicates(&mut area,&[]);
         let after:f32=area.rails.iter().map(|r|park_rules::length(&r.iter().map(|p|coords::from_skate(Vec3::from_array(*p))).collect::<Vec<_>>())).sum();
         assert!(before-after>10.,"live fallback removes the returning duplicate too: {before} -> {after}");
+    }
+    #[test]
+    fn r5_live_unchanged_path_keeps_its_unsplit_representation() {
+        let mut area = ridge_area(0., 1., &|_| 0.10);
+        // Several 64 m pieces, with no duplicates: do not perturb output order
+        // or add grid-plane vertices just because the live sweep inspected it.
+        area.rails.push(vec![[-1380., -1409., 1.], [-1380., -1407., 1.], [-1370., -1407., 1.]]
+            .into_iter().map(|p| coords::to_skate(Vec3::from_array(p)).to_array()).collect());
+        let original = area.rails.clone();
+        prune_park_duplicates(&mut area, &[]);
+        assert_eq!(area.rails, original);
     }
     #[test]
     fn r4_total_extension_per_line_is_at_most_15m() {
