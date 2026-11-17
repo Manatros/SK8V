@@ -1424,6 +1424,14 @@ fn bake(
         }
     };
     let bar_reports = std::sync::Mutex::new(BTreeMap::<tiles::Cell, Vec<String>>::new());
+    let a60_stats = std::sync::Mutex::new(crate::ground_align::GuardStats::default());
+    let a60_mark_probes: Option<Vec<(&'static str, [f32; 2], f32)>> =
+        std::env::var("SKATEV_A60_MARK_STATS").ok().filter(|v| v == "1").map(|_| vec![
+            ("1116-3", [-168.56, 609.43], 12.0),
+            ("1116-4", [-168.29, 606.51], 12.0),
+            ("1116-5", [-264.12, 604.34], 12.0),
+            ("1116-6", [-287.78, 614.64], 12.0),
+        ]);
     let is_ymap: Vec<bool> = spool.names.iter().map(|n| n.to_ascii_lowercase().ends_with(".ymap")).collect();
     let build = |c: tiles::Cell, lookups: &mut Lookups| -> Result<(Tile, Validation), Box<dyn Error + Send + Sync>> {
         let mut validation = Validation::default();
@@ -1475,7 +1483,9 @@ fn bake(
                     drawn.extend(lookups.ground_tiles[&cell].iter().filter(|t| (0..2).all(|k|t.p.iter().any(|p|p[k]>=centre[k]-radius)&&t.p.iter().any(|p|p[k]<=centre[k]+radius))).copied());
                 }
             }
-            Ok(crate::ground_align::field(block,&raw.tris,&eligible,&drawn))
+            let (field, gs) = crate::ground_align::field_with_stats(block, &raw.tris, &eligible, &drawn, a60_mark_probes.as_deref());
+            a60_stats.lock().unwrap().add(&gs);
+            Ok(field)
         })?;
         let alignment_from:Vec<_>=data.tris.iter().zip(before_alignment).filter_map(|(t,old)|{
             let new=svwc::surfaces::key(&t.v);(new!=old).then_some((new,old))
@@ -1840,8 +1850,9 @@ fn bake(
         .iter()
         .map(|&c| fs::metadata(tiles::path(&out, c)).map_or(0, |m| m.len()))
         .sum();
+    let a60_summary = *a60_stats.lock().unwrap();
     let report = format!(
-        "{report}State-dependent cells (live only): {} worldwide, {} selected\nResumed tiles: {resumed}\nTile bytes: {tile_bytes}\nPeak process working set: {} bytes\nRaw collision staged on disk; one resource / tile context in RAM\n",
+        "{report}State-dependent cells (live only): {} worldwide, {} selected\nResumed tiles: {resumed}\nTile bytes: {tile_bytes}\nPeak process working set: {} bytes\nRaw collision staged on disk; one resource / tile context in RAM\nA60 guard stats: {a60_summary:?}\n",
         live_cells.len(), region.intersection(&live_cells).count(),
         peak_memory()
     );

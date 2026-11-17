@@ -1539,6 +1539,7 @@ fn replace_park(tris: &mut Vec<Tri>, stairs: &[Tri], visible: &[[[f32; 3]; 3]], 
 /// isolated posts/trim cannot masquerade as the sides of a visible wall.
 struct ArchWalls {
     walls: Vec<[[f32;3];3]>,
+    wall_normals: Vec<Vec3>,
     components: Vec<usize>,
     wall_grid: Grid,
     floors: Vec<[[f32;3];3]>,
@@ -1549,6 +1550,7 @@ struct ArchWalls {
 impl ArchWalls {
     fn new(visible:&[[[f32;3];3]], gta:&[Tri], centre:Vec2, radius:f32)->Self {
         let walls:Vec<_>=visible.iter().filter(|t|normal(t).z.abs()<=0.258819 && centroid(t).truncate().distance(centre)<=radius).copied().collect();
+        let wall_normals:Vec<_>=walls.iter().map(normal).collect();
         let mut components:Vec<_>=(0..walls.len()).collect();
         let mut edges=std::collections::BTreeMap::new();
         fn root(p:&mut [usize],mut i:usize)->usize {while p[i]!=i {p[i]=p[p[i]];i=p[i];}i}
@@ -1556,7 +1558,7 @@ impl ArchWalls {
             let q=|p:[f32;3]|p.map(|v|(v*1e4).round() as i32);
             let (a,b)=(q(t[e]),q(t[(e+1)%3]));let edge=if a<b {(a,b)}else{(b,a)};
             let owners: &mut Vec<usize>=edges.entry(edge).or_default();
-            for &j in owners.iter() {if normal(t).dot(normal(&walls[j])).abs()>=0.9659258 {let a=root(&mut components,i);let b=root(&mut components,j);components[a]=b;}}
+            for &j in owners.iter() {if wall_normals[i].dot(wall_normals[j]).abs()>=0.9659258 {let a=root(&mut components,i);let b=root(&mut components,j);components[a]=b;}}
             owners.push(i);
         }}
         // Visible triangle soups can have a subdivided edge on one side.
@@ -1565,7 +1567,7 @@ impl ArchWalls {
         let junctions=Grid::new(walls.iter(),0.001);
         for (i,t) in walls.iter().enumerate() {for p in t {
             for &j in junctions.at(v3(*p)) {let j=j as usize;
-                if root(&mut components,i)==root(&mut components,j) || normal(t).dot(normal(&walls[j])).abs()<0.9659258 {continue}
+                if root(&mut components,i)==root(&mut components,j) || wall_normals[i].dot(wall_normals[j]).abs()<0.9659258 {continue}
                 let joined=(0..3).any(|a|(0..3).any(|b| {
                     let (x,y)=(v3(t[a]),v3(t[(a+1)%3]));let (g,h)=(v3(walls[j][b]),v3(walls[j][(b+1)%3]));
                     let d=y-x;let len=d.length();if len<0.0002 {return false}let u=d/len;
@@ -1578,9 +1580,9 @@ impl ArchWalls {
         }}
         for i in 0..components.len() {components[i]=root(&mut components,i);}
         let floors:Vec<_>=visible.iter().copied().chain(gta.iter().map(|t|t.v)).filter(|t|normal(t).z>0.5).collect();
-        let wall_grid=Grid::new(walls.iter(),3.0);
+        let wall_grid=Grid::new(walls.iter(),3.5);
         let floor_grid=Grid::new(floors.iter(),0.05);
-        Self{walls,components,wall_grid,floors,floor_grid,centre,radius}
+        Self{walls,wall_normals,components,wall_grid,floors,floor_grid,centre,radius}
     }
     fn spans(walls:&[&[[f32;3];3]], p:Vec3, u:Vec2)->Vec<(f32,f32)> {
         let at=p.truncate().dot(u);
@@ -1601,33 +1603,54 @@ impl ArchWalls {
         let tn=normal(t);let c=centroid(t);
         if tn.z.abs()>0.258819 || t.iter().any(|p|v3(*p).truncate().distance(self.centre)>self.radius) {return false}
         // GTA's cut chord is not the wall's local direction. On the curved
-        // ledges it can shift a column across a jamb. Use the nearby visible
-        // facets' frames and require one complete opening witness in a frame.
+        // ledges it can shift a column across a jamb. Try the chord's own frame
+        // plus unique nearby visible facets' frames (including facets touching
+        // only one vertex of a long curved residual).
         let mut frames=Vec::new();
-        for &i in self.wall_grid.at(c) {let w=&self.walls[i as usize];let n=normal(w);
-            if n.dot(tn).abs()<0.9659258 || !t.iter().all(|p|(v3(*p)-v3(w[0])).dot(n).abs()<=0.0501) {continue}
-            let mut n=n.truncate().normalize_or_zero();if n.dot(tn.truncate())<0.0 {n= -n;}
+        let t2=tn.truncate().normalize_or_zero();
+        if t2!=Vec2::ZERO {frames.push(t2);}
+        for &i in self.wall_grid.at(c) {let i=i as usize;let w=&self.walls[i];let n=self.wall_normals[i];
+            if n.dot(tn).abs()<0.9659258 || !t.iter().any(|p|(v3(*p)-v3(w[0])).dot(n).abs()<=0.0501) {continue}
+            let mut n=n.truncate().normalize_or_zero();if n==Vec2::ZERO {continue}
+            if n.dot(t2)<0.0 {n= -n;}
             if !frames.iter().any(|v:&Vec2|v.distance(n)<1e-5) {frames.push(n);}
         }
         frames.into_iter().any(|n|self.opening_in_frame(t,n))
     }
     fn opening_in_frame(&self,t:&[[f32;3];3],n:Vec2)->bool {
         let c=centroid(t);let u=Vec2::new(-n.y,n.x);
-        let candidates:Vec<_>=self.wall_grid.at(c).iter().map(|&i|i as usize)
-            .filter(|&i|{let w=&self.walls[i];normal(w).truncate().dot(n).abs()>0.9659258 && centroid(w).truncate().distance(c.truncate())<3.0}).collect();
-        let component=candidates.iter().filter(|&&i|t.iter().all(|p|(v3(*p)-v3(self.walls[i][0])).dot(normal(&self.walls[i])).abs()<=0.0501))
+        let wn2=|i:usize| self.wall_normals[i].truncate().normalize_or_zero();
+        let mut nearby:Vec<usize>=self.wall_grid.at(c).iter().map(|&i|i as usize).collect();
+        nearby.sort_unstable();nearby.dedup();
+        let candidates:Vec<_>=nearby.iter().copied()
+            .filter(|&i|wn2(i).dot(n).abs()>0.9659258 && centroid(&self.walls[i]).truncate().distance(c.truncate())<3.0).collect();
+        if candidates.is_empty(){return false}
+        // On curved ledges, different vertices of a cut residual may sit within
+        // 5 cm of adjacent facets rather than a single flat plane.
+        if !t.iter().all(|p|candidates.iter().any(|&i|(v3(*p)-v3(self.walls[i][0])).dot(self.wall_normals[i]).abs()<=0.0501)) {return false}
+        let component=candidates.iter().filter(|&&i|(c-v3(self.walls[i][0])).dot(self.wall_normals[i]).abs()<=0.0501)
             .filter_map(|&i|Self::spans(&[&self.walls[i]],c,u).first().map(|s|(s.0,self.components[i])))
             .min_by(|a,b|a.0.total_cmp(&b.0)).map(|p|p.1);
         let Some(component)=component else{return false};
-        let all:Vec<_>=candidates.into_iter().filter(|&i|self.components[i]==component).map(|i|&self.walls[i]).collect();
-        let local:Vec<_>=all.iter().copied().filter(|w|t.iter().all(|p|(v3(*p)-v3(w[0])).dot(normal(w)).abs()<=0.0501)).collect();
-        if local.is_empty(){return false}
-        // Take the limit from inside the residual at a shared jamb/soffit
-        // edge: the adjoining solid flank has a lower column there exactly.
-        let points=[v3(t[0]),v3(t[1]),v3(t[2])].map(|p|p+(c-p)*0.002);
-        let points=[points[0],points[1],points[2],c];
+        let all:Vec<usize>=nearby.into_iter().filter(|&i|self.components[i]==component
+            && centroid(&self.walls[i]).truncate().distance(c.truncate())<3.5
+            && wn2(i).dot(n).abs()>0.7071068).collect();
+        let cw:Vec<usize>=all.iter().copied().filter(|&i|wn2(i).dot(n).abs()>0.8660254).collect();
+        if cw.is_empty(){return false}
+        // Step 1.5 cm (capped at 25%) inward from vertices along the arch
+        // boundary so adjacent jamb facets do not falsely veto arch corners.
+        let mut points=[Vec3::ZERO;4];
+        for (k,&pt) in t.iter().enumerate() {
+            let p=v3(pt);let d=c-p;let len=d.length();
+            let step=if len>1e-6 {(0.015/len).min(0.25)} else {0.0};
+            points[k]=p+d*step;
+        }
+        points[3]=c;
         let mut soffits=Vec::new();
         for p in points {
+            let local:Vec<_>=cw.iter().filter(|&&i|(p-v3(self.walls[i][0])).dot(self.wall_normals[i]).abs()<=0.0501)
+                .map(|&i|&self.walls[i]).collect();
+            if local.is_empty(){return false}
             let spans=Self::spans(&local,p,u);let Some(&(lo,mut hi))=spans.first() else{return false};
             for &(z,top) in &spans[1..] {if z>hi+0.005 {return false} hi=hi.max(top);}
             if p.z>lo+0.003 {return false} soffits.push(lo);
@@ -1647,26 +1670,60 @@ impl ArchWalls {
         // Intersections at the opening base locate its actual flanks, rather
         // than the edges of one arbitrarily tessellated cut triangle.
         let mut sections=Vec::new();
-        for w in &all {for (a,b) in [(0,1),(1,2),(2,0)] {
-            let dz=w[b][2]-w[a][2];if dz.abs()<1e-7 {continue}
-            let f=(floor+0.01-w[a][2])/dz;
-            if (0.0..=1.0).contains(&f) {let p=v3(w[a])+(v3(w[b])-v3(w[a]))*f;
-                let d=(p-c).truncate();if d.dot(n).abs()<=0.25 {sections.push((d.dot(u),p));}
+        for &i in &all {let w=&self.walls[i];let mut fn2=wn2(i);if fn2==Vec2::ZERO {fn2=n;} if fn2.dot(n)<0.0 {fn2= -fn2;}
+            for (a,b) in [(0,1),(1,2),(2,0)] {
+                let dz=w[b][2]-w[a][2];if dz.abs()<1e-7 {continue}
+                let f=(floor+0.01-w[a][2])/dz;
+                if (0.0..=1.0).contains(&f) {let p=v3(w[a])+(v3(w[b])-v3(w[a]))*f;
+                    if p.truncate().distance(c.truncate())<=2.5 {
+                        let d=(p-c).truncate();if d.dot(n).abs()<=0.25 {sections.push((d.dot(u),p,fn2));}
+                    }
+                }
             }
-        }}
-        let left=sections.iter().filter(|(x,_)|*x< -0.001).max_by(|a,b|a.0.total_cmp(&b.0));
-        let right=sections.iter().filter(|(x,_)|*x>0.001).min_by(|a,b|a.0.total_cmp(&b.0));
-        let (Some(&(l,lp)),Some(&(r,rp)))=(left,right) else{return false};
+        }
+        let left=sections.iter().filter(|(x,_,_)|*x< -0.001).max_by(|a,b|a.0.total_cmp(&b.0));
+        let right=sections.iter().filter(|(x,_,_)|*x>0.001).min_by(|a,b|a.0.total_cmp(&b.0));
+        let (Some(&(l,lp,ln)),Some(&(r,rp,rn)))=(left,right) else{return false};
         if r-l>2.1 {return false}
         let edge=t.map(|p|(v3(p)-c).truncate().dot(u));
         if l>edge.into_iter().fold(f32::MAX,f32::min)+0.25 || r<edge.into_iter().fold(f32::MIN,f32::max)-0.25 {return false}
-        for (p,sign) in [(lp,-1.0),(rp,1.0)] {for step in 1..=5 {
-            let q=p+(u*sign*(step as f32*0.05)).extend(0.0);
-            let flank:Vec<_>=all.iter().copied().filter(|w|(q-v3(w[0])).dot(normal(w)).abs()<=0.05).collect();
-            let mut hi=floor;
-            for (lo,z) in Self::spans(&flank,q,u) {if lo>hi+0.05 {break}hi=hi.max(z);}
-            if hi<top-0.005 {return false}
-        }}
+        for (base_p,base_n,sign) in [(lp,ln,-1.0),(rp,rn,1.0)] {
+            let mut fn_cur=base_n;
+            let mut fu=Vec2::new(-fn_cur.y,fn_cur.x);if fu.dot(u)<0.0 {fu= -fu;}
+            let mut cur=base_p;
+            for _step in 1..=5 {
+                cur+=(fu*sign*0.05).extend(0.0);
+                let mut flank:Vec<_>=all.iter().filter(|&&i|(cur-v3(self.walls[i][0])).dot(self.wall_normals[i]).abs()<=0.05)
+                    .map(|&i|&self.walls[i]).collect();
+                if flank.is_empty() {
+                    // Track gentle wall curvature only along same-facing facets of this component.
+                    let snap_i=all.iter().copied().filter(|&i|{
+                        let w2=wn2(i);
+                        w2.dot(fn_cur).abs()>0.8660254
+                            && (cur-v3(self.walls[i][0])).dot(self.wall_normals[i]).abs()<=0.10
+                            && centroid(&self.walls[i]).truncate().distance(cur.truncate())<0.6
+                    }).min_by(|&a,&b|{
+                        centroid(&self.walls[a]).truncate().distance(cur.truncate())
+                            .total_cmp(&centroid(&self.walls[b]).truncate().distance(cur.truncate()))
+                    });
+                    if let Some(j)=snap_i {
+                        let d=(cur-v3(self.walls[j][0])).dot(self.wall_normals[j]);
+                        let mut wn_j=wn2(j);
+                        cur-=(wn_j*d).extend(0.0);
+                        if wn_j!=Vec2::ZERO {
+                            if wn_j.dot(n)<0.0 {wn_j= -wn_j;}
+                            fn_cur=wn_j;
+                            fu=Vec2::new(-fn_cur.y,fn_cur.x);if fu.dot(u)<0.0 {fu= -fu;}
+                        }
+                        flank=all.iter().filter(|&&i|(cur-v3(self.walls[i][0])).dot(self.wall_normals[i]).abs()<=0.05)
+                            .map(|&i|&self.walls[i]).collect();
+                    }
+                }
+                let mut hi=floor;
+                for (lo,z) in Self::spans(&flank,cur,fu) {if lo>hi+0.05 {break}hi=hi.max(z);}
+                if hi<top-0.005 {return false}
+            }
+        }
         true
     }
 }
@@ -2030,6 +2087,26 @@ mod tests {
         let v=arch_mesh(1.6,true);let off=t.map(|mut p|{p[1]+=0.06;p});
         assert!(!ArchWalls::new(&v,&[],Vec2::ZERO,60.0).opening(&off));
         assert!(!ArchWalls::new(&v,&[],Vec2::new(100.0,100.0),1.0).opening(&t));
+    }
+    #[test]
+    fn r6_curved_arch_and_jamb_corner_residuals_open() {
+        // Segmented curved wall (~9 deg per segment, 1.2 m arch with 0.4 m soffit) plus floor.
+        let pts = [(-1.8f32, 0.22f32), (-1.2, 0.10), (-0.6, 0.02), (0.0, 0.0), (0.6, 0.02), (1.2, 0.10), (1.8, 0.22)];
+        let mut vis = Vec::new();
+        for w in pts.windows(2) {
+            let ((x0, y0), (x1, y1)) = (w[0], w[1]);
+            let z0 = if x0 >= -0.6 && x1 <= 0.6 { 0.40 } else { 0.0 };
+            vis.push([[x0, y0, z0], [x1, y1, z0], [x1, y1, 1.0]]);
+            vis.push([[x0, y0, z0], [x1, y1, 1.0], [x0, y0, 1.0]]);
+        }
+        vis.extend(square(-4.0, 4.0, -4.0, 4.0, 0.0));
+        let arches = ArchWalls::new(&vis, &[], Vec2::ZERO, 60.0);
+        // Chord crossing the curved arch, with top corner touching the jamb edge at x=-0.6, z=0.39.
+        let arch_sheet = [[-0.6, 0.02, 0.0], [0.6, 0.02, 0.0], [-0.6, 0.02, 0.39]];
+        assert!(arches.opening(&arch_sheet));
+        // Solid flank sheet in the same curved wall must stay closed.
+        let solid_sheet = [[-1.2, 0.10, 0.0], [-0.6, 0.02, 0.0], [-0.6, 0.02, 0.8]];
+        assert!(!arches.opening(&solid_sheet));
     }
     #[test]
     fn r6_applies_only_to_verified_cut_residuals_in_replace_park() {
