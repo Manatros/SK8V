@@ -372,7 +372,7 @@ pub(crate) fn prefer_visible(gta: &mut Vec<Vec<Vec3>>, visual: &[Vec<Vec3>]) -> 
             return true;
         }
         // Same uncovered-tail policy as dedupe_within, in metres (>=35 cm).
-        let (mine, gone) = split_covered(r, &visual, 0.06, 5f32.to_radians().cos());
+        let (mine, gone) = split_covered(r, &visual, 0.06, 5f32.to_radians().cos(), None);
         tails.extend(mine);
         removed.extend(gone);
         false
@@ -389,13 +389,22 @@ pub(crate) fn prefer_visible(gta: &mut Vec<Vec<Vec3>>, visual: &[Vec<Vec3>]) -> 
 /// stay two lines. Train lines (A49) are neither dropped nor used as cover.
 pub(crate) const DUP_DISTANCE: f32 = 0.03;
 /// Shared final-stage hook for live areas and serialized baker tile pieces.
-pub fn sweep_duplicates(lines: &mut Vec<Vec<Vec3>>, tracks: &[Vec<Vec3>]) -> bool {
-    let removed=drop_duplicates(lines,tracks);
+/// `seam`: the tile size the pieces were split at. An uncovered tail that
+/// touches a tile seam is kept whatever its length here, because its true
+/// length continues in the neighbouring tile, which this tile cannot see
+/// (Copilot re-check 2026-11-17: a 35.5 cm tail split 10 + 25 cm lost its
+/// 10 cm part). Worst case: a stub under 35 cm stays at a seam; no line is
+/// lost, and bake and live decide the same way (both sweep 64 m pieces).
+pub fn sweep_duplicates(lines: &mut Vec<Vec<Vec3>>, tracks: &[Vec<Vec3>], seam: Option<f32>) -> bool {
+    let removed=drop_duplicates_at(lines,tracks,seam);
     if removed.is_empty() {return false;}
     record("R5",removed,Vec::new(),0,false);
     true
 }
 pub(crate) fn drop_duplicates(lines: &mut Vec<Vec<Vec3>>, tracks: &[Vec<Vec3>]) -> Vec<Vec<Vec3>> {
+    drop_duplicates_at(lines, tracks, None)
+}
+pub(crate) fn drop_duplicates_at(lines: &mut Vec<Vec<Vec3>>, tracks: &[Vec<Vec3>], seam: Option<f32>) -> Vec<Vec<Vec3>> {
     let mut removed = Vec::new();
     if !enabled("R5") || lines.len() < 2 {
         return removed;
@@ -435,7 +444,7 @@ pub(crate) fn drop_duplicates(lines: &mut Vec<Vec<Vec3>>, tracks: &[Vec<Vec3>]) 
             result.push((i, r));
             continue;
         }
-        let (tails, gone) = split_covered(&r, &cover, DUP_DISTANCE, cos);
+        let (tails, gone) = split_covered(&r, &cover, DUP_DISTANCE, cos, seam);
         removed.extend(gone);
         for t in tails {
             kept_cover.push(t.clone());
@@ -451,11 +460,20 @@ pub(crate) fn drop_duplicates(lines: &mut Vec<Vec<Vec3>>, tracks: &[Vec<Vec3>]) 
 /// pieces (removed). Refine transitions between 1 cm samples so the tail
 /// threshold measures the coverage boundary, not the first uncovered sample.
 /// Shared by R3a and R5.
-fn split_covered(r: &[Vec3], cover: &Segments, distance: f32, cos: f32) -> (Vec<Vec<Vec3>>, Vec<Vec<Vec3>>) {
+/// With `seam`, a tail that starts at the piece's first point or ends at its
+/// last point while that point lies on a tile seam is kept at any length.
+fn split_covered(r: &[Vec3], cover: &Segments, distance: f32, cos: f32, seam: Option<f32>) -> (Vec<Vec<Vec3>>, Vec<Vec<Vec3>>) {
     let mut tails = Vec::new();
     let mut run = Vec::new();
-    let flush = |run: &mut Vec<Vec3>, tails: &mut Vec<Vec<Vec3>>| {
-        if length(run) >= 0.35 {
+    let on_seam = |p: Vec3| seam.map_or(false, |s| {
+        let near = |v: f32| (v - (v / s).round() * s).abs() <= 1e-3;
+        near(p.x) || near(p.y)
+    });
+    let (first, last) = (r[0], r[r.len() - 1]);
+    let flush = |run: &mut Vec<Vec3>, tails: &mut Vec<Vec<Vec3>>, at_end: bool| {
+        let touches = !run.is_empty()
+            && ((run[0] == first && on_seam(first)) || (at_end && on_seam(last)));
+        if length(run) >= 0.35 || (touches && run.len() >= 2) {
             tails.push(std::mem::take(run));
         } else {
             run.clear();
@@ -481,7 +499,7 @@ fn split_covered(r: &[Vec3], cover: &Segments, distance: f32, cos: f32) -> (Vec<
                 if run.last() != Some(&yes) { run.push(yes); }
             }
             if covered {
-                flush(&mut run, &mut tails);
+                flush(&mut run, &mut tails, false);
             } else if run.last() != Some(&p) {
                 run.push(p);
             }
@@ -489,7 +507,7 @@ fn split_covered(r: &[Vec3], cover: &Segments, distance: f32, cos: f32) -> (Vec<
             was_covered = covered;
         }
     }
-    flush(&mut run, &mut tails);
+    flush(&mut run, &mut tails, true);
     let kept = Segments::new(&tails, 0.002);
     let mut gone = Vec::new();
     let mut removed = Vec::new();

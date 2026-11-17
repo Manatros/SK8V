@@ -1560,7 +1560,7 @@ pub fn prune_park_duplicates(area: &mut Area, tracks: &[Vec<Vec3>]) {
     }
     let mut changed = false;
     for lines in cells.values_mut() {
-        changed |= park_rules::sweep_duplicates(lines, tracks);
+        changed |= park_rules::sweep_duplicates(lines, tracks, Some(64.0));
     }
     if !changed { return; }
     area.rails = cells.into_values().flatten().map(|r| r.into_iter().map(|p| coords::to_skate(p).to_array()).collect()).collect();
@@ -3235,6 +3235,36 @@ mod tests {
         let original = area.rails.clone();
         prune_park_duplicates(&mut area, &[]);
         assert_eq!(area.rails, original);
+    }
+
+    #[test]
+    fn r5_tail_threshold_is_invariant_to_the_tile_seam() {
+        for tail in [0.355, 0.345] {
+            for before_seam in [0.10, 0.1775, 0.34] {
+                for reverse in [false, true] {
+                    let boundary = -1344. - before_seam;
+                    let mut candidate = vec![Vec3::new(-1348., -1400., 1.), Vec3::new(boundary + tail, -1400., 1.)];
+                    if reverse { candidate.reverse(); }
+                    let mut area = ridge_area(0., 1., &|_| 0.10);
+                    area.rails = vec![vec![Vec3::new(-1350., -1400., 1.), Vec3::new(boundary - 0.03, -1400., 1.)], candidate]
+                        .into_iter().map(|r| r.into_iter().map(|p| coords::to_skate(p).to_array()).collect()).collect();
+                    prune_park_duplicates(&mut area, &[]);
+                    let pieces: Vec<_> = area.rails.iter().flat_map(|r| {
+                        let gta: Vec<_> = r.iter().map(|p| coords::from_skate(Vec3::from_array(*p)).to_array()).collect();
+                        crate::tiles::split_rail(&gta, 64.)
+                    }).filter(|(_, r)| r.iter().all(|p| p[0] >= boundary - 0.001)).collect();
+                    // Both sides keep their part: a seam-touching tail is never cut (conservative,
+                    // seam-invariant); a sub-35 cm tail that does not touch a seam is still removed
+                    // (r5_tail_threshold tests).
+                    assert_eq!(pieces.len(), 2, "tail={tail}, before_seam={before_seam}, reverse={reverse}");
+                    for (cell, r) in pieces {
+                        let length: f32 = r.windows(2).map(|w| Vec3::from_array(w[0]).distance(Vec3::from_array(w[1]))).sum();
+                        let expected = if cell.0 == -22 { before_seam } else { tail - before_seam };
+                        assert!((length - expected).abs() < 0.0005, "{length} != {expected}");
+                    }
+                }
+            }
+        }
     }
     #[test]
     fn r4_total_extension_per_line_is_at_most_15m() {

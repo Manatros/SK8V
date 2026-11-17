@@ -1758,7 +1758,7 @@ fn bake(
 fn finish_park_lines(tile: &mut Tile, tracks: &[Vec<Vec3>]) {
     let mut lines:Vec<Vec<Vec3>>=tile.rails.iter().map(|r|r.iter().copied().map(Vec3::from_array).collect()).collect();
     world::park_rules::recording(true);
-    let changed=world::park_rules::sweep_duplicates(&mut lines,tracks);
+    let changed=world::park_rules::sweep_duplicates(&mut lines,tracks,Some(tile.size));
     world::park_rules::recording(false);
     if !changed {return;}
     tile.rails=lines.into_iter().map(|r|r.into_iter().map(|p|p.to_array()).collect()).collect();
@@ -2025,6 +2025,35 @@ fn visible_park(v: &[[f32; 3]; 3]) -> Option<&'static str> {
 
 #[cfg(test)]
 mod batch_tests {
+    #[test]
+    fn r5_tail_threshold_is_invariant_to_the_tile_seam() {
+        use super::*;
+        for tail in [0.355, 0.345] {
+            for before_seam in [0.10, 0.1775, 0.34] {
+                for reverse in [false, true] {
+                    let boundary = -1344. - before_seam;
+                    let cover = vec![[-1350., -1400., 1.], [boundary - 0.03, -1400., 1.]];
+                    let mut candidate = vec![[-1348., -1400., 1.], [boundary + tail, -1400., 1.]];
+                    if reverse { candidate.reverse(); }
+                    let rails = [cover, candidate];
+                    for cell in [(-22, -22), (-21, -22)] {
+                        let mut tile = Tile { cell, size: 64., source: String::new(), triangles: vec![],
+                            rails: rails.iter().flat_map(|r| tiles::split_rail(r, 64.))
+                                .filter(|(c, _)| *c == cell).map(|(_, r)| r).collect(),
+                            noses: vec![], origins: vec![], origin_names: vec![] };
+                        finish_park_lines(&mut tile, &[]);
+                        let tails: Vec<_> = tile.rails.iter().filter(|r| r.iter().all(|p| p[0] >= boundary - 0.001)).collect();
+                        // Seam-touching tails are kept on both sides (seam-invariant, conservative).
+                        assert_eq!(tails.len(), 1,
+                            "tail={tail}, before_seam={before_seam}, reverse={reverse}, cell={cell:?}");
+                        let length: f32 = tails[0].windows(2).map(|w| Vec3::from_array(w[0]).distance(Vec3::from_array(w[1]))).sum();
+                        let expected = if cell.0 == -22 { before_seam } else { tail - before_seam };
+                        assert!((length - expected).abs() < 0.0005, "{length} != {expected}");
+                    }
+                }
+            }
+        }
+    }
     #[test]
     fn r5_sweeps_serialized_pieces_of_one_returning_path() {
         use super::*;
