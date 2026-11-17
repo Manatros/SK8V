@@ -842,6 +842,13 @@ fn bake(
     selection: String,
 ) -> Result<(), Box<dyn Error>> {
     let start = Instant::now();
+    // Rule A/B switches (SKATEV_R*_OFF) are read here only; such a bake is a
+    // trial, marked in rules.txt and trial.txt, which the runtime and
+    // build-world-collision.ps1 refuse (peer review 2026-11-16, finding 4).
+    let trials = world::park_rules::apply_trials_from_env();
+    if !trials.is_empty() {
+        eprintln!("TRIAL BAKE: park rules {} switched off; the output is marked non-installable", trials.join(","));
+    }
     let gta = Path::new(&paths[0]);
     let keys = Path::new(&paths[1]);
     // Retained in the CLI for older callers. A flattened extraction loses
@@ -1465,9 +1472,12 @@ fn bake(
             validation.bar_top_lines += world::bar_top_lines(&mut area, &boxed_area.rails, &slabs);
         }
         world::park_rules::recording(true);
-        world::prune_park_creases(&mut area, &kept_tracks);
+        // R4 (rev 5): crest hysteresis on the final lines, before the last
+        // crease and duplicate sweeps (R3b, R5) judge the final topology.
+        validation.ridge_extensions += world::extend_ridge_lines(&mut area);
+        let origin_of = |t: &[[f32; 3]; 3]| input_origin.get(&svwc::surfaces::key(t)).map(|n| spool.names[*n as usize].clone());
+        world::prune_park_creases(&mut area, &kept_tracks, Some(&origin_of));
         world::park_rules::recording(false);
-        world::park_rules::report(c,size,&input_origin,&spool.names);
         let mut tile = Tile {
             cell: c,
             size,
@@ -1551,6 +1561,8 @@ fn bake(
                 );
             }
         }
+        finish_park_lines(&mut tile,&kept_tracks);
+        world::park_rules::report(c,size,&input_origin,&spool.names);
         for i in (0..data.tris.len()).filter(|i| {
             is_step(&data.tris[*i]) && !tiles::clip_triangle(data.tris[*i].v, c, size).is_empty()
         }) {
@@ -1709,7 +1721,10 @@ fn bake(
     let workers = num_workers;
     if let Some(o) = obj.as_mut() { o.flush()?; }
     fs::write(out.join("tile-size.txt"), format!("{size}\n"))?;
-    fs::write(out.join("rules.txt"), tiles::rules_hash())?;
+    fs::write(out.join("rules.txt"), world::park_rules::rules_label(&tiles::rules_hash(), &trials))?;
+    if !trials.is_empty() {
+        fs::write(out.join("trial.txt"), format!("trial bake: park rules switched off: {}\nnever install this output\n", trials.join(",")))?;
+    }
     let ramps = ramps.load(std::sync::atomic::Ordering::Relaxed);
     let step_count = step_count.load(std::sync::atomic::Ordering::Relaxed);
     let report = format!(
@@ -1738,6 +1753,15 @@ fn bake(
     fs::write(out.join("report.txt"), &report)?;
     print!("{report}");
     Ok(())
+}
+
+fn finish_park_lines(tile: &mut Tile, tracks: &[Vec<Vec3>]) {
+    let mut lines:Vec<Vec<Vec3>>=tile.rails.iter().map(|r|r.iter().copied().map(Vec3::from_array).collect()).collect();
+    world::park_rules::recording(true);
+    let changed=world::park_rules::sweep_duplicates(&mut lines,tracks,Some(tile.size));
+    world::park_rules::recording(false);
+    if !changed {return;}
+    tile.rails=lines.into_iter().map(|r|r.into_iter().map(|p|p.to_array()).collect()).collect();
 }
 
 /// Counts a tile into the report and, when asked, appends it to the OBJ.
@@ -1823,6 +1847,8 @@ struct Validation {
     park_edge_lines: usize,
     /// Ramp side rims added in parks (world::ramp_rim_lines).
     ramp_rim_lines: usize,
+    /// Line ends grown along a ridge in parks (world::extend_ridge_lines, R4).
+    ridge_extensions: usize,
     /// Replaced railing boxes' top lines put on the visible bars (world::bar_top_lines).
     bar_top_lines: usize,
 }
@@ -1870,6 +1896,7 @@ impl Validation {
         self.risers += other.risers;
         self.park_edge_lines += other.park_edge_lines;
         self.ramp_rim_lines += other.ramp_rim_lines;
+        self.ridge_extensions += other.ridge_extensions;
         self.bar_top_lines += other.bar_top_lines;
         for p in other.track_examples {
             example(&mut self.track_examples, p);
@@ -1981,8 +2008,9 @@ impl Validation {
             self.step_examples
         ) + &format!("Park edge lines from GTA's own park collision (visible folds of 30 deg or more): {}
 Ramp side rim lines in parks: {}
+Line ends grown along a ridge in parks (R4): {}
 Railing top lines from replaced boxes, on the visible bars: {}
-", self.park_edge_lines, self.ramp_rim_lines, self.bar_top_lines)
+", self.park_edge_lines, self.ramp_rim_lines, self.ridge_extensions, self.bar_top_lines)
     }
 }
 
@@ -1997,6 +2025,45 @@ fn visible_park(v: &[[f32; 3]; 3]) -> Option<&'static str> {
 
 #[cfg(test)]
 mod batch_tests {
+    #[test]
+    fn r5_tail_threshold_is_invariant_to_the_tile_seam() {
+        use super::*;
+        for tail in [0.355, 0.345] {
+            for before_seam in [0.10, 0.1775, 0.34] {
+                for reverse in [false, true] {
+                    let boundary = -1344. - before_seam;
+                    let cover = vec![[-1350., -1400., 1.], [boundary - 0.03, -1400., 1.]];
+                    let mut candidate = vec![[-1348., -1400., 1.], [boundary + tail, -1400., 1.]];
+                    if reverse { candidate.reverse(); }
+                    let rails = [cover, candidate];
+                    for cell in [(-22, -22), (-21, -22)] {
+                        let mut tile = Tile { cell, size: 64., source: String::new(), triangles: vec![],
+                            rails: rails.iter().flat_map(|r| tiles::split_rail(r, 64.))
+                                .filter(|(c, _)| *c == cell).map(|(_, r)| r).collect(),
+                            noses: vec![], origins: vec![], origin_names: vec![] };
+                        finish_park_lines(&mut tile, &[]);
+                        let tails: Vec<_> = tile.rails.iter().filter(|r| r.iter().all(|p| p[0] >= boundary - 0.001)).collect();
+                        // Seam-touching tails are kept on both sides (seam-invariant, conservative).
+                        assert_eq!(tails.len(), 1,
+                            "tail={tail}, before_seam={before_seam}, reverse={reverse}, cell={cell:?}");
+                        let length: f32 = tails[0].windows(2).map(|w| Vec3::from_array(w[0]).distance(Vec3::from_array(w[1]))).sum();
+                        let expected = if cell.0 == -22 { before_seam } else { tail - before_seam };
+                        assert!((length - expected).abs() < 0.0005, "{length} != {expected}");
+                    }
+                }
+            }
+        }
+    }
+    #[test]
+    fn r5_sweeps_serialized_pieces_of_one_returning_path() {
+        use super::*;
+        let r=vec![[-1380.,-1409.,1.],[-1380.,-1407.,1.],[-1370.,-1407.,1.],[-1370.,-1409.,1.],
+            [-1380.,-1409.,1.],[-1380.,-1406.991,1.],[-1370.,-1406.991,1.],[-1370.,-1409.,1.]];
+        let mut tile=Tile {cell:(-22,-22),size:64.,source:String::new(),triangles:vec![],rails:tiles::split_rail(&r,64.).into_iter().filter(|(c,_)|*c==(-22,-22)).map(|(_,r)|r).collect(),noses:vec![],origins:vec![],origin_names:vec![]};
+        assert_eq!(tile.rails.len(),2);
+        finish_park_lines(&mut tile,&[]);
+        assert_eq!(tile.rails.len(),1,"the final pieces, rather than the raw path, are compared");
+    }
     #[test]
     fn visible_park_labels_boundary_faces_independent_of_first_vertex() {
         let v = [[749., -1231., 25.], [747., -1232., 25.], [747., -1230., 25.]];

@@ -14,6 +14,8 @@ struct Event {
     faces: Vec<[[f32; 3]; 3]>,
     boxes: usize,
     spot: bool,
+    /// One note per removed line (what it lay on), printed per line.
+    notes: Vec<String>,
 }
 thread_local! { static AUDIT: RefCell<Audit> = RefCell::new(Audit::default()); }
 pub fn begin() {
@@ -46,6 +48,16 @@ pub(crate) fn record(
     boxes: usize,
     spot: bool,
 ) {
+    record_noted(rule, lines, faces, boxes, spot, Vec::new());
+}
+pub(crate) fn record_noted(
+    rule: &'static str,
+    lines: Vec<Vec<Vec3>>,
+    faces: Vec<[[f32; 3]; 3]>,
+    boxes: usize,
+    spot: bool,
+    notes: Vec<String>,
+) {
     AUDIT.with(|a| {
         let mut a = a.borrow_mut();
         if a.active {
@@ -55,9 +67,14 @@ pub(crate) fn record(
                 faces,
                 boxes,
                 spot,
+                notes,
             });
         }
     });
+}
+/// Live builds: stop recording and drop what was gathered (no report).
+pub fn end() {
+    AUDIT.with(|a| *a.borrow_mut() = Audit::default());
 }
 pub fn report(
     cell: crate::tiles::Cell,
@@ -66,11 +83,13 @@ pub fn report(
     source_names: &[String],
 ) {
     let events = AUDIT.with(|a| std::mem::take(&mut a.borrow_mut().events));
-    for rule in ["R1", "R1-spot", "R2", "R3a", "R3b"] {
+    for rule in ["R1", "R1-spot", "R1b", "R2", "R3a", "R3b", "R4", "R5"] {
+        // R1b acts in the reach ring (rev 5): "outside" there means past it.
+        let margin = if rule == "R1b" { RING } else { 0.0 };
         let (mut lines, mut metres, mut boxes, mut faces, mut outside) = (0, 0.0f32, 0, 0, 0);
         let mut names = std::collections::BTreeSet::new();
         for e in events.iter().filter(|e| e.rule == rule) {
-            for r in &e.lines {
+            for (k, r) in e.lines.iter().enumerate() {
                 let clipped = crate::tiles::split_rail(
                     &r.iter().map(|p| p.to_array()).collect::<Vec<_>>(),
                     size,
@@ -81,14 +100,22 @@ pub fn report(
                 .collect::<Vec<_>>();
                 if !clipped.is_empty() {
                     lines += 1;
+                    if let Some(note) = e.notes.get(k) {
+                        let m: f32 = r.windows(2).map(|w| w[0].distance(w[1])).sum();
+                        eprintln!(
+                            "PARK-RULE-LINE tile {},{} {rule} at {:.2} {:.2} {:.2} len {m:.3} {note}",
+                            cell.0, cell.1, r[0].x, r[0].y, r[0].z
+                        );
+                    }
                 }
                 metres += clipped
                     .iter()
                     .flat_map(|r| r.windows(2))
                     .map(|w| Vec3::from_array(w[0]).distance(Vec3::from_array(w[1])))
                     .sum::<f32>();
-                outside +=
-                    usize::from(!e.spot && r.iter().any(|p| !crate::parks::in_park(p.truncate())));
+                outside += usize::from(
+                    !e.spot && r.iter().any(|p| !crate::parks::near_park(p.truncate(), margin)),
+                );
             }
             if let Some(t) = e.faces.first() {
                 let mid = e
@@ -112,7 +139,7 @@ pub fn report(
                     names.insert(source_names[*n as usize].as_str());
                 }
                 let mid = t.iter().map(|p| Vec3::from_array(*p)).sum::<Vec3>() / 3.;
-                outside += usize::from(!e.spot && !crate::parks::in_park(mid.truncate()));
+                outside += usize::from(!e.spot && !crate::parks::near_park(mid.truncate(), margin));
             }
         }
         eprintln!(
@@ -121,8 +148,56 @@ pub fn report(
         );
     }
 }
+/// The rules an A/B trial switches off: `SKATEV_R1_OFF`, `SKATEV_R2_OFF`,
+/// `SKATEV_R3a_OFF`, `SKATEV_R3b_OFF`, and (rev 5) `SKATEV_R1b_OFF`,
+/// `SKATEV_R4_OFF`, `SKATEV_R5_OFF`. Only the baker reads the environment
+/// (`apply_trials_from_env`), and it then marks its output as a trial that
+/// is never installable; the runtime DLL and every live-built cell apply
+/// all rules (peer review 2026-11-16, finding 4).
+pub const RULES: [&str; 7] = ["R1", "R2", "R3a", "R3b", "R1b", "R4", "R5"];
+/// R1b (rev 5): the reach ring round a park circle in which the railing-only
+/// box rule also acts (La Mesa's model reaches 75 m from a 30 m circle).
+pub const RING: f32 = 20.0;
+static TRIALS: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
 pub(crate) fn enabled(rule: &str) -> bool {
-    std::env::var_os(format!("SKATEV_{rule}_OFF")).is_none()
+    #[cfg(test)]
+    if let Some(mask) = TEST_TRIALS.with(|v| v.get()) { return enabled_with(mask, rule); }
+    enabled_with(TRIALS.load(std::sync::atomic::Ordering::Relaxed), rule)
+}
+fn enabled_with(off: u8, rule: &str) -> bool {
+    RULES.iter().position(|r| *r == rule).is_none_or(|i| off & (1 << i) == 0)
+}
+fn trials_where(off: impl Fn(&str) -> bool) -> Vec<&'static str> {
+    RULES.iter().copied().filter(|r| off(r)).collect()
+}
+/// Which rules the environment switches off (the baker only).
+pub fn trial_switches_from_env() -> Vec<&'static str> {
+    trials_where(|r| std::env::var_os(format!("SKATEV_{r}_OFF")).is_some())
+}
+/// Baker only: apply the environment's switches and return them (empty: a
+/// normal bake). The caller must mark its output as a trial when non-empty.
+pub fn apply_trials_from_env() -> Vec<&'static str> {
+    let off = trial_switches_from_env();
+    let mask = off.iter().fold(0u8, |m, r| m | 1 << RULES.iter().position(|x| x == r).unwrap());
+    TRIALS.store(mask, std::sync::atomic::Ordering::Relaxed);
+    off
+}
+#[cfg(test)]
+thread_local! { static TEST_TRIALS: std::cell::Cell<Option<u8>> = const { std::cell::Cell::new(None) }; }
+/// Isolated, panic-safe override: parallel tests must not switch each other's rules.
+#[cfg(test)]
+pub(crate) fn with_trials_for_test(mask: u8, f: impl FnOnce()) {
+    struct Restore(Option<u8>);
+    impl Drop for Restore {
+        fn drop(&mut self) { TEST_TRIALS.with(|v| v.set(self.0)); }
+    }
+    let _restore = Restore(TEST_TRIALS.with(|v| v.replace(Some(mask))));
+    f();
+}
+/// The `rules.txt` text of a bake: the plain hash, or a trial label the
+/// runtime (`rules_compatible`) and `build-world-collision.ps1` both refuse.
+pub fn rules_label(hash: &str, off: &[&str]) -> String {
+    if off.is_empty() { hash.to_string() } else { format!("{hash} trial {}", off.join(",")) }
 }
 pub(crate) fn length(r: &[Vec3]) -> f32 {
     r.windows(2).map(|w| w[0].distance(w[1])).sum()
@@ -233,13 +308,18 @@ pub(crate) fn floating(
     }
     total > 0. && supported < 0.80 * total
 }
+/// `bars`: None when no visible-bar data exists for the area (the `.visrails`
+/// file is not loaded, or holds no cell there): R2 then keeps every tube, since
+/// without bars every elevated tube would look unsupported (peer review
+/// 2026-11-16, finding 1: real rails on legs, live-built cells).
 pub(crate) fn drop_floating(
     lines: &mut Vec<Vec<Vec3>>,
     visible: &[[[f32; 3]; 3]],
-    bars: &[Vec<Vec3>],
+    bars: Option<&[Vec<Vec3>]>,
     tracks: &[Vec<Vec3>],
 ) -> Vec<Vec<Vec3>> {
     let mut dropped = Vec::new();
+    let Some(bars) = bars else { return dropped };
     if enabled("R2") {
         lines.retain(|r| {
             let train = samples(r, 0.1)
@@ -254,6 +334,20 @@ pub(crate) fn drop_floating(
         });
     }
     dropped
+}
+/// A finder line resting on a dropped tube's capsule (within `TUBE_SIDE`
+/// sideways, `ON_TUBE_UP` vertically) goes with it; a coping or visible-model
+/// edge line below the tube stays (peer review 2026-11-16, finding 2: with
+/// `TUBE_UP` = 0.25 m a tube 0.21-0.25 m over a coping took the coping line).
+pub(crate) const ON_TUBE_UP: f32 = 0.02;
+pub(crate) fn lines_off_dropped_tubes(found: Vec<Vec<Vec3>>, removed: &[Vec<Vec3>], side: f32) -> Vec<Vec<Vec3>> {
+    if removed.is_empty() {
+        return found;
+    }
+    let (inside, outside): (Vec<_>, Vec<_>) = found.into_iter().partition(|r| inside(r));
+    let mut found = crate::world::off_lines(inside, removed, side, ON_TUBE_UP);
+    found.extend(outside);
+    found
 }
 /// Cross-source only. Kept visible points are never moved or averaged.
 pub(crate) fn prefer_visible(gta: &mut Vec<Vec<Vec3>>, visual: &[Vec<Vec3>]) -> Vec<Vec<Vec3>> {
@@ -278,60 +372,168 @@ pub(crate) fn prefer_visible(gta: &mut Vec<Vec<Vec3>>, visual: &[Vec<Vec3>]) -> 
             return true;
         }
         // Same uncovered-tail policy as dedupe_within, in metres (>=35 cm).
-        let first_tail = tails.len();
-        let mut run = Vec::new();
-        let flush = |run: &mut Vec<Vec3>, tails: &mut Vec<Vec<Vec3>>| {
-            if length(run) >= 0.35 {
-                tails.push(std::mem::take(run));
-            } else {
-                run.clear();
-            }
-        };
-        for w in r.windows(2) {
-            let n = (w[0].distance(w[1]) / 0.01).ceil().max(1.) as usize;
-            for k in 0..=n {
-                let p = w[0].lerp(w[1], k as f32 / n as f32);
-                if visual.near(
-                    p,
-                    (w[1] - w[0]).normalize_or_zero(),
-                    0.06,
-                    5f32.to_radians().cos(),
-                ) {
-                    flush(&mut run, &mut tails);
-                } else if run.last() != Some(&p) {
-                    run.push(p);
-                }
-            }
-        }
-        flush(&mut run, &mut tails);
-        let kept = Segments::new(&tails[first_tail..], 0.002);
-        let mut gone = Vec::new();
-        for w in r.windows(2) {
-            let n = (w[0].distance(w[1]) / 0.01).ceil().max(1.) as usize;
-            for k in 0..n {
-                let a = w[0].lerp(w[1], k as f32 / n as f32);
-                let b = w[0].lerp(w[1], (k + 1) as f32 / n as f32);
-                if kept.near((a + b) * 0.5, (b - a).normalize_or_zero(), 0.002, 0.) {
-                    if gone.len() > 1 {
-                        removed.push(std::mem::take(&mut gone));
-                    } else {
-                        gone.clear();
-                    }
-                } else {
-                    if gone.last() != Some(&a) {
-                        gone.push(a);
-                    }
-                    gone.push(b);
-                }
-            }
-        }
-        if gone.len() > 1 {
-            removed.push(gone);
-        }
+        let (mine, gone) = split_covered(r, &visual, 0.06, 5f32.to_radians().cos(), None);
+        tails.extend(mine);
+        removed.extend(gone);
         false
     });
     gta.extend(tails);
     removed
+}
+/// R5 (rev 5): the final duplicate sweep, whatever the sources. Lines are
+/// visited longest first (ties by the first point's coordinate bits); one is
+/// dropped when at least 80 % of it lies within `DUP_DISTANCE` (3D, per
+/// sample: the covered part's maximum distance) and 5 deg of lines already
+/// kept. Uncovered tails of 0.35 m or more stay. 3 cm is under the 5.2 cm
+/// same-source twin rule of `dedupe_within`, so twin curbs and wall caps
+/// stay two lines. Train lines (A49) are neither dropped nor used as cover.
+pub(crate) const DUP_DISTANCE: f32 = 0.03;
+/// Shared final-stage hook for live areas and serialized baker tile pieces.
+/// `seam`: the tile size the pieces were split at. An uncovered tail that
+/// touches a tile seam is kept whatever its length here, because its true
+/// length continues in the neighbouring tile, which this tile cannot see
+/// (Copilot re-check 2026-11-17: a 35.5 cm tail split 10 + 25 cm lost its
+/// 10 cm part). Worst case: a stub under 35 cm stays at a seam; no line is
+/// lost, and bake and live decide the same way (both sweep 64 m pieces).
+pub fn sweep_duplicates(lines: &mut Vec<Vec<Vec3>>, tracks: &[Vec<Vec3>], seam: Option<f32>) -> bool {
+    let removed=drop_duplicates_at(lines,tracks,seam);
+    if removed.is_empty() {return false;}
+    record("R5",removed,Vec::new(),0,false);
+    true
+}
+pub(crate) fn drop_duplicates(lines: &mut Vec<Vec<Vec3>>, tracks: &[Vec<Vec3>]) -> Vec<Vec<Vec3>> {
+    drop_duplicates_at(lines, tracks, None)
+}
+pub(crate) fn drop_duplicates_at(lines: &mut Vec<Vec<Vec3>>, tracks: &[Vec<Vec3>], seam: Option<f32>) -> Vec<Vec<Vec3>> {
+    let mut removed = Vec::new();
+    if !enabled("R5") || lines.len() < 2 {
+        return removed;
+    }
+    let bits = |r: &[Vec3]| r[0].to_array().map(f32::to_bits);
+    let is_train = |r: &[Vec3]| {
+        samples(r, 0.1).iter().any(|(p, d, _)| on_lines(*p, *d, tracks, 0.30, 0.0))
+    };
+    let mut order: Vec<usize> = (0..lines.len()).filter(|&i| lines[i].len() >= 2).collect();
+    order.sort_by(|&a, &b| {
+        length(&lines[b])
+            .total_cmp(&length(&lines[a]))
+            .then_with(|| bits(&lines[a]).cmp(&bits(&lines[b])))
+            .then_with(|| lines[a].iter().map(|p| p.to_array().map(f32::to_bits))
+                .cmp(lines[b].iter().map(|p| p.to_array().map(f32::to_bits))))
+    });
+    let cos = 5f32.to_radians().cos();
+    let mut kept_cover: Vec<Vec<Vec3>> = Vec::new();
+    let mut result: Vec<(usize, Vec<Vec3>)> = lines.iter().enumerate()
+        .filter(|(_, r)| r.len() < 2).map(|(i, r)| (i, r.clone())).collect();
+    for i in order {
+        let r = lines[i].clone();
+        if is_train(&r) || !inside(&r) {
+            result.push((i, r));
+            continue;
+        }
+        let cover = Segments::new(&kept_cover, DUP_DISTANCE);
+        let ss = samples(&r, 0.025);
+        let total = length(&r);
+        let hit: f32 = ss
+            .iter()
+            .filter(|(p, d, _)| cover.near(*p, *d, DUP_DISTANCE, cos))
+            .map(|s| s.2)
+            .sum();
+        if total <= 0. || hit < 0.8 * total {
+            kept_cover.push(r.clone());
+            result.push((i, r));
+            continue;
+        }
+        let (tails, gone) = split_covered(&r, &cover, DUP_DISTANCE, cos, seam);
+        removed.extend(gone);
+        for t in tails {
+            kept_cover.push(t.clone());
+            result.push((i, t));
+        }
+    }
+    // Selection is canonical; untouched lines retain their original output order.
+    result.sort_by_key(|(i, _)| *i);
+    *lines = result.into_iter().map(|(_, r)| r).collect();
+    removed
+}
+/// Splits `r` into its uncovered tails (>= 0.35 m, kept) and the covered
+/// pieces (removed). Refine transitions between 1 cm samples so the tail
+/// threshold measures the coverage boundary, not the first uncovered sample.
+/// Shared by R3a and R5.
+/// With `seam`, a tail that starts at the piece's first point or ends at its
+/// last point while that point lies on a tile seam is kept at any length.
+fn split_covered(r: &[Vec3], cover: &Segments, distance: f32, cos: f32, seam: Option<f32>) -> (Vec<Vec<Vec3>>, Vec<Vec<Vec3>>) {
+    let mut tails = Vec::new();
+    let mut run = Vec::new();
+    let on_seam = |p: Vec3| seam.map_or(false, |s| {
+        let near = |v: f32| (v - (v / s).round() * s).abs() <= 1e-3;
+        near(p.x) || near(p.y)
+    });
+    let (first, last) = (r[0], r[r.len() - 1]);
+    let flush = |run: &mut Vec<Vec3>, tails: &mut Vec<Vec<Vec3>>, at_end: bool| {
+        let touches = !run.is_empty()
+            && ((run[0] == first && on_seam(first)) || (at_end && on_seam(last)));
+        if length(run) >= 0.35 || (touches && run.len() >= 2) {
+            tails.push(std::mem::take(run));
+        } else {
+            run.clear();
+        }
+    };
+    for w in r.windows(2) {
+        let n = (w[0].distance(w[1]) / 0.01).ceil().max(1.) as usize;
+        let dir = (w[1] - w[0]).normalize_or_zero();
+        let mut previous = w[0];
+        let mut was_covered = cover.near(previous, dir, distance, cos);
+        for k in 0..=n {
+            let p = w[0].lerp(w[1], k as f32 / n as f32);
+            let covered = cover.near(p, dir, distance, cos);
+            if covered != was_covered {
+                let (mut yes, mut no) = if covered { (p, previous) } else { (previous, p) };
+                for _ in 0..16 {
+                    let mid = (yes + no) * 0.5;
+                    if mid == yes || mid == no { break; }
+                    if cover.near(mid, dir, distance, cos) { yes = mid; } else { no = mid; }
+                }
+                // Keep the covered side of the final floating-point bracket:
+                // rounding must not shorten an exactly 35 cm unique tail.
+                if run.last() != Some(&yes) { run.push(yes); }
+            }
+            if covered {
+                flush(&mut run, &mut tails, false);
+            } else if run.last() != Some(&p) {
+                run.push(p);
+            }
+            previous = p;
+            was_covered = covered;
+        }
+    }
+    flush(&mut run, &mut tails, true);
+    let kept = Segments::new(&tails, 0.002);
+    let mut gone = Vec::new();
+    let mut removed = Vec::new();
+    for w in r.windows(2) {
+        let n = (w[0].distance(w[1]) / 0.01).ceil().max(1.) as usize;
+        for k in 0..n {
+            let a = w[0].lerp(w[1], k as f32 / n as f32);
+            let b = w[0].lerp(w[1], (k + 1) as f32 / n as f32);
+            if kept.near((a + b) * 0.5, (b - a).normalize_or_zero(), 0.002, 0.) {
+                if gone.len() > 1 {
+                    removed.push(std::mem::take(&mut gone));
+                } else {
+                    gone.clear();
+                }
+            } else {
+                if gone.last() != Some(&a) {
+                    gone.push(a);
+                }
+                gone.push(b);
+            }
+        }
+    }
+    if gone.len() > 1 {
+        removed.push(gone);
+    }
+    (tails, removed)
 }
 /// The finder also sees visible park faces. Preserve their source before the
 /// named found/visual merge; visrails alone contains bars, not park coping.
@@ -394,22 +596,28 @@ pub(crate) fn shallow_creases(visible: &[[[f32; 3]; 3]]) -> Vec<Vec<Vec3>> {
         .map(|v| vec![v[0].0, v[0].1])
         .collect()
 }
+/// A line within this of a visible-model bar (SVRL polyline) is the bar's own
+/// line, never a crease (peer review 2026-11-16, finding 3).
+pub(crate) const BAR_LINE: f32 = 0.05;
 pub(crate) fn drop_creases(
     lines: &mut Vec<Vec<Vec3>>,
     visible: &[[[f32; 3]; 3]],
     tracks: &[Vec<Vec3>],
+    bars: &[Vec<Vec3>],
 ) -> Vec<Vec<Vec3>> {
-    drop_creases_with_distance(lines, visible, tracks, 0.30)
+    drop_creases_with_distance(lines, visible, tracks, bars, 0.30)
 }
 fn drop_creases_with_distance(
     lines: &mut Vec<Vec<Vec3>>,
     visible: &[[[f32; 3]; 3]],
     tracks: &[Vec<Vec3>],
+    bars: &[Vec<Vec3>],
     protected_distance: f32,
 ) -> Vec<Vec<Vec3>> {
     if !enabled("R3b") {
         return Vec::new();
     }
+    let bars = Segments::new(bars, BAR_LINE);
     let creases = Segments::new(&shallow_creases(visible), 0.025);
     let ends: Vec<_> = lines
         .iter()
@@ -442,7 +650,8 @@ fn drop_creases_with_distance(
                 .all(|(p, d, _)| creases.near(*p, *d, 0.025, 5f32.to_radians().cos()))
             && !ss
                 .iter()
-                .any(|(p, d, _)| on_lines(*p, *d, tracks, protected_distance, 0.0));
+                .any(|(p, d, _)| on_lines(*p, *d, tracks, protected_distance, 0.0))
+            && !ss.iter().any(|(p, d, _)| bars.near(*p, *d, BAR_LINE, 0.0));
         if drop {
             removed.push(r.clone());
         }
@@ -477,6 +686,65 @@ mod tests {
     #[test]
     fn r2_tube_38cm_above_visible_deck_goes() {
         assert!(floating(&line(0., 0.38, 5.), &deck(), &[], false));
+    }
+    #[test]
+    fn r2_without_bar_data_keeps_the_elevated_tube() {
+        // Peer review 2026-11-16 (1): no .visrails loaded, or no cell for the
+        // area -> no evidence -> every tube stays (rails on legs, live cells).
+        let mut lines = vec![line(0., 0.38, 5.)];
+        assert!(drop_floating(&mut lines, &deck(), None, &[]).is_empty());
+        assert_eq!(lines.len(), 1);
+        let mut lines = vec![line(0., 0.38, 5.)];
+        assert_eq!(drop_floating(&mut lines, &deck(), Some(&[]), &[]).len(), 1, "bar data present, no bar near: dropped");
+        assert!(lines.is_empty());
+    }
+    #[test]
+    fn r2_dropped_tube_takes_only_lines_on_itself() {
+        // Peer review 2026-11-16 (2): the coping 0.22 m under a dropped tube keeps
+        // its line; a finder line on the tube's own top goes.
+        let dropped = vec![line(0., 0.38, 5.)];
+        let coping = line(0., 0.16, 5.);
+        let on_tube = line(0.03, 0.37, 5.);
+        let kept = lines_off_dropped_tubes(vec![coping.clone(), on_tube], &dropped, 0.20);
+        assert_eq!(kept, vec![coping]);
+        let outside = vec![Vec3::new(0., 0., 1.), Vec3::new(5., 0., 1.)];
+        assert_eq!(lines_off_dropped_tubes(vec![outside.clone()], &dropped, 0.20), vec![outside]);
+    }
+    #[test]
+    fn rule_switches_come_from_the_baker_not_the_environment() {
+        // Peer review 2026-11-16 (4): the DLL never reads SKATEV_R*_OFF.
+        // SAFETY: single-threaded within this test; no other test reads this name.
+        unsafe { std::env::set_var("SKATEV_R2_OFF", "1") };
+        assert!(enabled("R2"));
+        assert!(trial_switches_from_env().contains(&"R2"));
+        unsafe { std::env::remove_var("SKATEV_R2_OFF") };
+        assert!(!enabled_with(0b0010, "R2"));
+        assert!(enabled_with(0b0010, "R1"));
+        assert!(enabled_with(0b0010, "R9"), "unknown names are never switched off");
+        assert_eq!(trials_where(|r| r == "R3b"), vec!["R3b"]);
+        assert!(!enabled_with(1 << 4, "R1b"));
+        assert!(!enabled_with(1 << 5, "R4"));
+        assert!(!enabled_with(1 << 6, "R5"));
+        assert!(enabled_with(1 << 6, "R4"));
+        assert_eq!(rules_label("rules 0123", &["R1b", "R5"]), "rules 0123 trial R1b,R5");
+        assert_eq!(rules_label("rules 0123", &[]), "rules 0123");
+        assert_eq!(rules_label("rules 0123", &["R2", "R3b"]), "rules 0123 trial R2,R3b");
+        assert!(!crate::tiles::rules_compatible(&rules_label(&crate::tiles::rules_hash(), &["R1"])));
+    }
+    #[test]
+    fn trial_test_masks_are_thread_local_and_restored_after_panic() {
+        let result=std::panic::catch_unwind(|| with_trials_for_test(1<<5,|| {
+            assert!(!enabled("R4"));
+            assert!(std::thread::spawn(|| enabled("R4")).join().unwrap());
+            panic!("exercise restoration");
+        }));
+        assert!(result.is_err());
+        assert!(enabled("R4"));
+        with_trials_for_test(1<<6,|| {
+            let mut lines=vec![line(0.,1.,5.),line(0.009,1.,5.)];
+            assert!(drop_duplicates(&mut lines,&[]).is_empty());
+            assert_eq!(lines.len(),2);
+        });
     }
     #[test]
     fn r2_tube_on_deck_stays() {
@@ -573,23 +841,34 @@ mod tests {
     #[test]
     fn r3b_71cm_flat_crease_goes() {
         let mut r = vec![line(0., 1., 0.71)];
-        assert_eq!(drop_creases(&mut r, &crease(false), &[]).len(), 1);
+        assert_eq!(drop_creases(&mut r, &crease(false), &[], &[]).len(), 1);
         assert!(r.is_empty());
     }
     #[test]
     fn r3b_71cm_right_angle_edge_stays() {
         let mut r = vec![line(0., 1., 0.71)];
-        drop_creases(&mut r, &crease(true), &[]);
+        drop_creases(&mut r, &crease(true), &[], &[]);
         assert_eq!(r.len(), 1);
     }
     #[test]
     fn r3b_connected_end_and_train_line_stay() {
         let mut r = vec![line(0., 1., 0.71), vec![at(0.71, 0., 1.), at(0.71, 1., 1.)]];
-        drop_creases(&mut r, &crease(false), &[]);
+        drop_creases(&mut r, &crease(false), &[], &[]);
         assert_eq!(r.len(), 2);
         let mut r = vec![line(0., 1., 0.71)];
-        drop_creases(&mut r, &crease(false), &[line(0., 1., 0.71)]);
+        drop_creases(&mut r, &crease(false), &[line(0., 1., 0.71)], &[]);
         assert_eq!(r.len(), 1);
+    }
+    #[test]
+    fn r3b_short_visible_bar_line_on_a_flat_crease_stays() {
+        // Peer review 2026-11-16 (3): an isolated bar (SVRL) line is the bar's
+        // own line, whatever the visible faces under it fold like.
+        let mut r = vec![line(0., 1., 0.71)];
+        let bar = vec![at(-0.5, 0., 1.03), at(1.5, 0., 1.03)];
+        assert!(drop_creases(&mut r, &crease(false), &[], &[bar]).is_empty());
+        assert_eq!(r.len(), 1);
+        let far = vec![at(-0.5, 0.3, 1.0), at(1.5, 0.3, 1.0)];
+        assert_eq!(drop_creases(&mut r, &crease(false), &[], &[far]).len(), 1);
     }
     #[test]
     fn bake_audit_preserves_actual_orphan_tracks_across_auxiliary_builds() {
@@ -604,8 +883,103 @@ mod tests {
             "auxiliary builds cannot replace the main train/orphan source witnesses"
         );
         let mut lines = actual.clone();
-        drop_creases(&mut lines, &crease(false), &kept_tracks());
+        drop_creases(&mut lines, &crease(false), &kept_tracks(), &[]);
         assert_eq!(lines, actual);
+    }
+    #[test]
+    fn r5_9mm_pair_leaves_one_line() {
+        let mut lines = vec![line(0., 1., 5.), line(0.009, 1., 5.)];
+        let gone = drop_duplicates(&mut lines, &[]);
+        assert_eq!(lines.len(), 1);
+        assert_eq!(gone.len(), 1);
+        assert!(length(&lines[0]) > 4.99, "a whole line stays, nothing is moved");
+    }
+    #[test]
+    fn r5_same_source_twins_52mm_apart_stay() {
+        let mut lines = vec![line(0., 1., 5.), line(0.052, 1., 5.)];
+        let before = lines.clone();
+        assert!(drop_duplicates(&mut lines, &[]).is_empty());
+        assert_eq!(lines, before);
+    }
+    #[test]
+    fn r5_train_pair_3cm_apart_stays() {
+        // A49: both head edges of a steel rail, 3 cm apart here, stay two lines;
+        // a non-track line beside a track is not covered by the track either.
+        let tracks = vec![line(0., 1., 5.), line(0.03, 1., 5.)];
+        let mut lines = tracks.clone();
+        assert!(drop_duplicates(&mut lines, &tracks).is_empty());
+        assert_eq!(lines.len(), 2);
+        let mut lines = vec![line(0., 1., 5.), line(0.02, 1., 5.)];
+        assert!(drop_duplicates(&mut lines, &[line(0., 1., 5.)]).is_empty());
+        assert_eq!(lines.len(), 2);
+    }
+    #[test]
+    fn r5_equal_length_tie_keeps_exactly_one() {
+        let (a, b) = (line(0., 1., 5.), line(0.01, 1., 5.));
+        let mut one = vec![a.clone(), b.clone()];
+        let mut two = vec![b.clone(), a.clone()];
+        drop_duplicates(&mut one, &[]);
+        drop_duplicates(&mut two, &[]);
+        assert_eq!(one.len(), 1);
+        assert_eq!(one, two, "the order the tile lists them in does not decide");
+    }
+    #[test]
+    fn r5_stacked_pair_3cm_in_z_both_kept_unless_max_3d_within_3cm() {
+        // 2 cm aside and 3 cm up: 3.6 cm in 3D at every sample -> both stay.
+        let mut lines = vec![line(0., 1., 5.), line(0.02, 1.03, 5.)];
+        assert!(drop_duplicates(&mut lines, &[]).is_empty());
+        assert_eq!(lines.len(), 2);
+        // 2.9 cm up: within the limit -> one goes.
+        let mut lines = vec![line(0., 1., 5.), line(0., 1.029, 5.)];
+        assert_eq!(drop_duplicates(&mut lines, &[]).len(), 1);
+        assert_eq!(lines.len(), 1);
+        // Mean under 3 cm but one stretch 5 cm off: that stretch is a kept tail.
+        let bent = vec![at(0., 0.01, 1.), at(3., 0.01, 1.), at(4., 0.05, 1.), at(5., 0.01, 1.)];
+        let mut lines = vec![line(0., 1., 5.), bent];
+        drop_duplicates(&mut lines, &[]);
+        assert_eq!(lines.len(), 2, "the off stretch (>= 0.35 m) stays as a tail");
+    }
+    #[test]
+    fn r5_drops_the_shorter_line_and_keeps_its_unique_tail() {
+        let mut lines = vec![line(0.008, 1., 6.), vec![at(-1., 0., 1.), at(4., 0., 1.)]];
+        drop_duplicates(&mut lines, &[]);
+        assert_eq!(lines.len(), 2);
+        assert!(lines.iter().any(|r| (length(r) - 6.).abs() < 1e-3), "the longer line stays whole");
+        assert!(lines.iter().any(|r| (length(r) - 1.).abs() < 0.04), "the 1 m unique tail, less the 3 cm overlap tolerance");
+    }
+
+    #[test]
+    fn r5_unique_tail_threshold_uses_the_coverage_boundary() {
+        for tail in [0.349, 0.350, 0.355] {
+            // The 3 cm end cap of the covering segment is covered too.
+            // Reverse the candidate to exercise both transition directions.
+            for reverse in [false, true] {
+                let cover = line(0., 1., 6.);
+                let mut candidate = vec![at(-tail - DUP_DISTANCE, 0., 1.), at(4., 0., 1.)];
+                if reverse { candidate.reverse(); }
+                let mut lines = vec![cover.clone(), candidate.clone()];
+                let removed = drop_duplicates(&mut lines, &[]);
+                assert!(!removed.is_empty());
+                assert!(lines.contains(&cover));
+                let tails: Vec<_> = lines.iter().filter(|r| **r != cover).collect();
+                if tail < 0.35 {
+                    assert!(tails.is_empty(), "{tail} m, reverse={reverse}");
+                } else {
+                    assert_eq!(tails.len(), 1, "{tail} m, reverse={reverse}");
+                    assert!((length(tails[0]) - tail).abs() < 0.0005,
+                        "true {tail} m, measured {}, reverse={reverse}", length(tails[0]));
+                    assert!(tails[0].contains(&candidate[if reverse { 1 } else { 0 }]));
+                }
+            }
+        }
+    }
+    #[test]
+    fn r5_does_nothing_outside_park_areas() {
+        let r = vec![Vec3::new(0., 0., 1.), Vec3::new(5., 0., 1.)];
+        let q = vec![Vec3::new(0., 0.01, 1.), Vec3::new(5., 0.01, 1.)];
+        let mut lines = vec![r.clone(), q.clone()];
+        assert!(drop_duplicates(&mut lines, &[]).is_empty());
+        assert_eq!(lines.len(), 2);
     }
     #[test]
     fn universal_rules_do_nothing_outside_park_areas() {
@@ -613,7 +987,7 @@ mod tests {
         assert!(!floating(&r, &deck(), &[], false));
         let mut lines = vec![r.clone()];
         prefer_visible(&mut lines, &[r.clone()]);
-        drop_creases(&mut lines, &deck(), &[]);
+        drop_creases(&mut lines, &deck(), &[], &[]);
         assert_eq!(lines, vec![r]);
     }
 }

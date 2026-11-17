@@ -262,42 +262,64 @@ fn export_parks(out: &Path, placed: &[(u32, Place)], archetypes: &HashMap<u32, A
         .filter(|n| ["decal", "glass", "alpha", "cutout", "emissive"].iter().any(|w| n.contains(w)))
         .map(|n| rage_joaat(&n)).collect();
     let mut parks = Vec::new();
+    let mut reach = Vec::new();
+    let mut uncertain = Vec::new();
     for park in SkateVRuntime::parks::PARKS {
         let (cx, cy, r) = (park.centre.x, park.centre.y, park.radius);
         let mut tris = Vec::new();
+        let mut walls = Vec::new();
+        let mut unknown = Vec::new();
         let mut models = 0usize;
         for (hash, place) in placed {
             let at = match place { Place::Outside(e) => e.position, Place::Inside(o, _) => o.position };
-            if ((at.x - cx).powi(2) + (at.y - cy).powi(2)).sqrt() > r + 60.0 { continue; }
-            let Some(a) = archetypes.get(hash) else { continue };
-            if a.is_fragment() { continue; }
-            let Some(d) = drawable_of(a, files, keys) else { continue };
-            if d.shader_group.as_ref().is_some_and(|g| g.shaders.iter().any(|s| vegetation().contains(&s.name_hash))) { continue; }
-            let Some(lod) = d.lods.iter().find(|l| l.level == LodLevel::High) else { continue };
+            let legacy_near = ((at.x - cx).powi(2) + (at.y - cy).powi(2)).sqrt() <= r + 60.0;
+            let Some(a) = archetypes.get(hash) else { if legacy_near { unknown.push([[cx-r-20.05,cy-r-20.05,-1e6],[cx+r+20.05,cy+r+20.05,1e6]]); } continue };
+            let corners: Vec<V> = [a.bb_min.x,a.bb_max.x].into_iter().flat_map(|x|
+                [a.bb_min.y,a.bb_max.y].into_iter().flat_map(move |y|
+                    [a.bb_min.z,a.bb_max.z].into_iter().map(move |z|place.apply([x,y,z],GTA)))).collect();
+            let bound_near = (0..2).all(|k| corners.iter().any(|p|p[k]>= [cx,cy][k]-r-20.05) && corners.iter().any(|p|p[k]<=[cx,cy][k]+r+20.05));
+            let bb = [std::array::from_fn(|k|corners.iter().map(|p|p[k]).fold(f32::INFINITY,f32::min)),std::array::from_fn(|k|corners.iter().map(|p|p[k]).fold(f32::NEG_INFINITY,f32::max))];
+            if !legacy_near && !bound_near {continue;}
+            // Never certify absence of walls where the exporter cannot inspect
+            // a relevant placement. Old ownership exclusions remain unchanged.
+            if a.is_fragment() {if bound_near {unknown.push(bb);} continue;}
+            let Some(d) = drawable_of(a, files, keys) else {if bound_near {unknown.push(bb);} continue;};
+            let owned_model=legacy_near && !d.shader_group.as_ref().is_some_and(|g| g.shaders.iter().any(|s| vegetation().contains(&s.name_hash)));
+            let Some(lod) = d.lods.iter().find(|l| l.level == LodLevel::High) else {if bound_near {unknown.push(bb);} continue;};
             let before = tris.len();
             for g in lod.models.iter().flat_map(|m| &m.geometries) {
-                if let Some(sh) = d.shader_group.as_ref().and_then(|s| s.shaders.get(g.shader_id as usize)) {
-                    if excluded.contains(&sh.name_hash) || excluded.contains(&sh.file_name_hash) { continue; }
-                }
-                let (Some(vb), Some(ib)) = (&g.vertex_buffer, &g.index_buffer) else { continue };
-                let Ok(verts) = vb.to_unified_vertices() else { continue };
+                let owned_shader = d.shader_group.as_ref().and_then(|s| s.shaders.get(g.shader_id as usize))
+                    .is_none_or(|sh| !excluded.contains(&sh.name_hash) && !excluded.contains(&sh.file_name_hash));
+                let (Some(vb), Some(ib)) = (&g.vertex_buffer, &g.index_buffer) else {if bound_near {unknown.push(bb);} continue;};
+                let Ok(verts) = vb.to_unified_vertices() else {if bound_near {unknown.push(bb);} continue;};
                 let pos: Vec<V> = verts.iter().map(|v| place.apply([v.position.x, v.position.y, v.position.z], GTA)).collect();
                 for t in ib.indices.chunks_exact(3) {
-                    let (Some(&a), Some(&b), Some(&c)) = (pos.get(t[0] as usize), pos.get(t[1] as usize), pos.get(t[2] as usize)) else { continue };
+                    let (Some(&a), Some(&b), Some(&c)) = (pos.get(t[0] as usize), pos.get(t[1] as usize), pos.get(t[2] as usize)) else {if bound_near {unknown.push(bb);} continue;};
                     let m = [(a[0] + b[0] + c[0]) / 3.0, (a[1] + b[1] + c[1]) / 3.0];
-                    if ((m[0] - cx).powi(2) + (m[1] - cy).powi(2)).sqrt() > r { continue; }
-                    if !a.iter().chain(&b).chain(&c).all(|v| v.is_finite()) { continue; }
-                    tris.push([a, b, c]);
+                    if !a.iter().chain(&b).chain(&c).all(|v| v.is_finite()) {if bound_near {unknown.push(bb);} continue;}
+                    // Wall vetoes include panes/alpha surfaces and whole triangles
+                    // overlapping the reach square, even with a distant centroid.
+                    if reach_overlaps(&[a,b,c], [cx,cy], r + SkateVRuntime::world::park_rules::RING + 0.05) {
+                        walls.push([a,b,c]);
+                    }
+                    if owned_model && owned_shader && ((m[0] - cx).powi(2) + (m[1] - cy).powi(2)).sqrt() <= r { tris.push([a, b, c]); }
                 }
             }
             models += usize::from(tris.len() > before);
         }
         eprintln!("park {}: {} visible triangles from {models} models", park.id, tris.len());
         parks.push((park.id.to_string(), tris));
+        eprintln!("park {}: {} reach faces; {} uncertain bounds",park.id,walls.len(),unknown.len());
+        reach.push((park.id.to_string(), walls));
+        uncertain.push((park.id.to_string(),unknown));
     }
-    SkateVRuntime::visparks::write(out, &parks)?;
+    SkateVRuntime::visparks::write_with_reach(out, &parks, &reach, &uncertain)?;
     eprintln!("wrote park meshes to {}", out.display());
     Ok(())
+}
+
+fn reach_overlaps(t: &[[f32;3];3], centre: [f32;2], radius: f32) -> bool {
+    (0..2).all(|k| t.iter().any(|p| p[k] >= centre[k]-radius) && t.iter().any(|p| p[k] <= centre[k]+radius))
 }
 
 /// Candidate limits use model height and placement scale, before rotation.
@@ -544,6 +566,7 @@ fn main() -> anyhow::Result<()> {
         return Ok(());
     }
     export_parks(&out.with_extension("visparks"), &placed, &archetypes, &files, &keys)?;
+    if args.iter().any(|a| a == "--parks-only") { return Ok(()); }
     export_bars(&out.with_extension("visbars"), &placed, &archetypes, &files, &keys)?;
     // Each archetype's rails once (model space).
     let mut model_rails: HashMap<u32, Arc<Vec<(Vec<V>, u32)>>> = HashMap::new();
@@ -647,6 +670,11 @@ fn main() -> anyhow::Result<()> {
 #[cfg(test)]
 mod visbar_tests {
     use super::*;
+    #[test]
+    fn reach_keeps_whole_overlapping_triangles_with_distant_centroids() {
+        assert!(reach_overlaps(&[[-100.,-1.,0.],[100.,-1.,0.],[100.,100.,0.]],[0.,0.],20.));
+        assert!(!reach_overlaps(&[[21.,0.,0.],[22.,0.,0.],[22.,1.,0.]],[0.,0.],20.));
+    }
     #[test]
     fn candidate_limits_and_shader_policy() {
         assert!(candidate(1., 1., 3000, 40.));
