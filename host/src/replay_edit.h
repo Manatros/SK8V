@@ -23,6 +23,7 @@ struct CameraParams {
     float position[3] = {};          // Tripod / Free: the eye in the world
     bool positioned = false;         // position set (Tripod/Free start where the camera was)
 };
+bool IsDefaultBase(const CameraParams& p);  // every field still at CameraParams{}
 CameraParams Lerp(const CameraParams& a, const CameraParams& b, float t);  // angles the short way
 CameraParams Spline(const CameraParams& p0, const CameraParams& p1, const CameraParams& p2, const CameraParams& p3, float t);
 
@@ -40,6 +41,8 @@ struct Clip {
     int filter = 0;         // FilterName index
     int lens = 0;           // Lens (Auto)
     int filterStrength = -1;  // percentage; -1 inherits FilmFilterStrength
+    int lensStrength = 100;   // percentage of the fisheye bend (25, 50, 75, 100); 100 = the lens as it always was
+    bool baseEdited = false;  // the player changed `base` (opening the editor only places it)
 };
 float ShakeAmplitude(int shake);  // GTA HAND_SHAKE amplitude: 0, 0.3, 0.7, 1.2
 
@@ -81,7 +84,8 @@ public:
     double PrevStop(double t) const;
     double NextStop(double t) const;
 
-    // A different camera for a clip with keys or a non-Game camera asks first.
+    // A different camera for a clip asks first only when that discards work: camera keys, or
+    // base parameters that differ from the defaults. Otherwise it switches silently.
     EditResult SetCamera(int clip, CameraKind k, bool confirmed);
     Clip& ClipRef(int i) { return clips_[static_cast<std::size_t>(i)]; }
     const Clip& ClipRef(int i) const { return clips_[static_cast<std::size_t>(i)]; }

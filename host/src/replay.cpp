@@ -66,6 +66,8 @@ bool g_keyboard = false;     // the help names the keyboard's keys
 int g_appliedFilter = 0;
 int g_appliedStrength = -1;
 bool g_appliedFisheye = false;
+int g_appliedLensStrength = 100;  // percent of the fisheye bend sent to the pass
+std::uint64_t g_shownFrame = 0;   // FrameIdentity of the replay frame being shown
 int g_appliedShake = 0;
 
 // The editor.
@@ -185,7 +187,14 @@ int StrengthPercent(const Clip& clip) {
     return clip.filterStrength < 0 ? static_cast<int>(std::lround(g_filterStrength * 100.0f)) : clip.filterStrength;
 }
 
-void ApplyLook(int filter, bool fisheyeWanted, int shake, int strength) {
+void ApplyLook(int filter, bool fisheyeWanted, int shake, int strength, int lensStrength = kLensStrengthMax) {
+    lensStrength = ClampLensStrength(lensStrength);
+    if (lensStrength != g_appliedLensStrength) {
+        g_appliedLensStrength = lensStrength;
+        fisheye::SetStrength(static_cast<float>(lensStrength) / 100.0f);
+        if (g_detailState) fisheye::DropDetail(), g_detailState = 0;
+        g_stableSince = g_clock;
+    }
     if (!FilterModifier(filter)) filter = 0;
     if (filter != g_appliedFilter || (filter && strength != g_appliedStrength)) {
         if (filter != g_appliedFilter) {
@@ -549,12 +558,23 @@ void SetCam(float* eye, float* rot, float fov, Clear clear, const float* chest, 
         g_stableSince = g_clock;
         if (g_detailState) fisheye::DropDetail(), g_detailState = 0;
     }
+    // Frame identity (design 2026-11-16-replay-lens-and-prompts #5): the shown replay frame and
+    // the camera. The detail render belongs to one such picture; any other drops it.
+    std::uint64_t frameId = g_shownFrame;
+    for (float v : cam) {
+        std::uint32_t bits;
+        std::memcpy(&bits, &v, sizeof(bits));
+        frameId = (frameId ^ bits) * 1099511628211ull;
+    }
+    if (g_detailState && fisheye::DetailId() != frameId) fisheye::DropDetail(), g_detailState = 0;
     // Only a truly still picture: no shake, no world moving, and the fisheye
     // really drawn this frame (filtered shots transfer high-frequency detail only).
-    const bool fish = g_appliedFisheye && fisheye::Drawing() && fov >= 119.0f && g_appliedShake == 0 &&
-                      g_worldScale <= 0.0f;
+    // Not when the bend is weakened: the detail view is the full bend's sharp middle.
+    const bool fish = g_appliedFisheye && g_appliedLensStrength >= kLensStrengthMax && fisheye::Drawing() && fov >= 119.0f &&
+                      g_appliedShake == 0 && g_worldScale <= 0.0f;
     if (!fish && g_detailState) fisheye::DropDetail(), g_detailState = 0;
-    if (fish && still && g_detailState == 0 && fisheye::DetailIdle() && g_clock - g_stableSince > 0.3) fisheye::BeginDetail(), g_detailState = 1;
+    if (fish && still && g_detailState == 0 && fisheye::DetailIdle() && g_clock - g_stableSince > 0.3)
+        fisheye::BeginDetail(frameId), g_detailState = 1;
     // GTA says which field of view it rendered: the capture waits for the detail view,
     // the hold ends only once it is back at 120 degrees.
     const float rendered = Call<float>(GET_FINAL_RENDERED_CAM_FOV);
@@ -619,7 +639,7 @@ void AimEdited(const Recording::Sample& s, CameraKind kind, const CameraParams& 
         break;
     }
     fov = LensFov(lens, fov);
-    if (c.zoomMm > 0.0f && lens != kLensFisheye) fov = MmToFov(c.zoomMm);
+    if (c.zoomMm > 0.0f && !LensIs120(lens)) fov = MmToFov(c.zoomMm);
     const float body[3] = {p.root[0], p.root[1], p.root[2] + 1.0f};
     const bool around = kind == CameraKind::Follow || kind == CameraKind::AdvFollow;
     const bool tripod = kind == CameraKind::Tripod || kind == CameraKind::AdvTripod;
@@ -1029,7 +1049,7 @@ constexpr CameraKind kMenuCameras[] = {CameraKind::Game,      CameraKind::Follow
                                        CameraKind::AdvFollow, CameraKind::AdvTripod, CameraKind::AdvFree};
 enum EditMenuRow { CameraRow, EffectsRow, LookRow, HudStyleRow, DoneRow, CameraHelpRow, EditMenuRows };
 enum EffectRow { SpeedRow, ShakeRow, EffectRows };
-enum LookSetting { FilterRow, StrengthRow, LensRow, LookRows };
+enum LookSetting { FilterRow, StrengthRow, LensRow, LensStrengthRow, LookRows };
 
 Mode PictureMode(Mode mode) {
     switch (mode) {
@@ -1141,10 +1161,11 @@ void AdjustCamera(const PadIn& pad, const KeysIn& keys, const Recording::Sample&
                                       (read ? keys.mouseX : 0.0f) * 8.0f : 0.0f;
     const float lookPitch = free ? (k(keys.faster) - k(keys.slower) + StickAxis(pad.rightY)) * 90.0f * dt -
                                   (read ? keys.mouseY : 0.0f) * 6.0f : 0.0f;
-    const float zoom = clip.lens == kLensFisheye ? 0.0f :
+    const float zoom = LensIs120(clip.lens) ? 0.0f :
         ((pad.buttons & 0x0008) ? 1.0f : 0.0f) - ((pad.buttons & 0x0004) ? 1.0f : 0.0f) + k(keys.zoomIn) - k(keys.zoomOut);
     const float aim = tracks ? ((pad.buttons & 0x0001) ? 1.0f : 0.0f) - ((pad.buttons & 0x0002) ? 1.0f : 0.0f) + k(keys.keyX) - k(keys.keyZ) : 0.0f;
     if (side == 0.0f && fwd == 0.0f && rise == 0.0f && lookYaw == 0.0f && lookPitch == 0.0f && zoom == 0.0f && aim == 0.0f) return;
+    if (!IsAdvanced(clip.camera)) clip.baseEdited = true;  // the player is changing this clip's own camera
     const Pose pose = PoseAt(s);
     switch (clip.camera) {
     case CameraKind::Follow:
@@ -1304,12 +1325,24 @@ bool EditorTick(int ped, const PadIn& pad, const KeysIn& keys, float dt) {
         const Mode source = PictureMode(g_mode);
         const bool clipMode = source == Mode::CameraEdit || source == Mode::EditMenu || source == Mode::Effects || source == Mode::CameraMenu;
         Clip& clip = g_edit.ClipRef(clipMode ? g_editClip : g_edit.ClipAt(g_head.time));
-        if (!clip.filter) clip.filter = 1;
-        const int delta = e.key.plus ? 10 : -10;
-        clip.filterStrength = std::clamp(StrengthPercent(clip) + delta, 0, 100);
-        g_edit.Touch();
-        if (source == Mode::CameraEdit) g_clipBefore.filterStrength = clip.filterStrength, g_editWasDirty = true;
-        Notice("Filter Strength: " + std::to_string(StrengthPercent(clip)) + "%");
+        if (g_mode == Mode::Look && (g_lookSel == LensRow || g_lookSel == LensStrengthRow)) {
+            // The Lens row's +/- is the lens strength (the filter strength keeps its own row).
+            if (clip.lens == kLensFisheye) {
+                clip.lensStrength = ClampLensStrength(clip.lensStrength + (e.key.plus ? kLensStrengthStep : -kLensStrengthStep));
+                g_edit.Touch();
+                if (source == Mode::CameraEdit) g_clipBefore.lensStrength = clip.lensStrength, g_editWasDirty = true;
+                Notice("Lens Strength: " + std::to_string(clip.lensStrength) + "%");
+            } else {
+                Notice("Lens strength applies to the Fisheye lens");
+            }
+        } else {
+            if (!clip.filter) clip.filter = 1;
+            const int delta = e.key.plus ? 10 : -10;
+            clip.filterStrength = std::clamp(StrengthPercent(clip) + delta, 0, 100);
+            g_edit.Touch();
+            if (source == Mode::CameraEdit) g_clipBefore.filterStrength = clip.filterStrength, g_editWasDirty = true;
+            Notice("Filter Strength: " + std::to_string(StrengthPercent(clip)) + "%");
+        }
     } else if (!g_photoTaking && shortcuts && e.key.keyV) {
         const Mode source = PictureMode(g_mode);
         const bool clipMode = source == Mode::CameraEdit || source == Mode::EditMenu || source == Mode::Effects || source == Mode::CameraMenu;
@@ -1564,16 +1597,19 @@ bool EditorTick(int ped, const PadIn& pad, const KeysIn& keys, float dt) {
         if (!step) break;
         const Mode source = PictureMode(g_lookBack);
         Clip& clip = g_edit.ClipRef(source == Mode::CameraEdit ? g_editClip : g_edit.ClipAt(g_head.time));
-        const int before[] = {clip.filter, clip.filterStrength, clip.lens};
+        const int before[] = {clip.filter, clip.filterStrength, clip.lens, clip.lensStrength};
         if (g_lookSel == FilterRow) clip.filter = Cycle(clip.filter, step, kFilterCount);
         if (g_lookSel == StrengthRow && clip.filter) clip.filterStrength = std::clamp(StrengthPercent(clip) + step * 10, 0, 100);
         if (g_lookSel == LensRow) clip.lens = Cycle(clip.lens, step, kLensCount);
-        if (clip.filter != before[0] || clip.filterStrength != before[1] || clip.lens != before[2]) {
+        if (g_lookSel == LensStrengthRow && clip.lens == kLensFisheye)
+            clip.lensStrength = ClampLensStrength(clip.lensStrength + step * kLensStrengthStep);
+        if (clip.filter != before[0] || clip.filterStrength != before[1] || clip.lens != before[2] || clip.lensStrength != before[3]) {
             g_edit.Touch();
             if (source == Mode::CameraEdit) {
                 g_clipBefore.filter = clip.filter;
                 g_clipBefore.filterStrength = clip.filterStrength;
                 g_clipBefore.lens = clip.lens;
+                g_clipBefore.lensStrength = clip.lensStrength;
                 g_editWasDirty = true;
             }
         }
@@ -1641,12 +1677,13 @@ bool EditorTick(int ped, const PadIn& pad, const KeysIn& keys, float dt) {
             }
         }
         if (wheel && (keys.shift || keys.ctrl)) {
-            if (clip.lens != kLensFisheye) {
+            if (!LensIs120(clip.lens)) {
                 CameraParams& p = IsAdvanced(clip.camera) ? g_work : clip.base;
                 if (p.zoomMm <= 0.0f) p.zoomMm = FovToMm(Call<float>(GET_CAM_FOV, g_cam));
                 const float factor = std::pow(1.15f, static_cast<float>(-wheel));
                 p.zoomMm = std::clamp(p.zoomMm * factor, 8.0f, 200.0f);
                 if (IsAdvanced(clip.camera)) g_workDirty = true;
+                else clip.baseEdited = true;
                 g_camChanged = true;
                 g_edit.Touch();
                 Notice("Zoom: " + std::to_string(static_cast<int>(std::lround(p.zoomMm))) + " mm");
@@ -1668,7 +1705,7 @@ bool EditorTick(int ped, const PadIn& pad, const KeysIn& keys, float dt) {
         }
         if (adv && (P(0x4000) || e.key.keyK)) {
             CameraParams k = g_work;
-            if (k.zoomMm <= 0.0f) k.zoomMm = clip.lens == kLensFisheye ? 24.0f : FovToMm(Call<float>(GET_CAM_FOV, g_cam));  // keys blend zooms smoothly
+            if (k.zoomMm <= 0.0f) k.zoomMm = LensIs120(clip.lens) ? 24.0f : FovToMm(Call<float>(GET_CAM_FOV, g_cam));  // keys blend zooms smoothly
             g_edit.AddKey(g_head.time, k);
             g_workDirty = false, g_camChanged = true;
         }
@@ -1745,9 +1782,10 @@ bool EditorTick(int ped, const PadIn& pad, const KeysIn& keys, float dt) {
     if (preview) g_head.Advance(dt, g_rec.Start(), g_rec.End());
     else AdvanceEdited(dt);
     const Recording::Sample s = g_rec.At(g_head.time);
+    g_shownFrame = FrameIdentity(s);
     const int clipIndex = cameraEdit ? g_editClip : g_edit.ClipAt(g_head.time);
     const Clip& clip = g_edit.ClipRef(clipIndex);
-    ApplyLook(clip.filter, clip.lens == kLensFisheye, preview ? 0 : clip.shake, StrengthPercent(clip));
+    ApplyLook(clip.filter, clip.lens == kLensFisheye, preview ? 0 : clip.shake, StrengthPercent(clip), clip.lensStrength);
     if (s.a) {
         Present(ped, s);
         if (cameraEdit) {
@@ -1867,7 +1905,7 @@ bool EditorTick(int ped, const PadIn& pad, const KeysIn& keys, float dt) {
         }
     } else if (g_mode == Mode::CameraEdit) {
         const CameraParams& camera = Shown();
-        const bool fish = clip.lens == kLensFisheye;
+        const bool fish = LensIs120(clip.lens);
         if (!aptHudDrawn) {
             if (fish || camera.zoomMm <= 0.0f) Txt(LensName(clip.lens), 0.5f, 0.15f, 0.3f, true);
             else Txt("Zoom " + std::to_string(static_cast<int>(std::lround(camera.zoomMm))) + " mm", 0.5f, 0.15f, 0.3f, true);
@@ -1922,14 +1960,18 @@ bool EditorTick(int ped, const PadIn& pad, const KeysIn& keys, float dt) {
     } else if (g_mode == Mode::Look) {
         const std::string strength = clip.filter ? std::to_string(StrengthPercent(clip)) + "%" : "Select a filter first";
         const std::string lens = std::string("Lens   < ") + LensName(clip.lens) + " >";
-        const bool zoomOverride = !preview && clip.lens != kLensFisheye &&
+        const bool zoomOverride = !preview && !LensIs120(clip.lens) &&
             (clip.base.zoomMm > 0.0f || std::any_of(clip.keys.begin(), clip.keys.end(), [](const Key& key) { return key.p.zoomMm > 0.0f; }));
+        const std::string lensStrength = clip.lens == kLensFisheye ? std::to_string(clip.lensStrength) + "%" : "Fisheye lens only";
         const char* descriptions[] = {"Change the color and tone of the picture.", "Blend the filter with the original picture.",
-                                      zoomOverride ? "Camera zoom takes priority over focal-length presets." : "Change the field of view or use Fisheye."};
+                                      zoomOverride ? "Camera zoom takes priority over focal-length presets."
+                                                   : "Change the field of view: Wide is a plain wide camera, Fisheye bends it.",
+                                      "How much the Fisheye lens bends the picture (100% is the full lens)."};
         Panel(("Look - Clip " + std::to_string(clipIndex + 1)).c_str(),
-              {std::string("Filter   < ") + FilterName(clip.filter) + " >", "Filter Strength   < " + strength + " >", lens}, g_lookSel);
-        Txt(descriptions[g_lookSel], 0.072f, 0.43f, 0.33f);
-        Keys("D-pad Adjust   B Back", "Arrows Adjust   L/Backspace/Esc/RClick Close   F Filter   +/- Strength   Shift+L Lens   P Photo");
+              {std::string("Filter   < ") + FilterName(clip.filter) + " >", "Filter Strength   < " + strength + " >", lens,
+               "Lens Strength   < " + lensStrength + " >"}, g_lookSel);
+        Txt(descriptions[g_lookSel], 0.072f, 0.47f, 0.33f);
+        Keys("D-pad Adjust   B Back", "Arrows Adjust   L/Backspace/Esc/RClick Close   F Filter   +/- Strength (on Lens rows: lens)   Shift+L Lens   P Photo");
     } else if (g_mode == Mode::CameraMenu) {
         std::vector<std::string> items;
         for (CameraKind kind : kMenuCameras) items.emplace_back(CameraKindName(kind));
@@ -2446,8 +2488,9 @@ bool Enter(int ped) {
         sound = first.a && gtaaudio::ReplaySoundStart(first.a->gameMs, last.gameMs + 50, std::pow(10.0f, g_soundGainDb / 20.0f));
     }
     gtaaudio::SetReplayPaused(true);
-    g_appliedFilter = 0, g_appliedFisheye = false, g_appliedShake = 0;
+    g_appliedFilter = 0, g_appliedFisheye = false, g_appliedShake = 0, g_appliedLensStrength = 100;
     fisheye::SetFiltered(false);
+    fisheye::SetStrength(1.0f);
     g_input.Reset();
     posehook::TakeApplyTime();
     g_applyCalls = 0;
@@ -2509,8 +2552,9 @@ void Exit() {
     if (g_detailState) fisheye::DropDetail(), g_detailState = 0;
     if (g_appliedShake && g_cam) Call<void>(STOP_CAM_SHAKING, g_cam, 1);
     if (g_appliedFilter) Call<void>(CLEAR_TIMECYCLE_MODIFIER);
-    g_appliedFilter = 0, g_appliedShake = 0, g_appliedFisheye = false;
+    g_appliedFilter = 0, g_appliedShake = 0, g_appliedFisheye = false, g_appliedLensStrength = 100;
     fisheye::SetFiltered(false);
+    fisheye::SetStrength(1.0f);
     g_active = false;
     g_mode = Mode::Instant;
     Call<void>(SET_TIME_SCALE, 1.0f);

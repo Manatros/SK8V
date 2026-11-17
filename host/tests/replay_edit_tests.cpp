@@ -36,10 +36,23 @@ int main() {
         assert(m.PlaceMarker(25.0) == EditResult::TooMany);
     }
 
-    // Cameras: a different camera asks first once the clip has one; keys only on Advanced cameras.
+    // Cameras: a different camera asks only when it would throw work away (camera keys, or a base
+    // the player edited); keys only on Advanced cameras (design 2026-11-16-replay-lens-and-prompts).
     assert(e.SetCamera(1, CameraKind::Follow, false) == EditResult::Ok);  // from Game: no question
-    assert(e.SetCamera(1, CameraKind::AdvTripod, false) == EditResult::NeedsConfirm);
-    assert(e.SetCamera(1, CameraKind::AdvTripod, true) == EditResult::Ok);
+    assert(e.SetCamera(1, CameraKind::Follow, false) == EditResult::Ok);  // the same camera: nothing to do
+    {
+        // No keys and a base the editor only placed (opening the editor does that): switches silently, repeatedly.
+        Clip& c = e.ClipRef(1);
+        c.base.positioned = true, c.base.position[0] = 5.0f, c.base.yaw = 12.0f;  // placed, not edited
+        assert(e.SetCamera(1, CameraKind::Tripod, false) == EditResult::Ok && c.camera == CameraKind::Tripod);
+        assert(e.SetCamera(1, CameraKind::Free, false) == EditResult::Ok && e.SetCamera(1, CameraKind::Follow, false) == EditResult::Ok);
+        assert(IsDefaultBase(c.base));  // a switch resets the base
+        // An edited base asks first, and a confirmed change resets it.
+        c.base.yaw = 30.0f, c.baseEdited = true;
+        assert(e.SetCamera(1, CameraKind::AdvTripod, false) == EditResult::NeedsConfirm && c.camera == CameraKind::Follow);
+        assert(e.SetCamera(1, CameraKind::AdvTripod, true) == EditResult::Ok);
+        assert(!c.baseEdited && IsDefaultBase(c.base));
+    }
     assert(e.AddKey(2.0, CameraParams{}) == EditResult::NotFound);  // clip 0 is a Game camera
     CameraParams a, b;
     a.yaw = 170.0f, a.distance = 2.0f;
@@ -122,11 +135,13 @@ int main() {
         Clip ca, c;
         ca.camera = CameraKind::AdvFree, ca.speed = 0, ca.shake = 3, ca.filter = 2, ca.lens = kLensFisheye;
         ca.filterStrength = 0;
+        ca.lensStrength = 50;
         CameraParams kp;
         kp.yaw = 33.0f, kp.positioned = true, kp.position[2] = 9.0f;
         ca.keys.push_back(Key{0.005, kp});
         c.camera = CameraKind::Follow, c.base.distance = 6.5f;
         c.lens = kLens50;
+        c.baseEdited = true;
         s.clips = {ca, c};
         s.soundStartMs = 990;
         s.pcm = {1, -2, 3};
@@ -144,27 +159,50 @@ int main() {
         assert(back.clips[0].filter == 2 && back.clips[0].lens == kLensFisheye);  // by name
         assert(back.clips[0].filterStrength == 0);
         assert(back.clips[1].lens == kLens50 && back.clips[1].filterStrength == -1);
+        // v3: the lens strength and whether the base camera was edited round-trip.
+        assert(bytes[4] == 3 && back.clips[0].lensStrength == 50 && back.clips[1].lensStrength == 100);
+        assert(!back.clips[0].baseEdited && back.clips[1].baseEdited);
+        {
+            SavedReplay wide = s;
+            wide.clips[1].lens = kLensWide, wide.clips[1].lensStrength = 25;
+            SavedReplay wideBack;
+            assert(Deserialize(Serialize(wide), wideBack, err));
+            assert(wideBack.clips[1].lens == kLensWide && wideBack.clips[1].lensStrength == 25 && wideBack.clips[0].lens == kLensFisheye);
+            wide.clips[1].lensStrength = 33;  // a value from a file is snapped to the steps
+            assert(Deserialize(Serialize(wide), wideBack, err) && wideBack.clips[1].lensStrength == 25);
+        }
         assert(back.clips[0].keys.size() == 1 && back.clips[0].keys[0].p.yaw == 33.0f && back.clips[0].keys[0].p.positioned);
         assert(back.clips[1].base.distance == 6.5f && back.soundStartMs == 990 && back.pcm.size() == 3 && back.pcm[1] == -2);
         // Convert the two clip tails to the published v1 layout. Each lens
-        // name follows a 16-bit length and v1 ends the clip after the name.
-        std::vector<std::uint8_t> v1 = bytes;
-        v1[4] = 1;
-        const auto legacyLens = [&](const std::string& name, bool keep) {
-            const auto it = std::search(v1.begin(), v1.end(), name.begin(), name.end());
-            assert(it != v1.end());
-            v1.erase(it + name.size(), it + name.size() + sizeof(std::int32_t));
-            if (!keep) {
-                *(it - sizeof(std::uint16_t)) = 0;
-                v1.erase(it, it + name.size());
-            }
+        // name follows a 16-bit length; v1 ends the clip after the name, v2 adds the
+        // filter strength (4 bytes), v3 the lens strength (4) and the base-edited flag (1).
+        const auto legacy = [&](std::uint8_t version, std::size_t keepAfterName, std::size_t tail) {
+            std::vector<std::uint8_t> out = bytes;
+            out[4] = version;
+            const auto strip = [&](const std::string& name, bool keep) {
+                const auto it = std::search(out.begin(), out.end(), name.begin(), name.end());
+                assert(it != out.end());
+                out.erase(it + name.size() + keepAfterName, it + name.size() + keepAfterName + tail);
+                if (!keep) {
+                    *(it - sizeof(std::uint16_t)) = 0;
+                    out.erase(it, it + name.size());
+                }
+            };
+            strip("Fisheye", true);
+            strip("50 mm", false);
+            return out;
         };
-        legacyLens("Fisheye", true);
-        legacyLens("50 mm", false);
+        const std::vector<std::uint8_t> v1 = legacy(1, 0, 9);
         assert(ReadInfo(std::vector<std::uint8_t>(v1.begin(), v1.begin() + kInfoBytes), info));
         assert(Deserialize(v1, back, err) && back.pcm == s.pcm);
         assert(back.clips[0].lens == kLensFisheye && back.clips[0].filterStrength == -1);
         assert(back.clips[1].lens == kLensAuto && back.clips[1].filterStrength == -1);
+        assert(back.clips[0].lensStrength == 100 && back.clips[1].lensStrength == 100);  // old file: today's lens
+        assert(!back.clips[0].baseEdited && back.clips[1].baseEdited);  // its base is not at the defaults: ask first
+        const std::vector<std::uint8_t> v2 = legacy(2, 4, 5);  // keeps the filter strength
+        assert(Deserialize(v2, back, err) && back.pcm == s.pcm);
+        assert(back.clips[0].lens == kLensFisheye && back.clips[0].filterStrength == 0 && back.clips[0].lensStrength == 100);
+        assert(back.clips[1].lens == kLensAuto && back.clips[1].filterStrength == -1 && back.clips[1].lensStrength == 100);
         std::vector<std::uint8_t> cut(bytes.begin(), bytes.end() - 3);
         assert(!Deserialize(cut, back, err));  // damaged
         std::vector<std::uint8_t> other = bytes;

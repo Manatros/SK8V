@@ -49,6 +49,23 @@ inline bool Validate(const std::vector<Page>& pages, const Settings& settings, s
     return true;
 }
 
+// Whether a stored snapshot section is complete (design 2026-11-16-replay-lens-and-prompts #7).
+// `stored` counts every non-"__" key in the section, `storedKnown` those that are menu keys now and
+// `count` is the section's own __count. Keys that are not menu keys (a removed row, a key another
+// tool wrote into the section) no longer make it invalid: it is truncated only when fewer keys are
+// stored than __count promised, and it has grown past it only when more known keys are stored.
+// `reason` names the failed check; the caller logs it.
+// `body`: keys stored before the __count line. A snapshot is written as its keys, then
+// __schema and __count, so its body must hold exactly __count keys; lines after __count were
+// appended later by something else (2026-11-16: the tutorial installer) and are ignored.
+inline bool SnapshotComplete(std::size_t present, std::size_t body, long long count, std::string& reason) {
+    if (!present) return reason = "no known setting is stored in it", false;
+    if (count < 0) return reason = "__count is missing", false;
+    if (body != static_cast<std::size_t>(count))
+        return reason = std::to_string(body) + " keys stored before __count, __count says " + std::to_string(count), false;
+    return true;
+}
+
 inline bool Build(const std::vector<Page>& pages,
                   const std::vector<std::pair<std::string, std::string>>& defaults,
                   const std::vector<std::pair<std::string, std::string>>& overrides,

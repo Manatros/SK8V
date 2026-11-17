@@ -119,5 +119,50 @@ int wmain(int argc, wchar_t** argv) {
     assert(std::wstring(legacy) == L"1");
     GetPrivateProfileStringW(L"SkateV", L"CameraFocus", L"", legacy, 32, cameraIni.c_str());
     assert(std::wstring(legacy) == L"Board");
+    // Foreign keys in a snapshot (another tool wrote them, or a row was removed) are ignored; a truncated
+    // snapshot or a bad value is refused and the log says which check failed (design 2026-11-16-replay-lens-and-prompts #7).
+    {
+        static std::string logged;
+        const auto foreignIni = std::wstring(argv[1]) + L"\\foreign-presets.ini";
+        DeleteFileW(foreignIni.c_str());
+        std::vector<menu::Page> two = {{"F", {menu::Flag("A", "FlagA", true), menu::Number("B", "NumB", 1, 0, 3, 0.5f, {}, {}, true)}}};
+        menu::Start(foreignIni, two, {}, [](const char* text) { logged += text, logged += '\n'; });
+        assert(menu::ApplyPreset("Other", {{"FlagA", "0"}, {"NumB", "2"}}));
+        assert(menu::SaveCustomPreset());
+        assert(menu::ApplyPreset("Reset", {{"FlagA", "1"}, {"NumB", "1"}}));
+        WritePrivateProfileStringW(L"Preset.Custom", L"Foreign1", L"x", foreignIni.c_str());
+        WritePrivateProfileStringW(L"Preset.Custom", L"Foreign2", L"y", foreignIni.c_str());
+        logged.clear();
+        assert(menu::RestoreCustomPreset());  // 4 keys stored, __count 2, both menu keys present: accepted
+        assert(menu::Current().at("FlagA") == "0" && menu::Current().at("NumB") == "2" && logged.find("rejected") == std::string::npos);
+        // A menu key missing from the snapshot body is refused even with foreign keys appended
+        // after __count (Copilot review 2026-11-16): those never stand in for a lost setting.
+        WritePrivateProfileStringW(L"Preset.Custom", L"NumB", nullptr, foreignIni.c_str());
+        const auto settled = menu::Current();
+        logged.clear();
+        assert(!menu::RestoreCustomPreset() && menu::Current() == settled);
+        assert(logged.find("snapshot [Preset.Custom] rejected: 1 keys stored before __count, __count says 2") != std::string::npos);
+        // A snapshot written in order (keys, __schema, __count) with a bad value: refused, setting named.
+        const auto writeSnapshot = [&](const wchar_t* numB, const wchar_t* count) {
+            WritePrivateProfileStringW(L"Preset.Custom", nullptr, nullptr, foreignIni.c_str());
+            WritePrivateProfileStringW(L"Preset.Custom", L"FlagA", L"0", foreignIni.c_str());
+            WritePrivateProfileStringW(L"Preset.Custom", L"NumB", numB, foreignIni.c_str());
+            WritePrivateProfileStringW(L"Preset.Custom", L"__schema", L"1", foreignIni.c_str());
+            WritePrivateProfileStringW(L"Preset.Custom", L"__count", count, foreignIni.c_str());
+        };
+        writeSnapshot(L"banana", L"2");
+        logged.clear();
+        assert(!menu::RestoreCustomPreset() && menu::Current() == settled);
+        assert(logged.find("rejected: Missing or invalid preset setting: NumB") != std::string::npos);
+        // More menu keys than __count promised is refused too.
+        writeSnapshot(L"2", L"1");
+        logged.clear();
+        assert(!menu::RestoreCustomPreset() && logged.find("keys stored before __count") != std::string::npos);
+        // Pure rule (Copilot review 2026-11-16: a missing known key next to a foreign one must not pass).
+        std::string why;
+        assert(menu::presets::SnapshotComplete(2, 2, 2, why));
+        assert(!menu::presets::SnapshotComplete(0, 2, 2, why) && !menu::presets::SnapshotComplete(2, 2, -1, why));
+        assert(!menu::presets::SnapshotComplete(1, 1, 2, why));
+    }
     std::cout << "PASS: production preset validation, complete reset, User isolation, Custom persistence, duplicate callbacks, restart reporting and transactional failure\n";
 }

@@ -11,6 +11,7 @@
 #include <windows.h>
 #include <d3d11.h>
 #include <dxgi.h>
+#include <cstdint>
 #include <string>
 #include <vector>
 
@@ -23,6 +24,8 @@ bool Enabled();
 // Enabled, not failed, and a bent frame was drawn in the last half second:
 // only then is the replay HUD drawn by this overlay instead of by GTA.
 bool Drawing();
+// True while the lens is switched on, from the first frame (Drawing() lags until the first draw).
+bool Bending();
 // The replay HUD as items (screen 0-1, as GTA's DRAW_RECT and text): solid
 // rectangles (straight colour, 0-1) and white texts (`y` their top; `scale`
 // GTA's text scale). Texts are drawn in two bands, the top fifth and the
@@ -61,7 +64,10 @@ void Release();
 constexpr float kDetailFov = 60.0f;
 void SetFiltered(bool on);
 bool DetailIdle();
-void BeginDetail();
+// `frameId` names the picture being sharpened (the shown replay frame and camera): the caller drops the
+// detail whenever the picture shown is no longer that one (DetailId), so it never blends over another frame.
+void BeginDetail(std::uint64_t frameId);
+std::uint64_t DetailId();
 // The script saw GTA render at kDetailFov (GET_FINAL_RENDERED_CAM_FOV): take the next-but-two frame.
 void ArmDetail();
 bool DetailCaptured();
@@ -84,5 +90,10 @@ bool WritePng(const std::wstring& path, const unsigned char* bgr, unsigned width
 // The source point (pixels of a w x h frame) the output pixel (x, y) shows,
 // for a source rendered at `vfovDegrees` vertical field of view. Exposed for
 // the tests; the shader does the same.
-void SourcePoint(float x, float y, float w, float h, float vfovDegrees, float& sx, float& sy);
+// `strength` 1 is the full fisheye bend, 0 the plain rectilinear view of the source (a blend of the
+// two sample points in between).
+void SourcePoint(float x, float y, float w, float h, float vfovDegrees, float& sx, float& sy, float strength = 1.0f);
+// Any thread: how much of the bend to draw, 0 to 1 (default 1: the lens as it was).
+void SetStrength(float strength);
+float Strength();
 }  // namespace fisheye

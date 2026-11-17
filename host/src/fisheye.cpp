@@ -35,6 +35,8 @@ std::atomic<int> g_detailPhase{0};
 std::atomic<std::uint64_t> g_detailAt{0}, g_liveAt{0};
 std::atomic<bool> g_centerCaptured{false};
 std::atomic<bool> g_filtered{false};
+std::atomic<float> g_strength{1.0f};            // SetStrength: the share of the bend drawn
+std::atomic<std::uint64_t> g_detailId{0};       // the frame identity the detail render was asked for (BeginDetail)
 // The photo: requested by the script thread, taken by the render thread, written by a worker.
 std::atomic<int> g_photoState{0};
 std::atomic<std::uint64_t> g_photoAt{0};
@@ -86,7 +88,7 @@ struct Gpu {
 constexpr char kShader[] = R"(
 cbuffer C : register(b0) {
     float aspect; float halfDiag; float cornerAngle; float tanHalf;
-    float2 texSize; float vignette; float pad0;
+    float2 texSize; float vignette; float strength;  // strength: 1 = the full fisheye bend, 0 = the plain 120-degree view
     float centerScale; float detail; float2 pad1;  // the detail view: tan(60)/tan(30); 1 when it is valid
     float4 rect;   // x0 y0 x1 y1 in clip space (HUD)
     float4 color;  // premultiplied (timeline)
@@ -160,6 +162,7 @@ float4 ps_main(V i) : SV_Target {
     if (r > 1e-5) {
         float theta = r / halfDiag * cornerAngle;
         q = p * (tan(theta) / tanHalf / r);
+        if (strength < 1.0) q = p + (q - p) * strength;  // 1 stays exactly the full bend
     }
     float2 uv = (q / float2(aspect, 1)) * 0.5 + 0.5;
     float rho = r / halfDiag;
@@ -196,7 +199,7 @@ float4 ps_color(V i) : SV_Target { return color; }
 
 struct Constants {
     float aspect, halfDiag, cornerAngle, tanHalf;
-    float texW, texH, vignette, pad0;
+    float texW, texH, vignette, strength;
     float centerScale, detail, pad1, pad2;
     float rect[4];
     float color[4];
@@ -211,6 +214,7 @@ Constants Make(float w, float h, float vfov) {
     c.cornerAngle = std::atan(c.halfDiag * c.tanHalf);
     c.texW = w, c.texH = h;
     c.vignette = 0.35f;
+    c.strength = 1.0f;
     c.centerScale = c.tanHalf / std::tan(kDetailFov * 0.5f * 0.01745329f);
     return c;
 }
@@ -460,6 +464,8 @@ bool UpdateBand(int band, const Hud& hud, UINT w, UINT h) {
 }  // namespace
 
 void SetLog(LogFn log) { g_log = log; }
+void SetStrength(float strength) { g_strength = std::isfinite(strength) ? std::clamp(strength, 0.0f, 1.0f) : 1.0f; }
+float Strength() { return g_strength.load(); }
 void SetEnabled(bool on) {
     if (g_enabled.exchange(on) != on) {
         if (on) g_liveAt = std::max(g_liveAt.load(), g_presents.load() + 1);
@@ -478,11 +484,17 @@ void SetHudItems(const std::vector<HudRect>& rects, const std::vector<HudText>& 
         if (!(g_hud.texts[i] == band[i])) g_hud.texts[i] = std::move(band[i]), ++g_hud.serial[i];  // painted again only on change
 }
 
+// The lens is switched on (it bends the next present), even before its first draw:
+// gates for overlays that must not be bent (Copilot review 2026-11-16).
+bool Bending() {
+    return g_enabled.load() && !g_failed.load();
+}
+
 bool Drawing() {
     return g_enabled.load() && !g_failed.load() && GetTickCount64() - g_drawnAt.load() < 500;
 }
 
-void SourcePoint(float x, float y, float w, float h, float vfov, float& sx, float& sy) {
+void SourcePoint(float x, float y, float w, float h, float vfov, float& sx, float& sy, float strength) {
     const Constants c = Make(w, h, vfov);
     const float px = (x / w * 2.0f - 1.0f) * c.aspect, py = y / h * 2.0f - 1.0f;
     const float r = std::sqrt(px * px + py * py);
@@ -491,6 +503,7 @@ void SourcePoint(float x, float y, float w, float h, float vfov, float& sx, floa
         const float theta = r / c.halfDiag * c.cornerAngle;
         const float k = std::tan(theta) / c.tanHalf / r;
         qx = px * k, qy = py * k;
+        if (strength < 1.0f) qx = px + (qx - px) * strength, qy = py + (qy - py) * strength;  // the shader's blend
     }
     sx = (qx / c.aspect * 0.5f + 0.5f) * w;
     sy = (qy * 0.5f + 0.5f) * h;
@@ -560,6 +573,7 @@ void Bend(IDXGISwapChain* sc, bool drawHud) {
     }
     if (!hold || !gpu.baseValid) c->CopyResource(gpu.copy, back), gpu.baseValid = true;
     Constants k = Make(static_cast<float>(bd.Width), static_cast<float>(bd.Height), kSourceFov);
+    k.strength = g_strength.load();
     k.detail = phase == 2 && g_centerCaptured.load() ? (g_filtered.load() ? 2.0f : 1.0f) : 0.0f;  // phase 3 holds without it
     auto upload = [&] {
         D3D11_MAPPED_SUBRESOURCE m{};
@@ -716,7 +730,8 @@ void SetFiltered(bool on) {
     g_liveAt = std::max(g_liveAt.load(), g_presents.load() + 1);
 }
 bool DetailIdle() { return g_detailPhase.load() == 0 && g_presents.load() >= g_liveAt.load(); }
-void BeginDetail() {
+void BeginDetail(std::uint64_t frameId) {
+    g_detailId = frameId;
     g_centerCaptured = false;
     g_detailAt = ~0ull;  // armed once GTA is seen rendering the detail view (ArmDetail)
     g_detailPhase = 1;
@@ -724,6 +739,7 @@ void BeginDetail() {
 void ArmDetail() {
     if (g_detailPhase.load() == 1 && g_detailAt.load() == ~0ull) g_detailAt = g_presents.load() + 3;
 }
+std::uint64_t DetailId() { return g_detailId.load(); }
 bool DetailCaptured() { return g_detailPhase.load() == 1 && g_centerCaptured.load(); }
 void UseDetail() {
     g_liveAt = g_presents.load() + 3;

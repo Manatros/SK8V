@@ -241,8 +241,21 @@ float StickAxis(std::int16_t v);
 // Lenses (design 2026-11-09-replay-look-sound): Auto keeps each camera's own
 // field of view; the others are 35 mm focal lengths; Fisheye is 120 degrees
 // plus the barrel pass.
-enum Lens { kLensAuto, kLensFisheye, kLens14, kLens24, kLens35, kLens50, kLens85, kLens135, kLensCount };
+// Wide (design 2026-11-16-replay-lens-and-prompts) follows Auto in the cycle and the Look list: a plain
+// rectilinear camera at the fisheye's 120 degrees, no bend. Saved replays store lenses by name.
+enum Lens { kLensAuto, kLensWide, kLensFisheye, kLens14, kLens24, kLens35, kLens50, kLens85, kLens135, kLensCount };
 const char* LensName(int lens);
+// The lenses that render the replay camera at 120 degrees (the camera zoom does not apply).
+inline bool LensIs120(int lens) { return lens == kLensFisheye || lens == kLensWide; }
+// Fisheye bend strength in percent: 25, 50, 75, 100 (100 = the lens as it was before the setting).
+constexpr int kLensStrengthMin = 25, kLensStrengthMax = 100, kLensStrengthStep = 25;
+inline int ClampLensStrength(int percent) {
+    if (percent < kLensStrengthMin) return kLensStrengthMin;
+    if (percent > kLensStrengthMax) return kLensStrengthMax;
+    return (percent + kLensStrengthStep / 2) / kLensStrengthStep * kLensStrengthStep;
+}
+// Identity of the picture shown: the recorded frame pair and the blend between them.
+std::uint64_t FrameIdentity(const Recording::Sample& s);
 // GTA's (vertical) field of view in degrees for `lens`; `autoFov` for Auto.
 float LensFov(int lens, float autoFov);
 
