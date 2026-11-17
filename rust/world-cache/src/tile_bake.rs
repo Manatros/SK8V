@@ -935,6 +935,7 @@ fn bake(
     );
     eprintln!("Reading {} placement maps", ymaps.len());
     let mut instances = 0;
+    let mut alignment_interiors = HashSet::new();
     let mut skipped = Vec::new();
     for path in ymaps {
         let bytes = vfs::read(&path)?;
@@ -1026,6 +1027,7 @@ fn bake(
                     }
                 }
                 sources.insert(bound.display().to_string(), hash(&b));
+                alignment_interiors.insert(bound.file_name().unwrap().to_string_lossy().to_string());
                 spool.push(&mut data, &BTreeSet::new(), size, &bound.display().to_string())?;
                 instances += 1;
             }
@@ -1211,6 +1213,23 @@ fn bake(
             hash_file(&surface_file)?,
         );
     }
+    // A60 is a required bake input, not an optional audio/decal sidecar.
+    let ground_file = cache.parent().ok_or("cache has no parent")?.join("crackmaps.svgj");
+    sources.insert(ground_file.display().to_string(), hash_file(&ground_file)?);
+    let mut ground = svwc::ground::Ground::open(&ground_file)?;
+    // SVGJ buckets triangles by centroid, not overlap. Measure the actual
+    // maximum footprint reach once, so long triangles cannot disappear from
+    // a query at a bucket edge. Retain only this scalar, not the whole map.
+    let mut ground_reach = 0.0f32;
+    for cell in ground.tile_keys() {
+        for t in ground.read_tile(cell)? {
+            if t.layer != 0 { continue; }
+            let c = t.p.map(Vec3::from_array).into_iter().sum::<Vec3>() / 3.0;
+            for p in t.p { ground_reach = ground_reach.max((p[0]-c.x).abs().max((p[1]-c.y).abs())); }
+        }
+    }
+    drop(ground);
+    eprintln!("A60 drawn-ground centroid reach: {ground_reach:.3} m");
     for (name, bytes) in [
         (
             "world.rs",
@@ -1261,6 +1280,8 @@ fn bake(
             include_bytes!("../../svwc/src/clean.rs").as_slice(),
         ),
         ("tile_bake.rs", include_bytes!("tile_bake.rs").as_slice()),
+        ("ground_align.rs", include_bytes!("ground_align.rs").as_slice()),
+        ("ground.rs", include_bytes!("../../svwc/src/ground.rs").as_slice()),
         ("interiors.rs", include_bytes!("interiors.rs").as_slice()),
         ("interiors/doors.rs", include_bytes!("interiors/doors.rs").as_slice()),
         ("vfs.rs", include_bytes!("vfs.rs").as_slice()),
@@ -1299,11 +1320,21 @@ fn bake(
     struct Lookups {
         recovered: SkateVRuntime::surfaces::Recovered,
         floors: Option<svwc::Cache<std::io::BufReader<fs::File>>>,
+        ground: svwc::ground::Ground<std::io::BufReader<fs::File>>,
+        ground_tiles: HashMap<tiles::Cell, Arc<Vec<svwc::ground::GroundTri>>>,
+        ground_order: VecDeque<tiles::Cell>,
+        ground_records: usize,
+        alignment: crate::ground_align::Fields,
     }
     let open_lookups = || -> Result<Lookups, Box<dyn Error + Send + Sync>> {
         Ok(Lookups {
             recovered: SkateVRuntime::surfaces::Recovered::open(cache),
             floors: if fallback.exists() { Some(svwc::Cache::open(&fallback)?) } else { None },
+            ground: svwc::ground::Ground::open(&ground_file)?,
+            ground_tiles: HashMap::new(),
+            ground_order: VecDeque::new(),
+            ground_records: 0,
+            alignment: Default::default(),
         })
     };
     let mut source = format!(
@@ -1407,6 +1438,49 @@ fn bake(
             let is_prop: Vec<bool> = data.origins.iter().map(|&o| is_ymap[o as usize]).collect();
             lower_prop_bars(&mut data.tris, &is_prop, &rails);
         }
+        // A60: before vertex provenance, clean_static, rail finding and clip.
+        // The requesting context never supplies evidence for a displacement.
+        let before_alignment:Vec<_>=data.tris.iter().map(|t|svwc::surfaces::key(&t.v)).collect();
+        let (moved, max_move) = lookups.alignment.apply(&mut data.tris, |block| -> Result<_, Box<dyn Error + Send + Sync>> {
+            let half = crate::ground_align::BLOCK * 0.5 + crate::ground_align::HALO;
+            let at = Vec3::new((block.0 as f32+0.5)*crate::ground_align::BLOCK, (block.1 as f32+0.5)*crate::ground_align::BLOCK, 0.0);
+            let raw = spool.around(at, half, size)?;
+            let mut lo=at-Vec3::splat(half);let mut hi=at+Vec3::splat(half);
+            for t in &raw.tris {if t.v.iter().any(|&p|crate::ground_align::block_of(p)==block) {
+                for p in t.v {let p=Vec3::from_array(p);lo=lo.min(p);hi=hi.max(p);}
+            }}
+            let centre=(lo+hi)*0.5;
+            let radius=(hi.x-lo.x).max(hi.y-lo.y)*0.5+0.3;
+            let raw=spool.around(centre,radius,size)?;
+            let eligible: Vec<_> = raw.tris.iter().zip(&raw.origins).zip(&raw.stairs).map(|((t,o),stairs)| {
+                let name = &spool.names[*o as usize];
+                !is_ymap[*o as usize] && !alignment_interiors.contains(name) && !stairs && crate::ground_align::ground_material(t.material)
+            }).collect();
+            // Bounded decoded SVGJ cache: adjacent canonical blocks repeatedly
+            // need the same centroid buckets. Keep only overlap geometry for
+            // the field, not every triangle in those buckets.
+            let mut drawn=Vec::new();let s=lookups.ground.tile_size;let reach=radius+ground_reach;
+            for x in ((centre.x-reach)/s).floor() as i32..=((centre.x+reach)/s).floor() as i32 {
+                for y in ((centre.y-reach)/s).floor() as i32..=((centre.y+reach)/s).floor() as i32 {
+                    let cell=(x,y);
+                    if !lookups.ground_tiles.contains_key(&cell) {
+                        let ts:Vec<_>=lookups.ground.read_tile(cell)?.into_iter().filter(|t|t.layer==0).collect();
+                        while lookups.ground_tiles.len()>=128 || (lookups.ground_records+ts.len()>200_000 && !lookups.ground_order.is_empty()) {
+                            let old=lookups.ground_order.pop_front().unwrap();
+                            lookups.ground_records-=lookups.ground_tiles.remove(&old).unwrap().len();
+                        }
+                        lookups.ground_records+=ts.len();lookups.ground_order.push_back(cell);
+                        lookups.ground_tiles.insert(cell,Arc::new(ts));
+                    }
+                    drawn.extend(lookups.ground_tiles[&cell].iter().filter(|t| (0..2).all(|k|t.p.iter().any(|p|p[k]>=centre[k]-radius)&&t.p.iter().any(|p|p[k]<=centre[k]+radius))).copied());
+                }
+            }
+            Ok(crate::ground_align::field(block,&raw.tris,&eligible,&drawn))
+        })?;
+        let alignment_from:Vec<_>=data.tris.iter().zip(before_alignment).filter_map(|(t,old)|{
+            let new=svwc::surfaces::key(&t.v);(new!=old).then_some((new,old))
+        }).collect();
+        eprintln!("A60 tile {} {} moved-corners {moved} max-move {max_move:.3}", c.0,c.1);
         // Face origins by vertex key, before the cleanup reorders and drops.
         let input_origin: std::collections::HashMap<u64, u32> = data.tris.iter().zip(&data.origins)
             .map(|(t, &o)| (svwc::surfaces::key(&t.v), o)).collect();
@@ -1417,7 +1491,7 @@ fn bake(
             .map(|(t, _)| svwc::surfaces::key(&t.v)).collect();
         let mut census = SkateVRuntime::live::Census::default();
         // Both stair variants: the game's settings pick (SkateVRuntime::live::shown).
-        let park_sources:std::collections::HashMap<u64,String>=data.tris.iter().zip(&data.origins).filter(|(_,o)|spool.names[**o as usize].eq("id2_10_0.ybn")).map(|(t,o)|(svwc::surfaces::key(&t.v),spool.names[*o as usize].clone())).collect();
+        let park_sources:std::collections::HashMap<u64,String>=data.tris.iter().zip(&data.origins).map(|(t,o)|(svwc::surfaces::key(&t.v),spool.names[*o as usize].clone())).collect();
         let cleaned = SkateVRuntime::live::clean_static_with_park_sources(
             &mut data.tris,
             &data.stairs,
@@ -1431,7 +1505,8 @@ fn bake(
         ramps.fetch_add(census.stair_ramps, std::sync::atomic::Ordering::Relaxed);
         step_count.fetch_add(census.steps, std::sync::atomic::Ordering::Relaxed);
         let is_step = |t: &svwc::Tri| cleaned.tag_of(t) & SkateVRuntime::live::STEP_TAG != 0;
-        let surface_tags = lookups.recovered.around([at.x, at.y], margin)?;
+        let mut surface_tags = lookups.recovered.around([at.x, at.y], margin)?;
+        for (new,old) in alignment_from {if let Some(tag)=surface_tags.get(&old).copied() {surface_tags.insert(new,tag);}}
         let local_tris: Vec<_> = data
             .tris
             .iter()

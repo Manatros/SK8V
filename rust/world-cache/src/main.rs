@@ -20,6 +20,7 @@
 //! cover- or animal-only bounds). `--no-primitives` and `--all-flags` restore
 //! the old behaviour.
 mod tile_bake;
+mod ground_align;
 mod bars;
 mod interiors;
 mod packs;

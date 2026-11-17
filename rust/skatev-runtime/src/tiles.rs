@@ -46,6 +46,8 @@ pub fn rules_hash() -> String {
             // Extraction, placement and archive-state selection determine the
             // geometry just as much as the runtime's final surface rules.
             include_bytes!("../../world-cache/src/tile_bake.rs").as_slice(),
+            include_bytes!("../../world-cache/src/ground_align.rs").as_slice(),
+            include_bytes!("../../svwc/src/ground.rs").as_slice(),
             include_bytes!("../../world-cache/src/main.rs").as_slice(),
             include_bytes!("../../world-cache/src/interiors.rs").as_slice(),
             include_bytes!("../../world-cache/src/interiors/doors.rs").as_slice(),

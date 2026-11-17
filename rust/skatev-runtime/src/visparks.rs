@@ -327,7 +327,7 @@ pub fn replace_with_sources(tris: &mut Vec<Tri>, stairs: &[Tri], sources: &std::
             .filter(|_|UNCERTAIN.get().is_some_and(|p|p.iter().any(|(id,_)|id==park.id)));
         let uncertain=UNCERTAIN.get().and_then(|p|p.iter().find(|(id,_)|id==park.id)).map_or(&[][..],|(_,b)|b.as_slice());
         let rest = see_through_boxes_with_reach(tris, stairs, visible, park.centre, park.radius, park.id, &mut out, &bars, sources, reach,uncertain);
-        replace_park(tris, stairs, rest.as_deref().unwrap_or(visible), park.centre, park.radius, park.id, &mut out);
+        replace_park(tris, stairs, rest.as_deref().unwrap_or(visible), park.centre, park.radius, park.id, &mut out, sources);
     }
     out
 }
@@ -879,7 +879,7 @@ fn support_min_width(points: &mut Vec<Vec2>, hull: &mut Vec<Vec2>) -> f32 {
     if width == f32::MAX { 0.0 } else { width }
 }
 
-fn replace_park(tris: &mut Vec<Tri>, stairs: &[Tri], visible: &[[[f32; 3]; 3]], centre: Vec2, radius: f32, id: &'static str, out: &mut Replacement) {
+fn replace_park(tris: &mut Vec<Tri>, stairs: &[Tri], visible: &[[[f32; 3]; 3]], centre: Vec2, radius: f32, id: &'static str, out: &mut Replacement, sources: &std::collections::HashMap<u64,String>) {
     let inside = |t: &[[f32; 3]; 3]| centroid(t).truncate().distance(centre) <= radius;
     let park: Vec<usize> = (0..tris.len()).filter(|&i| inside(&tris[i].v)).collect();
     if park.is_empty() { return; }
@@ -1499,6 +1499,10 @@ fn replace_park(tris: &mut Vec<Tri>, stairs: &[Tri], visible: &[[[f32; 3]; 3]], 
         let m = t.map(|p| if pinned.contains(&quant(p)) { p } else { moved.get(&quant(p)).copied().unwrap_or(p) });
         (m != t).then(|| (i, vec![m]))
     })).collect();
+    // R6 sees only final cut residuals with a verified map-bound origin.
+    // Unknown/live sources and authored props cannot open a visible wall.
+    let arches = ArchWalls::new(visible, tris, centre, radius);
+    let mut arch_drops = Vec::new();
     for u in used.iter().chain(&sag_faces).chain(&chamfers) {
         out.added.push(Tri { v: u.v, material: tris[u.partner].material });
         out.surface_from.push(svwc::surfaces::key(&tris[u.partner].v));
@@ -1510,12 +1514,17 @@ fn replace_park(tris: &mut Vec<Tri>, stairs: &[Tri], visible: &[[[f32; 3]; 3]], 
         replaced[i] = true;
         let key = svwc::surfaces::key(&tris[i].v);
         for p in pieces {
+            if sources.get(&key).is_some_and(|s| s.ends_with(".ybn")) && arches.opening(&p) {
+                arch_drops.push(p);
+                continue;
+            }
             out.added.push(Tri { v: p, material: tris[i].material });
             out.surface_from.push(key);
             out.cut.push(true);
             out.park.push(id);
         }
     }
+    crate::world::park_rules::record("R6", Vec::new(), arch_drops, 0, false);
     let mut index = 0;
     tris.retain(|t| {
         let drop = replaced[index];
@@ -1523,6 +1532,143 @@ fn replace_park(tris: &mut Vec<Tri>, stairs: &[Tri], visible: &[[[f32; 3]; 3]], 
         if drop { out.removed.push(*t); }
         !drop
     });
+}
+
+/// R6 wall-local opening evidence. The census retains the provisional 2.1 m
+/// cap. Broad flanks are checked over the design's 25 cm support reach;
+/// isolated posts/trim cannot masquerade as the sides of a visible wall.
+struct ArchWalls {
+    walls: Vec<[[f32;3];3]>,
+    components: Vec<usize>,
+    wall_grid: Grid,
+    floors: Vec<[[f32;3];3]>,
+    floor_grid: Grid,
+    centre: Vec2,
+    radius: f32,
+}
+impl ArchWalls {
+    fn new(visible:&[[[f32;3];3]], gta:&[Tri], centre:Vec2, radius:f32)->Self {
+        let walls:Vec<_>=visible.iter().filter(|t|normal(t).z.abs()<=0.258819 && centroid(t).truncate().distance(centre)<=radius).copied().collect();
+        let mut components:Vec<_>=(0..walls.len()).collect();
+        let mut edges=std::collections::BTreeMap::new();
+        fn root(p:&mut [usize],mut i:usize)->usize {while p[i]!=i {p[i]=p[p[i]];i=p[i];}i}
+        for (i,t) in walls.iter().enumerate() {for e in 0..3 {
+            let q=|p:[f32;3]|p.map(|v|(v*1e4).round() as i32);
+            let (a,b)=(q(t[e]),q(t[(e+1)%3]));let edge=if a<b {(a,b)}else{(b,a)};
+            let owners: &mut Vec<usize>=edges.entry(edge).or_default();
+            for &j in owners.iter() {if normal(t).dot(normal(&walls[j])).abs()>=0.9659258 {let a=root(&mut components,i);let b=root(&mut components,j);components[a]=b;}}
+            owners.push(i);
+        }}
+        // Visible triangle soups can have a subdivided edge on one side.
+        // Positive collinear overlap joins the same wall; a point contact
+        // cannot turn an unrelated post into its flank.
+        let junctions=Grid::new(walls.iter(),0.001);
+        for (i,t) in walls.iter().enumerate() {for p in t {
+            for &j in junctions.at(v3(*p)) {let j=j as usize;
+                if root(&mut components,i)==root(&mut components,j) || normal(t).dot(normal(&walls[j])).abs()<0.9659258 {continue}
+                let joined=(0..3).any(|a|(0..3).any(|b| {
+                    let (x,y)=(v3(t[a]),v3(t[(a+1)%3]));let (g,h)=(v3(walls[j][b]),v3(walls[j][(b+1)%3]));
+                    let d=y-x;let len=d.length();if len<0.0002 {return false}let u=d/len;
+                    if (g-x).cross(u).length()>0.0002 || (h-x).cross(u).length()>0.0002 {return false}
+                    let a=(g-x).dot(u);let b=(h-x).dot(u);
+                    a.max(b).min(len)-a.min(b).max(0.0)>0.0002
+                }));
+                if joined {let a=root(&mut components,i);let b=root(&mut components,j);components[a]=b;}
+            }
+        }}
+        for i in 0..components.len() {components[i]=root(&mut components,i);}
+        let floors:Vec<_>=visible.iter().copied().chain(gta.iter().map(|t|t.v)).filter(|t|normal(t).z>0.5).collect();
+        let wall_grid=Grid::new(walls.iter(),3.0);
+        let floor_grid=Grid::new(floors.iter(),0.05);
+        Self{walls,components,wall_grid,floors,floor_grid,centre,radius}
+    }
+    fn spans(walls:&[&[[f32;3];3]], p:Vec3, u:Vec2)->Vec<(f32,f32)> {
+        let at=p.truncate().dot(u);
+        let mut out=Vec::new();
+        for t in walls {
+            let mut zs=Vec::new();
+            for (a,b) in [(0,1),(1,2),(2,0)] {
+                let x=v3(t[a]).truncate().dot(u);let dx=(v3(t[b])-v3(t[a])).truncate().dot(u);
+                if dx.abs()<1e-7 {continue}
+                let f=(at-x)/dx;
+                if (-1e-5..=1.00001).contains(&f) {zs.push(t[a][2]+f*(t[b][2]-t[a][2]));}
+            }
+            if !zs.is_empty() {out.push((zs.iter().copied().fold(f32::MAX,f32::min),zs.iter().copied().fold(f32::MIN,f32::max)));}
+        }
+        out.sort_by(|a,b|a.0.total_cmp(&b.0));out
+    }
+    fn opening(&self,t:&[[f32;3];3])->bool {
+        let tn=normal(t);let c=centroid(t);
+        if tn.z.abs()>0.258819 || t.iter().any(|p|v3(*p).truncate().distance(self.centre)>self.radius) {return false}
+        // GTA's cut chord is not the wall's local direction. On the curved
+        // ledges it can shift a column across a jamb. Use the nearby visible
+        // facets' frames and require one complete opening witness in a frame.
+        let mut frames=Vec::new();
+        for &i in self.wall_grid.at(c) {let w=&self.walls[i as usize];let n=normal(w);
+            if n.dot(tn).abs()<0.9659258 || !t.iter().all(|p|(v3(*p)-v3(w[0])).dot(n).abs()<=0.0501) {continue}
+            let mut n=n.truncate().normalize_or_zero();if n.dot(tn.truncate())<0.0 {n= -n;}
+            if !frames.iter().any(|v:&Vec2|v.distance(n)<1e-5) {frames.push(n);}
+        }
+        frames.into_iter().any(|n|self.opening_in_frame(t,n))
+    }
+    fn opening_in_frame(&self,t:&[[f32;3];3],n:Vec2)->bool {
+        let c=centroid(t);let u=Vec2::new(-n.y,n.x);
+        let candidates:Vec<_>=self.wall_grid.at(c).iter().map(|&i|i as usize)
+            .filter(|&i|{let w=&self.walls[i];normal(w).truncate().dot(n).abs()>0.9659258 && centroid(w).truncate().distance(c.truncate())<3.0}).collect();
+        let component=candidates.iter().filter(|&&i|t.iter().all(|p|(v3(*p)-v3(self.walls[i][0])).dot(normal(&self.walls[i])).abs()<=0.0501))
+            .filter_map(|&i|Self::spans(&[&self.walls[i]],c,u).first().map(|s|(s.0,self.components[i])))
+            .min_by(|a,b|a.0.total_cmp(&b.0)).map(|p|p.1);
+        let Some(component)=component else{return false};
+        let all:Vec<_>=candidates.into_iter().filter(|&i|self.components[i]==component).map(|i|&self.walls[i]).collect();
+        let local:Vec<_>=all.iter().copied().filter(|w|t.iter().all(|p|(v3(*p)-v3(w[0])).dot(normal(w)).abs()<=0.0501)).collect();
+        if local.is_empty(){return false}
+        // Take the limit from inside the residual at a shared jamb/soffit
+        // edge: the adjoining solid flank has a lower column there exactly.
+        let points=[v3(t[0]),v3(t[1]),v3(t[2])].map(|p|p+(c-p)*0.002);
+        let points=[points[0],points[1],points[2],c];
+        let mut soffits=Vec::new();
+        for p in points {
+            let spans=Self::spans(&local,p,u);let Some(&(lo,mut hi))=spans.first() else{return false};
+            for &(z,top) in &spans[1..] {if z>hi+0.005 {return false} hi=hi.max(top);}
+            if p.z>lo+0.003 {return false} soffits.push(lo);
+        }
+        let soffit=soffits.iter().copied().fold(f32::MAX,f32::min);
+        let top=soffits.iter().copied().fold(f32::MIN,f32::max);
+        let mut floors=Vec::new();
+        for p in points {
+            let floor=self.floor_grid.at(p).iter().filter_map(|&i|crate::grid::height(&self.floors[i as usize].map(v3),p.x,p.y))
+                .filter(|&z|z<=soffit+0.005).max_by(f32::total_cmp);
+            let Some(z)=floor else{return false};floors.push(z);
+        }
+        let lo=floors.iter().copied().fold(f32::MAX,f32::min);let hi=floors.iter().copied().fold(f32::MIN,f32::max);
+        if hi-lo>0.05 {return false}
+        let floor=floors.iter().sum::<f32>()/floors.len() as f32;
+        if top-floor<0.005 {return false}
+        // Intersections at the opening base locate its actual flanks, rather
+        // than the edges of one arbitrarily tessellated cut triangle.
+        let mut sections=Vec::new();
+        for w in &all {for (a,b) in [(0,1),(1,2),(2,0)] {
+            let dz=w[b][2]-w[a][2];if dz.abs()<1e-7 {continue}
+            let f=(floor+0.01-w[a][2])/dz;
+            if (0.0..=1.0).contains(&f) {let p=v3(w[a])+(v3(w[b])-v3(w[a]))*f;
+                let d=(p-c).truncate();if d.dot(n).abs()<=0.25 {sections.push((d.dot(u),p));}
+            }
+        }}
+        let left=sections.iter().filter(|(x,_)|*x< -0.001).max_by(|a,b|a.0.total_cmp(&b.0));
+        let right=sections.iter().filter(|(x,_)|*x>0.001).min_by(|a,b|a.0.total_cmp(&b.0));
+        let (Some(&(l,lp)),Some(&(r,rp)))=(left,right) else{return false};
+        if r-l>2.1 {return false}
+        let edge=t.map(|p|(v3(p)-c).truncate().dot(u));
+        if l>edge.into_iter().fold(f32::MAX,f32::min)+0.25 || r<edge.into_iter().fold(f32::MIN,f32::max)-0.25 {return false}
+        for (p,sign) in [(lp,-1.0),(rp,1.0)] {for step in 1..=5 {
+            let q=p+(u*sign*(step as f32*0.05)).extend(0.0);
+            let flank:Vec<_>=all.iter().copied().filter(|w|(q-v3(w[0])).dot(normal(w)).abs()<=0.05).collect();
+            let mut hi=floor;
+            for (lo,z) in Self::spans(&flank,q,u) {if lo>hi+0.05 {break}hi=hi.max(z);}
+            if hi<top-0.005 {return false}
+        }}
+        true
+    }
 }
 
 /// How far `q` stands in front of face `v`, when it projects inside the face along its
@@ -1856,13 +2002,55 @@ fn snap(p: [f32; 3], used: &[Used], grid: &Grid) -> [f32; 3] {
 
 #[cfg(test)]
 mod tests {
+    fn arch_mesh(width:f32,roof:bool)->Vec<[[f32;3];3]> {
+        let mut out=Vec::new();
+        for (x0,x1,z0,z1) in [(-2.5,-width/2.0,0.0,1.0),(width/2.0,2.5,0.0,1.0),(-width/2.0,width/2.0,0.4,1.0)] {
+            if z0>0.0 && !roof {continue}
+            out.extend([[[x0,0.0,z0],[x1,0.0,z0],[x1,0.0,z1]],[[x0,0.0,z0],[x1,0.0,z1],[x0,0.0,z1]]]);
+        }
+        out.extend(square(-4.0,4.0,-4.0,4.0,0.0));out
+    }
+    #[test]
+    fn r6_arch_cut_sheets_open_but_solid_walls_and_wide_doorways_stay() {
+        let sheet=[[-0.8,0.0,0.0],[0.8,0.0,0.0],[0.8,0.0,0.4]];
+        let visible=arch_mesh(1.6,true);
+        assert!(ArchWalls::new(&visible,&[],Vec2::ZERO,60.0).opening(&sheet));
+        let solid=arch_mesh(0.0,true);
+        assert!(!ArchWalls::new(&solid,&[],Vec2::ZERO,60.0).opening(&sheet));
+        assert!(!ArchWalls::new(&arch_mesh(3.2,false),&[],Vec2::ZERO,60.0).opening(&sheet));
+        assert!(!ArchWalls::new(&arch_mesh(3.2,true),&[],Vec2::ZERO,60.0).opening(&sheet));
+    }
+    #[test]
+    fn r6_missing_floor_one_flank_plane_mismatch_and_outside_circle_stay() {
+        let t=[[-0.7,0.0,0.0],[0.7,0.0,0.0],[0.7,0.0,0.35]];
+        let mut v=arch_mesh(1.6,true);v.retain(|t|normal(t).z.abs()<0.5);
+        assert!(!ArchWalls::new(&v,&[],Vec2::ZERO,60.0).opening(&t));
+        let mut v=arch_mesh(1.6,true);v.retain(|t| !t.iter().all(|p|p[0]<= -0.8));
+        assert!(!ArchWalls::new(&v,&[],Vec2::ZERO,60.0).opening(&t));
+        let v=arch_mesh(1.6,true);let off=t.map(|mut p|{p[1]+=0.06;p});
+        assert!(!ArchWalls::new(&v,&[],Vec2::ZERO,60.0).opening(&off));
+        assert!(!ArchWalls::new(&v,&[],Vec2::new(100.0,100.0),1.0).opening(&t));
+    }
+    #[test]
+    fn r6_applies_only_to_verified_cut_residuals_in_replace_park() {
+        let v=arch_mesh(1.6,true);
+        let wall=vec![Tri {v:[[-2.5,0.0,0.0],[2.5,0.0,0.0],[2.5,0.0,1.0]],material:1},Tri {v:[[-2.5,0.0,0.0],[2.5,0.0,1.0],[-2.5,0.0,1.0]],material:1}];
+        let sources=wall.iter().map(|t|(svwc::surfaces::key(&t.v),"test.ybn".to_string())).collect();
+        let run=|sources:&std::collections::HashMap<u64,String>| {
+            let mut gta=wall.clone();let mut out=Replacement::default();
+            replace_park(&mut gta,&[],&v,Vec2::ZERO,60.0,"vespucci",&mut out,sources);out
+        };
+        let unknown=run(&Default::default());let verified=run(&sources);
+        assert!(verified.cut.iter().filter(|x|**x).count()<unknown.cut.iter().filter(|x|**x).count());
+        assert_eq!(verified.cut.iter().filter(|x|!**x).count(),unknown.cut.iter().filter(|x|!**x).count());
+    }
     use super::*;
 
     const AT: Vec2 = Vec2::new(-1374., -1396.);
 
     fn run(gta: &mut Vec<Tri>, stairs: &[Tri], visible: &[[[f32; 3]; 3]]) -> Replacement {
         let mut out = Replacement::default();
-        replace_park(gta, stairs, visible, AT, 60., "vespucci", &mut out);
+        replace_park(gta, stairs, visible, AT, 60., "vespucci", &mut out, &Default::default());
         out
     }
 

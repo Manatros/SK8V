@@ -83,7 +83,7 @@ pub fn report(
     source_names: &[String],
 ) {
     let events = AUDIT.with(|a| std::mem::take(&mut a.borrow_mut().events));
-    for rule in ["R1", "R1-spot", "R1b", "R2", "R3a", "R3b", "R4", "R5"] {
+    for rule in ["R1", "R1-spot", "R1b", "R2", "R3a", "R3b", "R4", "R5", "R6"] {
         // R1b acts in the reach ring (rev 5): "outside" there means past it.
         let margin = if rule == "R1b" { RING } else { 0.0 };
         let (mut lines, mut metres, mut boxes, mut faces, mut outside) = (0, 0.0f32, 0, 0, 0);
