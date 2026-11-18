@@ -205,7 +205,8 @@ impl Floors {
                 let t = [low.point(p[0]), low.point(p[i]), low.point(p[i + 1])];
                 // Keep the source winding (upward).
                 let tn = cross(sub(t[1], t[0]), sub(t[2], t[0]));
-                kept.push(if dot(tn, n) < 0. { [t[0], t[2], t[1]] } else { t });
+                let t = if dot(tn, n) < 0. { [t[0], t[2], t[1]] } else { t };
+                if sound(&t) { kept.push(t); }
             }
         }
         // Risers along each covered region's border where open lower floor
@@ -244,7 +245,7 @@ impl Floors {
                         let tn = cross(sub(t[1], t[0]), sub(t[2], t[0]));
                         if dot(tn, tn) < 1e-10 { continue; }
                         if tn[0] * o[0] + tn[1] * o[1] < 0. { t.swap(1, 2); }
-                        added.push(t);
+                        if sound(&t) { added.push(t); }
                     }
                 }
             }
@@ -262,6 +263,16 @@ fn inside(r: &Poly, q: [f32; 2]) -> bool {
 }
 
 type Poly = Vec<[f32; 2]>;
+
+/// A triangle Skate's world builder accepts: no two corners within 2 mm (it
+/// welds at 1 mm) and a normal that normalizes (`skate_world.rs`: "Invalid
+/// SKATE collision triangle normal" fails the whole stream).
+fn sound(t: &Triangle) -> bool {
+    let far = |a: V, b: V| { let d = sub(a, b); dot(d, d) > 0.002 * 0.002 };
+    let n = cross(sub(t[1], t[0]), sub(t[2], t[0]));
+    let l = dot(n, n).sqrt();
+    t.iter().flatten().all(|x| x.is_finite()) && far(t[0], t[1]) && far(t[1], t[2]) && far(t[2], t[0]) && l.is_finite() && l > 1e-6
+}
 
 /// z = a x + b y + d.
 #[derive(Clone, Copy)]
@@ -574,7 +585,10 @@ mod tests {
             let before = t.triangles.len();
             let start = std::time::Instant::now();
             let (d, r) = top_floor_wins(&mut t);
-            eprintln!("tile {c}: {before} -> {} triangles, {d} faces cut, {r} riser triangles, {:.0} ms", t.triangles.len(), start.elapsed().as_secs_f64() * 1e3);
+            let bad = t.triangles.iter().filter(|(t, _)| !sound(t)).count();
+            let bad_before = Tile::read(std::io::BufReader::new(std::fs::File::open(&path).unwrap())).unwrap().triangles.iter().filter(|(t, _)| !sound(t)).count();
+            assert!(bad <= bad_before, "tile {c}: {bad} unsound triangles after, {bad_before} before");
+            eprintln!("tile {c}: {bad_before} -> {bad} unsound; {before} -> {} triangles, {d} faces cut, {r} riser triangles, {:.0} ms", t.triangles.len(), start.elapsed().as_secs_f64() * 1e3);
             t.write(std::fs::File::create(crate::tiles::path(std::path::Path::new(&out), cell)).unwrap()).unwrap();
         }
     }
@@ -610,4 +624,37 @@ mod tests {
         assert!((a - 20.).abs() < 1e-3);
     }
 
+    /// Every installed tile: GTAXSKATE_TILES=<tiles dir>. Runs the pass and
+    /// Skate's own normal check (`skate_world.rs`, in Skate space) on every
+    /// triangle; fails if the pass makes any triangle Skate would refuse.
+    #[test]
+    #[ignore]
+    fn all_tiles_stay_valid_for_skate() {
+        let Ok(dir) = std::env::var("GTAXSKATE_TILES") else { return };
+        let skate_ok = |t: &Triangle| {
+            let [a, b, c] = t.map(|p| crate::coords::to_skate(bevy_math::Vec3::from_array(p)));
+            (b - a).cross(c - a).try_normalize().is_some()
+        };
+        let (mut tiles, mut before_n, mut after_n, mut bad, mut worst) = (0usize, 0usize, 0usize, 0usize, 0f64);
+        let (mut bad_tiles, mut slowest) = (Vec::new(), (0f64, String::new()));
+        for e in std::fs::read_dir(&dir).unwrap().flatten() {
+            let path = e.path();
+            if path.extension().and_then(|x| x.to_str()) != Some("svwt") { continue; }
+            let Ok(mut t) = Tile::read(std::io::BufReader::new(std::fs::File::open(&path).unwrap())) else { continue };
+            let was_bad = t.triangles.iter().filter(|(t, _)| !skate_ok(t)).count();
+            before_n += t.triangles.len();
+            let start = std::time::Instant::now();
+            top_floor_wins(&mut t);
+            let ms = start.elapsed().as_secs_f64() * 1e3;
+            if ms > slowest.0 { slowest = (ms, path.display().to_string()); }
+            worst = worst.max(ms);
+            after_n += t.triangles.len();
+            let now_bad = t.triangles.iter().filter(|(t, _)| !skate_ok(t)).count();
+            if now_bad > was_bad { bad += now_bad - was_bad; bad_tiles.push(path.display().to_string()); }
+            tiles += 1;
+        }
+        eprintln!("{tiles} tiles: {before_n} -> {after_n} triangles (+{:.1} %), new invalid {bad}, slowest {:.0} ms ({})",
+            (after_n as f64 / before_n.max(1) as f64 - 1.) * 100., slowest.0, slowest.1);
+        assert!(bad == 0, "new invalid triangles in {:?}", &bad_tiles[..bad_tiles.len().min(10)]);
+    }
 }
