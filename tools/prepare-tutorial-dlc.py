@@ -10,6 +10,7 @@ import argparse
 import importlib.util
 import json
 import math
+import os
 import re
 import struct
 import subprocess
@@ -24,10 +25,8 @@ spec = importlib.util.spec_from_file_location('tutorial_m0', Path(__file__).with
 m0 = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(m0)
 MAX_VERTICES = 60_000
-EXTERNAL = Path('C:/SkateMods/external/sk8v')
-DEFAULT_RAGE = EXTERNAL / 'build/tools/rage.exe'
-if not DEFAULT_RAGE.is_file():
-    DEFAULT_RAGE = REPO / 'build/tools/rage.exe'
+SK8V_ROOT = Path(os.environ.get('SK8V_ROOT', str(REPO)))
+DEFAULT_RAGE = Path(os.environ.get('SK8V_RAGE', str(SK8V_ROOT / 'build/tools/rage.exe')))
 
 
 def transform(point, origin):
@@ -364,7 +363,8 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--disc', type=Path, required=True, help='extracted Skate 3 disc root')
     parser.add_argument('--manifest', type=Path, default=REPO / 'local/m0-tutorial/m0-tutorial-manifest.json')
-    parser.add_argument('--donor', type=Path, default=EXTERNAL / 'upstream/skate-3-rust-engine-donor')
+    default_donor = Path(os.environ.get('SKATE3_DONOR_ROOT', str(SK8V_ROOT / 'upstream/skate-3-rust-engine-donor')))
+    parser.add_argument('--donor', type=Path, default=default_donor)
     parser.add_argument('--rage', type=Path, default=DEFAULT_RAGE)
     parser.add_argument('--out', type=Path, default=REPO / 'local/m1-tutorial-dlc')
     parser.add_argument('--dry-run', action='store_true')
