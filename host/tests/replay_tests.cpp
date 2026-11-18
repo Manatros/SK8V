@@ -503,7 +503,7 @@ int main() {
             fFull.vehicles[v].quat[3] = 1.0f;
         }
         fFull.pedCount = kMaxTrackedPeds;
-        assert(kMaxTrackedPeds == 32);
+        assert(kMaxTrackedPeds == kMaxTrackedPedPoses); // every tracked ped carries a pose
         for (int p = 0; p < kMaxTrackedPeds; ++p) {
             fFull.peds[p].handle = 2000 + p;
             fFull.peds[p].pos[1] = static_cast<float>(p);
@@ -513,9 +513,9 @@ int main() {
         recFull.Reserve(5.0, 60.0, 2);
         recFull.Add(fFull, 0.0);
         assert(recFull.Last().vehicleCount == 48);
-        assert(recFull.Last().pedCount == 32);
+        assert(recFull.Last().pedCount == kMaxTrackedPeds);
         assert(recFull.Last().vehicles[47].handle == 1047);
-        assert(recFull.Last().peds[31].handle == 2031);
+        assert(recFull.Last().peds[kMaxTrackedPeds - 1].handle == 2000 + kMaxTrackedPeds - 1);
 
         // ActorSpan computation & GetActorReplayState test:
         Recording recSpan(10.0);

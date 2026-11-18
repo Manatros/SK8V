@@ -339,6 +339,10 @@ void Present(int ped, const Recording::Sample& s) {
     }
     if (!g_loaded) {
         std::set<int> presentHandles;
+        // The pose hook has 16 slots and a ped keeps its slot until cleared; free the slots of
+        // peds not posed this frame so peds seen later in the 30 s still get one (else they slide).
+        static std::set<std::uintptr_t> s_posedLastFrame;
+        std::set<std::uintptr_t> posedSkeletons;
         auto updateActors = [&](const ActorSample* arrA, int countA, const ActorSample* arrB, int countB, ActorKind kind) {
             for (int i = 0; i < countA; ++i) {
                 const ActorSample& sa = arrA[i];
@@ -402,6 +406,7 @@ void Present(int ped, const Recording::Sample& s) {
                                 s_pedMats[bi] = m;
                             }
                             posehook::SetExtraPedPose(skel.skeleton, reinterpret_cast<const float*>(s_pedMats), nBones);
+                            posedSkeletons.insert(skel.skeleton);
                         }
                     }
                 }
@@ -410,6 +415,10 @@ void Present(int ped, const Recording::Sample& s) {
         if (g_replayVehicles && a.vehicleCount > 0) updateActors(a.vehicles, a.vehicleCount, b.vehicles, b.vehicleCount, ActorKind::Vehicle);
         if (g_replayPeds && a.pedCount > 0) updateActors(a.peds, a.pedCount, b.peds, b.pedCount, ActorKind::Ped);
         if (g_replayObjects && a.objectCount > 0) updateActors(a.objects, a.objectCount, b.objects, b.objectCount, ActorKind::Object);
+        for (std::uintptr_t sk : s_posedLastFrame) {
+            if (!posedSkeletons.count(sk)) posehook::ClearExtraPedPose(sk);
+        }
+        s_posedLastFrame.swap(posedSkeletons);
         for (const auto& kv : g_actorSpans) {
             const int h = kv.first;
             if (presentHandles.count(h) || !Call<BOOL>(DOES_ENTITY_EXIST, h)) continue;
@@ -2205,11 +2214,9 @@ void Record(const SvOutput& o, const float* placed, const float* bones, int coun
             s.vel[0] = vel.x, s.vel[1] = vel.y, s.vel[2] = vel.z;
             s.extra = Call<float>(GET_ENTITY_HEADING, p);
             s.visible = Call<BOOL>(IS_ENTITY_VISIBLE, p) != 0;
-            if (!g_pinnedEntities.count(p) && !Call<BOOL>(IS_ENTITY_A_MISSION_ENTITY, p)) {
-                Call<void>(SET_ENTITY_AS_MISSION_ENTITY, p, TRUE, TRUE);
-                g_pinnedEntities.insert(p);
-            }
-            if (g_pinnedEntities.count(p)) g_pinnedLastSeen[p] = o.tick;
+            // Peds are never pinned as mission entities: script ownership ends their ambient
+            // wandering, so the nearest NPCs stood still in live play (test 2026-11-18 08:41).
+            // A ped that despawns just drops out of the replay (handle + model are checked).
             if (i < kMaxTrackedPedPoses && s.visible) {
                 probe::SkeletonInfo skel{};
                 const char* why = nullptr;

@@ -12,7 +12,7 @@ namespace replay {
 // One presented frame. Bone and board matrices: 16 floats each, GTA world
 // space, RAGE row layout (as posehook::PublishPose takes them).
 static constexpr int kMaxTrackedVehicles = 48;
-static constexpr int kMaxTrackedPeds = 32;
+static constexpr int kMaxTrackedPeds = 12; // = kMaxTrackedPedPoses: a ped without a pose slides
 static constexpr int kMaxTrackedObjects = 32;
 static constexpr int kMaxTrackedPedPoses = 12;
 
