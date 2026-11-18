@@ -29,6 +29,7 @@ pub use tutorial_lessons::{SvTutorialInput, SvTutorialStatus, sv_tutorial_comman
 pub mod live;
 pub mod baked;
 pub mod tiles;
+pub mod floors;
 
 /// Use offline static world tiles when compatible data is available (default on).
 pub static BAKED_WORLD: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);

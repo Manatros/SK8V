@@ -607,9 +607,13 @@ impl Cache {
             *used = self.clock;
             return Some(t.clone());
         }
-        let t = Tile::read(io::BufReader::new(std::fs::File::open(path(dir, c)).ok()?)).ok()?;
+        let mut t = Tile::read(io::BufReader::new(std::fs::File::open(path(dir, c)).ok()?)).ok()?;
         if t.cell != c || t.size != size || !t.source.lines().any(rules_compatible) {
             return None;
+        }
+        // Top floor wins (design 2026-11-18-top-floor-wins): once per decode.
+        if crate::floors::TOP_FLOORS.load(std::sync::atomic::Ordering::Relaxed) {
+            crate::floors::top_floor_wins(&mut t);
         }
         let bytes = t.source.capacity()
             + t.triangles.capacity() * std::mem::size_of::<(Triangle, u32)>()

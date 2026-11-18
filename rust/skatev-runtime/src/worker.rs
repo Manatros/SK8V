@@ -1594,11 +1594,13 @@ fn run(
                         }
                         if verbose() {
                             log(&format!(
-                                "collision streamed around ({:.0}, {:.0}){}: {n} triangles, {r} rails, {}ms after the request",
+                                "collision streamed around ({:.0}, {:.0}){}: {n} triangles, {r} rails, {}ms after the request; top floors so far: {} lower faces cut, {} riser triangles",
                                 centre.x,
                                 centre.y,
                                 if active { "" } else { " while inactive" },
-                                requested_at.elapsed().as_millis()
+                                requested_at.elapsed().as_millis(),
+                                crate::floors::SPLIT_FACES.load(std::sync::atomic::Ordering::Relaxed),
+                                crate::floors::RISERS.load(std::sync::atomic::Ordering::Relaxed)
                             ));
                         }
                     }
