@@ -17,9 +17,35 @@ $material = (& git -C (Join-Path $Root 'upstream/2010-rust-rewrite-mashup') rev-
 foreach ($p in $Patches) { $material += "`n" + $p.Name + ':' + (Get-FileHash $p.FullName -Algorithm SHA256).Hash }
 $key = -join ($hasher.ComputeHash([Text.Encoding]::UTF8.GetBytes($material)) | ForEach-Object { $_.ToString('x2') })
 
-if (-not $Force -and (Test-Path $Stamp) -and ((Get-Content $Stamp -Raw).Trim() -eq $key)) {
-    Write-Host "Skate overlay up to date ($($Patches.Count) patches)"
-    exit 0
+# Hash of the overlay's source text (newlines normalized). The stamp keeps it
+# beside the patch key, so a source edit made in the overlay itself (never
+# captured as a patch) is caught: 2026-11-18, an 11-11 edit to
+# wheel_scale_step sat in every overlay for a week behind a matching stamp and
+# made wheels sink into slopes in every runtime built from it.
+function Get-OverlaySourceHash([string]$Dir) {
+    $h = [Security.Cryptography.SHA256]::Create()
+    $files = @(Get-Item (Join-Path $Dir 'Cargo.toml')) + @(Get-ChildItem (Join-Path $Dir 'crates') -File -Recurse |
+        Where-Object { $_.FullName -notmatch '[\\/]target[\\/]' })
+    $sb = [Text.StringBuilder]::new()
+    foreach ($f in ($files | Sort-Object { $_.FullName.Substring($Dir.Length) } -Culture ([Globalization.CultureInfo]::InvariantCulture))) {
+        $text = [IO.File]::ReadAllText($f.FullName).Replace("`r`n", "`n")
+        $fileHash = -join ($h.ComputeHash([Text.Encoding]::UTF8.GetBytes($text)) | ForEach-Object { $_.ToString('x2') })
+        [void]$sb.Append($f.FullName.Substring($Dir.Length + 1).Replace('\', '/')).Append(':').Append($fileHash).Append("`n")
+    }
+    -join ($h.ComputeHash([Text.Encoding]::UTF8.GetBytes($sb.ToString())) | ForEach-Object { $_.ToString('x2') })
+}
+
+if (-not $Force -and (Test-Path $Stamp)) {
+    $lines = @((Get-Content $Stamp) | ForEach-Object { $_.Trim() })
+    if ($lines.Count -ge 2 -and $lines[0] -eq $key -and $lines[1] -eq (Get-OverlaySourceHash $Dest)) {
+        Write-Host "Skate overlay up to date ($($Patches.Count) patches)"
+        exit 0
+    }
+    # A stamp without a source hash (older script) or with a different one:
+    # rebuild the candidate below and compare; edits outside patches stop it.
+    if ($lines.Count -ge 1 -and $lines[0] -eq $key) {
+        Write-Host "Skate overlay stamp matches the patches; verifying overlay source against them"
+    }
 }
 
 # Build in a sibling first. A failed patch must never destroy the working
@@ -64,5 +90,5 @@ if (Test-Path -LiteralPath $Dest) {
     Write-Host "Previous overlay preserved at $backup"
 }
 Move-Item -LiteralPath $stage -Destination $Dest
-Set-Content $Stamp $key -NoNewline
+Set-Content $Stamp ($key + "`n" + (Get-OverlaySourceHash $Dest)) -NoNewline
 Write-Host "Skate overlay -> $Dest ($($Patches.Count) patches)"

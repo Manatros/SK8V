@@ -1,0 +1,32 @@
+diff --git a/crates/skate-core/src/physics/board_world/tests.rs b/crates/skate-core/src/physics/board_world/tests.rs
+index ed0d2b7..cd97050 100644
+--- a/crates/skate-core/src/physics/board_world/tests.rs
++++ b/crates/skate-core/src/physics/board_world/tests.rs
+@@ -451,6 +451,27 @@ fn step_world(h: f32) -> Vec<WorldTriangle> {
+     w
+ }
+ 
++/// GTAxSkate 2026-11-18: wheels sank about 2.3 cm into every slope of 9 deg
++/// and more after an unpatched overlay edit lowered the lateral gate of
++/// `wheel_scale_step` from 0.5 to 0.15: a slope's own floor normal then
++/// counted as a step lip (the slope just uphill is a "walkable top"), and its
++/// contact was dropped. A plain slope must keep every floor contact.
++#[test]
++fn a_plain_slope_keeps_its_floor_contacts() {
++    for deg in [5f32, 9., 12., 20., 25.] {
++        let (s, c) = deg.to_radians().sin_cos();
++        // A plane rising toward +x at `deg`, 4 m long.
++        let p = |x: f32, z: f32| [x, x * s / c, z];
++        let w = vec![tri([p(-2., -1.), p(-2., 1.), p(2., 1.)]), tri([p(-2., -1.), p(2., 1.), p(2., -1.)])];
++        let n = [-s, c, 0.];
++        for body in [BodyId::RightFrontWheel, BodyId::LeftBackWheel, BodyId::FrontTruck, BodyId::Deck] {
++            let b = CollisionBody::Board(body);
++            let board = [n[0] * RETAIL_WHEEL_RADIUS, n[1] * RETAIL_WHEEL_RADIUS, 0.];
++            assert!(!wheel_step(&w, b, board, [0., 0., 0.], n), "{deg} deg slope floor contact dropped for {body:?}");
++        }
++    }
++}
++
+ #[test]
+ fn wheels_roll_over_steps_below_their_axle_but_not_curbs() {
+     let wheel = CollisionBody::Board(BodyId::RightFrontWheel);
