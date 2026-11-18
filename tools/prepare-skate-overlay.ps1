@@ -66,7 +66,8 @@ foreach ($p in $Patches) {
 if (Test-Path -LiteralPath $Dest) {
     $uncaptured = @()
     # Only compare source: Cargo may also have written a lock or target tree.
-    foreach ($file in @(Get-Item (Join-Path $Dest 'Cargo.toml')) + @(Get-ChildItem (Join-Path $Dest 'crates') -File -Recurse)) {
+    foreach ($file in @(Get-Item (Join-Path $Dest 'Cargo.toml')) + @(Get-ChildItem (Join-Path $Dest 'crates') -File -Recurse |
+            Where-Object { $_.FullName -notmatch '[\\/]target[\\/]' })) {
         $relative = $file.FullName.Substring($Dest.Length + 1)
         $candidate = Join-Path $stage $relative
         # Git may preserve CRLF on context and write LF for inserted lines.

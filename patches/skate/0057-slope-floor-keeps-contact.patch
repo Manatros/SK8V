@@ -1,8 +1,8 @@
 diff --git a/crates/skate-core/src/physics/board_world/tests.rs b/crates/skate-core/src/physics/board_world/tests.rs
-index ed0d2b7..cd97050 100644
+index ed0d2b7..544fe3b 100644
 --- a/crates/skate-core/src/physics/board_world/tests.rs
 +++ b/crates/skate-core/src/physics/board_world/tests.rs
-@@ -451,6 +451,27 @@ fn step_world(h: f32) -> Vec<WorldTriangle> {
+@@ -451,6 +451,29 @@ fn step_world(h: f32) -> Vec<WorldTriangle> {
      w
  }
  
@@ -19,10 +19,12 @@ index ed0d2b7..cd97050 100644
 +        let p = |x: f32, z: f32| [x, x * s / c, z];
 +        let w = vec![tri([p(-2., -1.), p(-2., 1.), p(2., 1.)]), tri([p(-2., -1.), p(2., 1.), p(2., -1.)])];
 +        let n = [-s, c, 0.];
++        // The board point is the body's touching point (here on the slope),
++        // as Skate reports it; the wheels are the case the gate guards.
++        // Trucks and deck are kept by their own normal test and stay covered.
 +        for body in [BodyId::RightFrontWheel, BodyId::LeftBackWheel, BodyId::FrontTruck, BodyId::Deck] {
 +            let b = CollisionBody::Board(body);
-+            let board = [n[0] * RETAIL_WHEEL_RADIUS, n[1] * RETAIL_WHEEL_RADIUS, 0.];
-+            assert!(!wheel_step(&w, b, board, [0., 0., 0.], n), "{deg} deg slope floor contact dropped for {body:?}");
++            assert!(!wheel_step(&w, b, [0., 0., 0.], [0., 0., 0.], n), "{deg} deg slope floor contact dropped for {body:?}");
 +        }
 +    }
 +}
